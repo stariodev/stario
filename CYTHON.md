@@ -26,6 +26,10 @@ cd examples/hello-world && uv run python -m main   # serve the smallest example
 After editing a `.pyx` / `.pxd` / `.pxi` / `vendor/*.c`, rebuild in place
 with `uv run python setup.py build_ext --inplace`.
 
+The build leaves out debug info (`-g0`, and `-s` on Linux), so a wheel
+stays small. To debug the extensions with `gdb` or `perf`, rebuild with
+`STARIO_DEBUG_BUILD=1 uv run python setup.py build_ext --inplace`.
+
 Direct TLS: `STARIO_SSL_CERTFILE` / `STARIO_SSL_KEYFILE` (or
 `ServerConfig(ssl=…)`). ALPN advertises `h2` then `http/1.1`.
 `STARIO_HOST` and `STARIO_PORT` set the bind address.
