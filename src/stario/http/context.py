@@ -179,7 +179,11 @@ class _Alive[T]:
 
     async def __aenter__(self) -> _Alive[T]:
         self._task = asyncio.current_task()
-        self._futures = (self.c.disconnect, self.c.app.shutdown)
+        # The loop's own shutdown future, not the `app.shutdown` shield: a
+        # done-callback cannot cancel it, and each shield would leave a
+        # callback on that future until shutdown (one per scope).
+        shutdown = self.c.app._future_for(asyncio.get_running_loop())
+        self._futures = (self.c.disconnect, shutdown)
         if self._task is not None:
             self._cancelling = self._task.cancelling()
         self._armed = True

@@ -347,6 +347,19 @@ class TestWriterRaw:
         await asyncio.wait_for(stopped.wait(), timeout=0.1)
         await task
 
+    async def test_context_alive_leaves_no_callback_on_app_shutdown(self):
+        """Each scope reads a new `app.shutdown` shield and must unhook it."""
+        loop = asyncio.get_running_loop()
+        context = _make_context(loop=loop)
+        shared = context.app._future_for(loop)
+        before = len(shared._callbacks or ())
+
+        for _ in range(100):
+            async with context.alive():
+                await asyncio.sleep(0)
+
+        assert len(shared._callbacks or ()) == before
+
     async def test_context_closing_combines_disconnect_and_shutdown(self):
         loop = asyncio.get_running_loop()
         context = _make_context(loop=loop)

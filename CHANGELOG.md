@@ -6,6 +6,21 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ## Unreleased
 
+## 5.3.3 - 2026-11-04
+
+### Fixed
+
+- `c.alive()` no longer leaves callbacks on the app's shutdown future. Each
+  scope read `app.shutdown`, which is a new `asyncio.shield`, and a shield
+  that stays pending keeps its callbacks on the shared future until
+  shutdown: two for each request on Python 3.14. A server that streamed
+  many SSE requests grew in memory for its whole life. `c.alive()` now
+  hooks the loop's shutdown future directly; a done-callback cannot cancel
+  it.
+- The `App.shutdown` docstring says that each access returns a new shield,
+  and that a loop which waits on each pass reads `app.shutdown` once,
+  before the loop.
+
 ## 5.3.2 - 2026-11-04
 
 ### Changed

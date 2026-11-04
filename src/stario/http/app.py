@@ -107,7 +107,19 @@ class App(Router):
 
     @property
     def shutdown(self) -> asyncio.Future[None]:
-        """This loop's shutdown Future — await it; `signal_shutdown()` completes all loops."""
+        """This loop's shutdown Future — await it; `signal_shutdown()` completes all loops.
+
+        Each access returns a new shield. A pending shield keeps one callback
+        on the loop's shared future until shutdown, so a loop that waits on
+        each pass reads `app.shutdown` once, before the loop:
+
+        ```python
+        shutdown = app.shutdown
+        while not app.shutting_down:
+            await work()
+            await asyncio.wait({shutdown}, timeout=interval)
+        ```
+        """
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError as exc:
