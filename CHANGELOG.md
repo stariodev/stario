@@ -6,6 +6,24 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ## Unreleased
 
+## 5.3.2 - 2026-11-04
+
+### Changed
+
+- The `server.shutdown` span names each task that the drain cancels. Each
+  cancel is a `server.shutdown.task_cancelled` event with `task.name`: the
+  name given to `create_task`, else the coroutine's `__qualname__`. A stuck
+  request handler shows the handler's own name. `create_task` and the
+  request path do not change; the name is read only at cancel time.
+- With `STARIO_THREADS>1`, each worker thread hands its cancelled tasks to
+  thread 0. Thread 0 records them on `server.shutdown` with `server.thread`,
+  and `server.shutdown.cancelled_tasks` counts every thread.
+- `TestClient` exit opens `server.shutdown` before the drain, the same order
+  as `Server`. A bootstrap run uses its own shutdown span; a built `App`
+  gets a new `server.shutdown` span. Tests can assert on the cancel events
+  with `client.tracer`. With `owns_shutdown=False` there is no span.
+- `TestTracer.has_open_spans()` takes `besides=` to skip one span id.
+
 ## 5.3.1 - 2026-11-04
 
 ### Fixed
