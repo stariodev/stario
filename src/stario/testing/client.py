@@ -12,15 +12,18 @@ from email.utils import format_datetime
 from types import TracebackType
 from typing import Any, Self
 from urllib.parse import urljoin
+from uuid import UUID
 
 from stario.http.app import App
-from stario.http.bootstrap import Bootstrap
+from stario.http.bootstrap import AppRun, Bootstrap
 from stario.http.compression import CompressionConfig
 from stario.http.config import DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT, RequestPolicy
+from stario.http.drain import cancel_pending, record_cancelled
 from stario.http.headers import Headers
+from stario.telemetry.core import Span
 from stario.testing.cookies import merge_cookie_jar
 from stario.testing.encode import decode_content_encoding, parse_response_cookies
-from stario.testing.load import aload_app
+from stario.testing.load import aload_run
 from stario.testing.models import ClientRequest
 from stario.testing.request import merge_headers, prepare_request
 from stario.testing.response import TestResponse, TestStreamResponse
@@ -66,11 +69,12 @@ class TestClient:
     `timeout` / `request_timeout` cap one exchange. Past it the client hangs
     up, cancels that handler, and raises `TimeoutError`.
 
-    Exit — open connections close, the app's shutdown is signaled (so
-    `app.shutting_down` work loops wake), and `drain_tasks` runs up to
-    `shutdown_timeout`; tasks still pending past it are cancelled, like the
-    server's graceful shutdown. Then bootstrap teardown (if any) matches
-    normal app shutdown.
+    Exit — open connections close, the `server.shutdown` span opens, the
+    app's shutdown is signaled (so `app.shutting_down` work loops wake), and
+    `drain_tasks` runs up to `shutdown_timeout`; tasks still pending past it
+    are cancelled, like the server's graceful shutdown. Each cancel is a
+    `server.shutdown.task_cancelled` event with the task name. Then bootstrap
+    teardown (if any) matches normal app shutdown.
     """
 
     __test__ = False
@@ -143,7 +147,8 @@ class TestClient:
         # Date tick would sweep it; here timeouts are off, so it only counts.
         self._connections = Connections(server_driven=True)
         self._date_box = [b""]
-        self._async_app_cm: AbstractAsyncContextManager[App] | None = None
+        self._async_app_cm: AbstractAsyncContextManager[AppRun] | None = None
+        self._run: AppRun | None = None
         self._entered = False
 
     async def __aenter__(self) -> Self:
@@ -152,10 +157,11 @@ class TestClient:
         self.tracer.__enter__()
         try:
             if self._bootstrap is not None:
-                self._async_app_cm = aload_app(
+                self._async_app_cm = aload_run(
                     self._bootstrap, app_factory=self._app_factory, tracer=self.tracer
                 )
-                self._app = await self._async_app_cm.__aenter__()
+                self._run = await self._async_app_cm.__aenter__()
+                self._app = self._run.app
             now = format_datetime(datetime.now(UTC), usegmt=True).encode("ascii")
             self._date_box[0] = b"date: " + now + b"\r\n"
             self._entered = True
@@ -179,16 +185,45 @@ class TestClient:
                 # Signal before draining so `while not app.shutting_down`
                 # loops exit on their own. Bootstrap teardown signals again —
                 # signal_shutdown() is idempotent.
-                if self._async_app_cm is not None or self._owns_shutdown:
-                    self._app.signal_shutdown()
-                await self.drain_tasks(timeout=self._shutdown_timeout)
+                span, owned = self._begin_shutdown(
+                    self._app, failed=exc_type is not None
+                )
+                cancelled = await self._drain(
+                    self._shutdown_timeout, open_span=None if span is None else span.id
+                )
+                if span is not None:
+                    span.attr("server.shutdown.cancelled_tasks", len(cancelled))
+                    record_cancelled(span, cancelled)
+                    if owned:
+                        span.end()
             if self._async_app_cm is not None:
                 await self._async_app_cm.__aexit__(exc_type, exc_val, exc_tb)
                 self._async_app_cm = None
+                self._run = None
                 self._app = None
         finally:
             self._entered = False
             self.tracer.__exit__(exc_type, exc_val, exc_tb)
+
+    def _begin_shutdown(self, app: App, *, failed: bool) -> tuple[Span | None, bool]:
+        """Signal shutdown and open `server.shutdown`, like `Server` before its drain.
+
+        Returns the span and whether this client must end it. A bootstrap run
+        owns its span; a built `App` gets one here. With `owns_shutdown=False`
+        the outer runner signals and records, so there is no span.
+        """
+        if self._run is not None:
+            self._run.begin_shutdown("runtime_failure" if failed else "expected_stop")
+            return self._run.span, False
+        if not self._owns_shutdown:
+            return None, False
+        app.signal_shutdown()
+        span = self.tracer.create("server.shutdown")
+        span.attr(
+            "server.shutdown.trigger", "runtime_failure" if failed else "expected_stop"
+        )
+        span.start()
+        return span, True
 
     async def drain_tasks(self, timeout: float | None = None) -> None:
         """Wait until `app.tasks` is quiet and `tracer` has no open spans.
@@ -199,6 +234,16 @@ class TestClient:
         pending past it are cancelled, like the server's graceful shutdown.
         `None` waits forever. Unsafe to call from work scheduled via
         `app.create_task` (can deadlock).
+        """
+        await self._drain(timeout)
+
+    async def _drain(
+        self, timeout: float | None, *, open_span: UUID | None = None
+    ) -> list[str]:
+        """`drain_tasks`, returning the names of the tasks it cancelled.
+
+        `open_span` is the `server.shutdown` span the exit holds open while it
+        drains; the wait for open spans skips it.
         """
         if not self._entered:
             raise RuntimeError(
@@ -211,6 +256,7 @@ class TestClient:
             )
         loop = asyncio.get_running_loop()
         deadline = None if timeout is None else loop.time() + max(timeout, 0.0)
+        cancelled: list[str] = []
         while True:
             # Poll the set so tasks scheduled while draining still count.
             while True:
@@ -219,9 +265,7 @@ class TestClient:
                     break
                 remaining = None if deadline is None else deadline - loop.time()
                 if remaining is not None and remaining <= 0:
-                    for task in pending:
-                        task.cancel()
-                    await asyncio.gather(*pending, return_exceptions=True)
+                    cancelled += await cancel_pending(pending)
                     break
                 wait_timeout = 0.05 if remaining is None else min(0.05, remaining)
                 await asyncio.wait(
@@ -229,8 +273,8 @@ class TestClient:
                     timeout=wait_timeout,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-            if not self.tracer.has_open_spans():
-                return
+            if not self.tracer.has_open_spans(besides=open_span):
+                return cancelled
             await asyncio.sleep(0)
 
     @property

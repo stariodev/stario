@@ -24,6 +24,7 @@ from typing import Any, Literal
 
 from stario._env import env_bool
 from stario.exceptions import StarioError
+from stario.http.drain import cancel_pending, record_cancelled
 from stario.telemetry.core import Span, Tracer
 from stario.telemetry.env import tracer_from_env
 from stario.telemetry.spans import ProxySpan
@@ -263,6 +264,7 @@ class _LoopWorker:
         self.cpu: int | None = None
         self.ready = threading.Event()
         self.error: BaseException | None = None
+        self.cancelled: list[str] = []
         self.thread = threading.Thread(
             target=self._run,
             name=f"stario-worker-{index}",
@@ -457,7 +459,7 @@ class Server:
         app: App,
         connections: Connections,
         span: ProxySpan | None = None,
-    ) -> None:
+    ) -> list[str]:
         """Stop accepting, drain in-flight work, then tear down transports and tasks.
 
         Shutdown proceeds in ordered phases:
@@ -467,6 +469,8 @@ class Server:
           2. Force-close loop — cap `min(timeout, _FORCE_CLOSE_CAP)` for stuck transports.
 
         Total wall time can exceed the config value by up to `_FORCE_CLOSE_CAP` seconds.
+        Returns the names of the cancelled `app.tasks`; a worker thread has no
+        span of its own and hands them to thread 0.
         """
         loop = asyncio.get_running_loop()
 
@@ -513,7 +517,7 @@ class Server:
             await asyncio.sleep(0)
 
         # --- phase 3: cancel orphaned app.create_task work ------------------
-        cancelled_tasks = await self._cancel_pending_tasks(app.tasks)
+        cancelled = await cancel_pending(app.tasks)
 
         # Protocols with transport=None never leave the set; count for telemetry.
         stale_connections = len(connections)
@@ -527,12 +531,14 @@ class Server:
                     "server.shutdown.force_closed": force_closed,
                     "server.shutdown.aborted": aborted,
                     "server.shutdown.stale_connections": stale_connections,
-                    "server.shutdown.cancelled_tasks": cancelled_tasks,
+                    "server.shutdown.cancelled_tasks": len(cancelled),
                 }
             )
+            record_cancelled(span, cancelled)
             span.event("server.shutdown.closed")
 
         await server.wait_closed()
+        return cancelled
 
     async def _wait_for_managed_work_to_drain(
         self,
@@ -577,14 +583,6 @@ class Server:
 
     def _pending_tasks(self, tasks: set[asyncio.Task[Any]]) -> list[asyncio.Task[Any]]:
         return [task for task in tasks if not task.done()]
-
-    async def _cancel_pending_tasks(self, tasks: set[asyncio.Task[Any]]) -> int:
-        pending = self._pending_tasks(tasks)
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        return len(pending)
 
     def _effective_threads(self) -> int:
         """`STARIO_THREADS` if SO_REUSEPORT can share the listen address, else 1."""
@@ -875,7 +873,9 @@ class Server:
                 try:
                     await worker.app.shutdown
                 finally:
-                    await self._drain_listener(listener, worker.app, worker.connections)
+                    worker.cancelled = await self._drain_listener(
+                        listener, worker.app, worker.connections
+                    )
         finally:
             if sock is not None:
                 sock.close()
@@ -921,6 +921,7 @@ class Server:
         join_timeout = (
             max(self.config.graceful_shutdown_timeout, 0.0) + _FORCE_CLOSE_CAP + 1.0
         )
+        cancelled: list[str] = []
         try:
             async with self._date_tick(self._date_box, connections):
                 listener = await self._create_listener(
@@ -954,11 +955,24 @@ class Server:
                     else:
                         run.begin_shutdown("expected_stop")
                     finally:
-                        await self._drain_listener(listener, app, connections, run.span)
+                        cancelled = await self._drain_listener(
+                            listener, app, connections, run.span
+                        )
                 finally:
                     app.signal_shutdown()
                     for worker in extras:
                         await asyncio.to_thread(worker.join, join_timeout)
+                    # Workers drain on their own loops; thread 0 owns the span.
+                    if any(worker.cancelled for worker in extras):
+                        for worker in extras:
+                            record_cancelled(
+                                span, worker.cancelled, {"server.thread": worker.index}
+                            )
+                        span.attr(
+                            "server.shutdown.cancelled_tasks",
+                            len(cancelled)
+                            + sum(len(worker.cancelled) for worker in extras),
+                        )
                     errors = [
                         worker.error for worker in extras if worker.error is not None
                     ]

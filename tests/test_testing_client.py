@@ -183,6 +183,58 @@ async def test_exit_cancels_tasks_past_shutdown_timeout() -> None:
     assert cancelled.is_set()
 
 
+async def deaf_loop() -> None:
+    while True:
+        await asyncio.sleep(3600)
+
+
+def cancelled_names(client: TestClient) -> list[str]:
+    shutdown = client.tracer.find_span("server.shutdown")
+    assert shutdown is not None
+    events = client.tracer.get_events(
+        shutdown.id, name="server.shutdown.task_cancelled"
+    )
+    assert shutdown.attributes["server.shutdown.cancelled_tasks"] == len(events)
+    return sorted(e.attributes["task.name"] for e in events)
+
+
+async def test_exit_names_cancelled_tasks_on_bootstrap_shutdown_span() -> None:
+    """The drain runs inside `server.shutdown`, so each cancel is an event there."""
+
+    async def bootstrap(app: App, span):
+        app.create_task(deaf_loop())
+        app.create_task(deaf_loop(), name="ticker")
+        yield
+
+    async with asyncio.timeout(5):
+        async with TestClient(bootstrap, shutdown_timeout=0.05) as client:
+            pass
+    assert cancelled_names(client) == ["deaf_loop", "ticker"]
+    shutdown = client.tracer.find_span("server.shutdown")
+    assert shutdown is not None
+    assert shutdown.attributes["server.shutdown.trigger"] == "expected_stop"
+
+
+async def test_exit_opens_shutdown_span_for_built_app() -> None:
+    app = App()
+    async with asyncio.timeout(5):
+        async with TestClient(app, shutdown_timeout=0.05) as client:
+            app.create_task(deaf_loop())
+    assert cancelled_names(client) == ["deaf_loop"]
+
+
+async def test_exit_records_no_cancel_when_loops_stop_in_time() -> None:
+    async def polite_loop(app: App) -> None:
+        while not app.shutting_down:
+            await asyncio.wait({app.shutdown}, timeout=3600)
+
+    app = App()
+    async with asyncio.timeout(1):
+        async with TestClient(app) as client:
+            app.create_task(polite_loop(app))
+    assert cancelled_names(client) == []
+
+
 async def test_buffered_call_returns_after_the_handler_finished() -> None:
     """Post-response work in the handler is done; app.create_task work is not."""
     order: list[str] = []

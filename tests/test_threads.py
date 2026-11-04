@@ -460,3 +460,67 @@ def test_pin_threads_config_from_env(monkeypatch) -> None:
     assert ServerConfig().pin_threads is False
     monkeypatch.setenv("STARIO_PIN_THREADS", "1")
     assert server_config_from_env().pin_threads is True
+
+
+@pytest.mark.asyncio
+async def test_threaded_shutdown_names_tasks_from_every_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Workers drain on their own loops; thread 0 records their cancels."""
+    if not reuseport_supported(unix=False):
+        pytest.skip("SO_REUSEPORT is required for STARIO_THREADS>1")
+    monkeypatch.setenv("STARIO_THREADS_ALLOW_GIL", "1")
+    output = StringIO()
+    apps: list[App] = []
+    port = _free_tcp_port()
+    requests = 6
+
+    async def deaf_loop() -> None:
+        while True:
+            await asyncio.sleep(3600)
+
+    async def serve_bootstrap(app: App, span: Any):
+        apps.append(app)
+
+        async def start(_c: Any, w: Any) -> None:
+            app.create_task(deaf_loop(), name="deaf")
+            w.text("ok")
+
+        app.add(Route("GET", "/"), start)
+        yield
+
+    server = Server(
+        serve_bootstrap,
+        JsonTracer(output),
+        config=ServerConfig(
+            host="127.0.0.1",
+            port=port,
+            graceful_shutdown_timeout=0.05,
+            threads=2,
+        ),
+    )
+
+    thread, errors = _run_server(server)
+    try:
+        for _ in range(requests):
+            reader, writer = await _connect_tcp("127.0.0.1", port)
+            writer.write(b"GET / HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+            await writer.drain()
+            await _read_http_response(reader)
+            writer.close()
+    finally:
+        if apps:
+            apps[0].signal_shutdown()
+        thread.join(5.0)
+        assert errors == []
+
+    spans = [json.loads(line) for line in output.getvalue().splitlines()]
+    shutdown = next(s for s in spans if s["name"] == "server.shutdown")
+    events = [
+        e for e in shutdown["events"] if e["name"] == "server.shutdown.task_cancelled"
+    ]
+    assert shutdown["attributes"]["server.shutdown.cancelled_tasks"] == requests
+    assert len(events) == requests
+    assert {e["attributes"]["task.name"] for e in events} == {"deaf"}
+    workers = [e for e in events if "server.thread" in e["attributes"]]
+    assert all(e["attributes"]["server.thread"] == 1 for e in workers)

@@ -211,10 +211,15 @@ class TestTracer:
             return True
         return span.attributes[key] == value
 
-    def has_open_spans(self) -> bool:
-        """`True` while any span created through this tracer has not been ended."""
+    def has_open_spans(self, *, besides: UUID | None = None) -> bool:
+        """`True` while any span created through this tracer has not been ended.
 
-        return bool(self._open)
+        `besides` skips one span, such as the open `server.shutdown` span.
+        """
+
+        if besides is None:
+            return bool(self._open)
+        return any(span_id != besides for span_id in self._open)
 
     def finished_spans(self) -> tuple[TelemetrySpan, ...]:
         """Finished spans in start-time order."""

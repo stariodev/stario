@@ -370,6 +370,57 @@ class TestServerRunLifecycle:
         assert shutdown_span["status"] == "ok"
         assert shutdown_span["attributes"]["server.shutdown.urgent"] is True
         assert shutdown_span["attributes"]["server.shutdown.cancelled_tasks"] == 1
+        (event,) = (
+            e
+            for e in shutdown_span["events"]
+            if e["name"] == "server.shutdown.task_cancelled"
+        )
+        assert event["attributes"]["task.name"].endswith("<locals>.slow")
+
+    async def test_shutdown_names_each_cancelled_task(self, short_socket_path) -> None:
+        """A loop that ignores shutdown shows up by name on the shutdown span."""
+        socket_path = short_socket_path
+        output = StringIO()
+        tracer = JsonTracer(output)
+        apps: list[App] = []
+
+        async def deaf_loop() -> None:
+            while True:
+                await asyncio.sleep(60)
+
+        async def deaf_bootstrap(app: App, span: Any):
+            apps.append(app)
+            app.create_task(deaf_loop())
+            app.create_task(deaf_loop(), name="ticker")
+            yield
+
+        server = Server(
+            deaf_bootstrap,
+            tracer,
+            config=ServerConfig(
+                unix_socket=socket_path, graceful_shutdown_timeout=0.05
+            ),
+        )
+
+        run_task = asyncio.create_task(_serve(server))
+        _reader, writer = await _connect_with_retry(socket_path)
+        writer.close()
+        apps[0].signal_shutdown()
+        async with asyncio.timeout(2.0):
+            await run_task
+
+        spans = [json.loads(line) for line in output.getvalue().splitlines()]
+        shutdown_span = next(s for s in spans if s["name"] == "server.shutdown")
+        assert shutdown_span["attributes"]["server.shutdown.cancelled_tasks"] == 2
+        names = sorted(
+            e["attributes"]["task.name"]
+            for e in shutdown_span["events"]
+            if e["name"] == "server.shutdown.task_cancelled"
+        )
+        assert names == [
+            "TestServerRunLifecycle.test_shutdown_names_each_cancelled_task.<locals>.deaf_loop",
+            "ticker",
+        ]
 
     async def test_shutdown_aborts_write_blocked_transport(
         self, short_socket_path
