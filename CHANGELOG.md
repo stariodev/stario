@@ -12,6 +12,8 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
   and on Linux they link with `-s`. The cp314 manylinux aarch64 wheel goes
   from 5.1 MB to 2.0 MB, and the `stario_cython` modules go from 14.3 MB
   to 2.3 MB on disk. The source and the code that runs do not change.
+- `STARIO_DEBUG_BUILD=1` builds the extensions with debug info and symbols,
+  for `gdb` or `perf`. A source build without it also leaves them out.
 
 ## 5.3.3 - 2026-11-04
 

@@ -154,9 +154,11 @@ class native_build_ext(build_ext):
 
 
 # -g0 overrides the -g that Python's own CFLAGS add: a wheel ships no debug info.
-base_args = ["-O3", "-fno-strict-aliasing", "-g0"]
+# STARIO_DEBUG_BUILD=1 keeps debug info and symbols for gdb or perf.
+debug_build = os.environ.get("STARIO_DEBUG_BUILD") == "1"
+base_args = ["-O3", "-fno-strict-aliasing", "-g" if debug_build else "-g0"]
 # The linker drops the static symbol table too; Python finds PyInit_* in .dynsym.
-strip_args = ["-s"] if sys.platform.startswith("linux") else []
+strip_args = ["-s"] if sys.platform.startswith("linux") and not debug_build else []
 llhttp_sse = ["-msse4.2"] if platform.machine().lower() in {"x86_64", "amd64"} else []
 include_dirs = ["vendor", "vendor/llhttp/include", "src"]
 
