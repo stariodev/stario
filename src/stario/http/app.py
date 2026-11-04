@@ -107,7 +107,22 @@ class App(Router):
 
     @property
     def shutdown(self) -> asyncio.Future[None]:
-        """This loop's shutdown Future — await it; `signal_shutdown()` completes all loops."""
+        """This loop's shutdown Future — await it; `signal_shutdown()` completes all loops.
+
+        Each access returns a new Future linked to the loop's shared one.
+        Cancelling it (a cancelled waiter, `asyncio.wait_for` at its timeout)
+        leaves the shared future alone and unhooks the link. A link that
+        stays pending keeps one callback on the shared future until shutdown,
+        so a loop that waits on each pass reads `app.shutdown` once, before
+        the loop:
+
+        ```python
+        shutdown = app.shutdown
+        while not app.shutting_down:
+            await work()
+            await asyncio.wait({shutdown}, timeout=interval)
+        ```
+        """
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError as exc:
@@ -115,8 +130,20 @@ class App(Router):
                 "app.shutdown requires a running event loop",
                 help_text="Await app.shutdown from async code on the loop that serves requests.",
             ) from exc
-        # Shield: a cancelled waiter must not cancel the loop's shared future.
-        return asyncio.shield(self._future_for(loop))
+        shared = self._future_for(loop)
+        if shared.done():
+            return shared
+        # Not asyncio.shield: on 3.14 a shield leaves a callback on the shared
+        # future even after it is cancelled. This link unhooks itself when it
+        # completes or is cancelled.
+        link: asyncio.Future[None] = loop.create_future()
+
+        def complete(_: asyncio.Future[None]) -> None:
+            _finish(link)
+
+        shared.add_done_callback(complete)
+        link.add_done_callback(lambda _: shared.remove_done_callback(complete))
+        return link
 
     @property
     def shutting_down(self) -> bool:
