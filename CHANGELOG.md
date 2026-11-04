@@ -6,6 +6,8 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ## Unreleased
 
+## 5.3.4 - 2026-11-04
+
 ### Changed
 
 - The wheels ship without debug info. The extensions compile with `-g0`,
