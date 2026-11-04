@@ -23,7 +23,7 @@ from stario.http.context import (
     Context,
     Handler,
     Match,
-    _Alive,  # pyright: ignore[reportPrivateUsage]
+    _Alive,
 )
 from stario.http.headers import Headers
 from stario.http.request import Request

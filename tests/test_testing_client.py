@@ -212,7 +212,7 @@ def test_response_reader_frames_chunked_and_length_bodies() -> None:
     chunked.feed(b"2\r\nde\r\n0\r\n\r\n")
     assert chunked.status_code == 200
     assert chunked.done
-    assert b"".join(chunked._chunks) == b"abcde"  # pyright: ignore[reportPrivateUsage]
+    assert b"".join(chunked._chunks) == b"abcde"
 
     sized = ResponseReader(head_request=False)
     sized.feed(b"HTTP/1.1 200 OK\r\ncontent-length: 4\r\n\r\nab")

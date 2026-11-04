@@ -1,6 +1,6 @@
 [project]
 name = "stario"
-version = "5.3.0"
+version = "5.3.1"
 description = "Craft realtime hypermedia apps that are a joy to write and ship."
 readme = "README.md"
 license = "MIT"
@@ -78,7 +78,7 @@ test = [
 dev = [
     { include-group = "test" },
     "cython>=3.1,<4",
-    "pyright>=1.1.403",
+    "pyrefly>=1.4",
     "ruff>=0.12.8",
     "setuptools>=77",
 ]
@@ -91,22 +91,11 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
-[tool.pyright]
-pythonVersion = "3.12"
-typeCheckingMode = "basic"
-reportPrivateUsage = false
-reportMissingTypeStubs = false
-strict = ["src"]
-include = [
-    "src",
-    "tests",
-    "examples",
-]
-exclude = ["benchmarks", "examples/jinja", "**/.venv", "**/__pycache__"]
-
-[[tool.pyright.executionEnvironments]]
-root = "examples/chat-room"
-extraPaths = ["examples/chat-room"]
+[tool.pyrefly]
+python-version = "3.12"
+project-includes = ["src", "tests", "examples"]
+project-excludes = ["benchmarks", "examples/jinja", "**/.venv", "**/__pycache__"]
+search-path = [".", "src", "examples/chat-room"]
 
 [tool.ruff]
 target-version = "py312"
@@ -125,7 +114,7 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 allowed-confusables = ["×"]
 
 [tool.ruff.lint.isort]
-# First-party roots aligned with pyright `include`. Multi-file examples use an
+# First-party roots aligned with pyrefly `project-includes`. Multi-file examples use an
 # `app` package (see examples/chat-room); add other top-level example package
 # names here when a new layout needs it.
 known-first-party = ["stario", "stario_cython", "tests", "app"]

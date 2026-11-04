@@ -180,9 +180,9 @@ def test_stdlib_codec_construction_warns() -> None:
 
 def test_set_codec_rejects_non_callables() -> None:
     with pytest.raises(TypeError):
-        stario_json.set_codec(lambda _v: b"")  # pyright: ignore[reportArgumentType]
+        stario_json.set_codec(lambda _v: b"")  # pyrefly: ignore[bad-argument-type]
     with pytest.raises(TypeError):
-        stario_json.set_codec(1, 2)  # pyright: ignore[reportArgumentType]
+        stario_json.set_codec(1, 2)  # pyrefly: ignore[bad-argument-type]
 
 
 def test_dumps_json_falls_back_to_stdlib_without_a_warning() -> None:

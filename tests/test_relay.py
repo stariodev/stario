@@ -586,7 +586,7 @@ class TestRelayThreadSafety:
     async def test_publish_fans_out_to_subscribers_on_multiple_loops(self) -> None:
         relay = Relay[str]()
         ready = threading.Event()
-        results = queue.Queue()
+        results: queue.Queue[tuple[str, str] | BaseException] = queue.Queue()
 
         def run_background_subscriber() -> None:
             loop = asyncio.new_event_loop()
