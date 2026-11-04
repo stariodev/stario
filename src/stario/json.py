@@ -135,7 +135,7 @@ def _stdlib_default_encode(value: Any, default: JsonDefault, /) -> str:
 
 _encode: JsonEncode = _stdlib_encode
 _decode: JsonDecode = json_module.loads
-_legacy: JsonCodec | None = None  # pyright: ignore[reportDeprecated]
+_legacy: JsonCodec | None = None
 
 
 @overload
@@ -144,7 +144,7 @@ def set_codec(encode: JsonEncode, decode: JsonDecode, /) -> None: ...
 
 @overload
 @deprecated("Pass two functions instead: set_codec(orjson.dumps, orjson.loads)")
-def set_codec(codec: JsonCodec, /) -> None: ...  # pyright: ignore[reportDeprecated]
+def set_codec(codec: JsonCodec, /) -> None: ...
 
 
 def set_codec(encode: object, decode: object = None, /) -> None:
@@ -175,7 +175,7 @@ def set_codec(encode: object, decode: object = None, /) -> None:
             DeprecationWarning,
             stacklevel=2,
         )
-        codec = cast(JsonCodec, encode)  # pyright: ignore[reportDeprecated]
+        codec = cast(JsonCodec, encode)
         _encode = codec.dumps_bytes
         _decode = codec.loads
         _legacy = codec

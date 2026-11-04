@@ -36,7 +36,7 @@ class HoldingTransport(RecordingTransport):
 
     def write(self, data: bytes | bytearray | memoryview) -> None:
         assert not self._closing, "write after transport close"
-        self.writes.append(data)  # pyright: ignore[reportArgumentType]
+        self.writes.append(data)  # pyrefly: ignore[bad-argument-type]
 
 
 def _attach(app: App | None = None, **kwargs):

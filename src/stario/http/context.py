@@ -23,6 +23,9 @@ class Match:
 
     __slots__ = ("params", "pattern")
 
+    pattern: str
+    params: Mapping[str, str]
+
     def __init__(
         self,
         pattern: str,

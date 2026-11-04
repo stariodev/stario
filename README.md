@@ -219,7 +219,7 @@ From `stario/`:
 uv sync
 uv run ruff check .
 uv run ruff format --check .
-uv run pyright
+uv run pyrefly check
 uv run pytest
 ```
 

@@ -41,5 +41,5 @@ jobs:
           uv run python -c "import sys, stario_cython.exchange, stario_cython.protocol; assert not sys._is_gil_enabled(), 'an extension re-enabled the GIL'"
       - run: uv run ruff check src tests setup.py
       - run: uv run ruff format --check src tests setup.py
-      - run: uv run pyright
+      - run: uv run pyrefly check
       - run: uv run pytest

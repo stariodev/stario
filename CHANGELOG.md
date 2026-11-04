@@ -6,6 +6,19 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ## Unreleased
 
+## 5.3.1 - 2026-11-04
+
+### Fixed
+
+- `Match.pattern` and `Match.params` have type annotations. Before, a
+  type checker saw `c.match.params` as unknown, and pyrefly and ty
+  reported it as a missing attribute. The `stats` slot of a static
+  mount has an annotation too.
+
+### Changed
+
+- Type checks run with pyrefly instead of pyright.
+
 ## 5.3.0 - 2026-10-29
 
 ### Added

@@ -211,7 +211,7 @@ class SqliteTracer(_BufferedTracer):
         )
         self._path = Path(path)
 
-    def __enter__(self) -> SqliteTracer:  # pyright: ignore[reportDeprecated]
+    def __enter__(self) -> SqliteTracer:
         super().__enter__()
         return self
 
@@ -398,9 +398,9 @@ class SqliteTracer(_BufferedTracer):
             )
 
 
-def sqlite_tracer_from_env() -> SqliteTracer:  # pyright: ignore[reportDeprecated]
+def sqlite_tracer_from_env() -> SqliteTracer:
     """Build a `SqliteTracer` from `STARIO_TRACERS_SQLITE*` environment variables."""
-    return SqliteTracer(  # pyright: ignore[reportDeprecated]
+    return SqliteTracer(
         path=env_path("STARIO_TRACERS_SQLITE", _DEFAULT_SQLITE_PATH),
         flush_interval=env_float(
             "STARIO_TRACERS_SQLITE_FLUSH_INTERVAL", _DEFAULT_FLUSH_INTERVAL

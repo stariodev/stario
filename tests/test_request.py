@@ -160,7 +160,7 @@ class TestRequestHeaders:
         assert req.headers.getlist("x-many") == ["a", "b"]
         assert req.host == "example.com"
         with pytest.raises(Exception, match="read-only"):
-            req.headers.set("x", "y")  # pyright: ignore[reportAttributeAccessIssue]
+            req.headers.set("x", "y")  # pyrefly: ignore[missing-attribute]
         with pytest.raises(AttributeError):
             req.headers = RequestHeaders()  # type: ignore[misc]
 

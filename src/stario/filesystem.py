@@ -391,6 +391,8 @@ class _Mount:
         "stats",
     )
 
+    stats: dict[str, int]
+
     def __init__(
         self,
         directory: Path | str,
