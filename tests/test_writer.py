@@ -360,6 +360,26 @@ class TestWriterRaw:
 
         assert len(shared._callbacks or ()) == before
 
+    async def test_app_shutdown_link_unhooks_on_cancel_and_timeout(self):
+        """`wait_for(app.shutdown, t)` at its timeout leaves nothing behind."""
+        loop = asyncio.get_running_loop()
+        app = App()
+        shared = app._future_for(loop)
+
+        for _ in range(100):
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(app.shutdown, 0)
+        link = app.shutdown
+        link.cancel()
+        await asyncio.sleep(0)
+
+        assert len(shared._callbacks or ()) == 0
+        assert not shared.cancelled()
+        waiter = app.shutdown
+        app.signal_shutdown()
+        await asyncio.wait_for(waiter, 1)
+        assert app.shutdown.done()
+
     async def test_context_closing_combines_disconnect_and_shutdown(self):
         loop = asyncio.get_running_loop()
         context = _make_context(loop=loop)
