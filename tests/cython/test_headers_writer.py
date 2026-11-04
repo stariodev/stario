@@ -737,7 +737,7 @@ async def test_respond_rejects_non_bytes_parts() -> None:
 
     async def bad(_c, w):
         try:
-            w.respond([b"ok", "nope"], b"text/plain")  # type: ignore[list-item]
+            w.respond([b"ok", "nope"], b"text/plain")
         except TypeError as exc:
             caught.set_result(exc)
             w.respond(b"err", b"text/plain", 500)

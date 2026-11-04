@@ -4,6 +4,7 @@ import asyncio
 import os
 import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -13,15 +14,15 @@ from stario.http.compression import CompressionConfig
 from stario.testing import TestClient
 
 
-def _app(files: Assets | Files, **kwargs: object) -> App:
+def _app(files: Assets | Files, **kwargs: Any) -> App:
     app = App()
-    files.register(app, **kwargs)  # type: ignore[arg-type]
+    files.register(app, **kwargs)
     return app
 
 
-async def _loaded(files: Assets | Files, **kwargs: object) -> App:
+async def _loaded(files: Assets | Files, **kwargs: Any) -> App:
     app = _app(files)
-    await files.load(**kwargs)  # type: ignore[arg-type]
+    await files.load(**kwargs)
     return app
 
 

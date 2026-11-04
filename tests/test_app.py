@@ -209,7 +209,7 @@ class TestAppErrorSurface:
                 seen.append((host, path, method))
                 return original(host, path, method)
 
-            app.find_handler = wrapped  # type: ignore[method-assign]
+            app.find_handler = wrapped
 
         _context, writer = run_with_app(setup, "/x")
 
