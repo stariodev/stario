@@ -15,6 +15,7 @@ import os
 import platform
 import shlex
 import subprocess
+import sys
 
 from Cython.Build import cythonize
 from setuptools import Extension, setup
@@ -152,7 +153,10 @@ class native_build_ext(build_ext):
         super().build_extensions()
 
 
-base_args = ["-O3", "-fno-strict-aliasing"]
+# -g0 overrides the -g that Python's own CFLAGS add: a wheel ships no debug info.
+base_args = ["-O3", "-fno-strict-aliasing", "-g0"]
+# The linker drops the static symbol table too; Python finds PyInit_* in .dynsym.
+strip_args = ["-s"] if sys.platform.startswith("linux") else []
 llhttp_sse = ["-msse4.2"] if platform.machine().lower() in {"x86_64", "amd64"} else []
 include_dirs = ["vendor", "vendor/llhttp/include", "src"]
 
@@ -162,17 +166,20 @@ extensions = [
         sources=["src/stario_cython/codecs.pyx", "vendor/compression_buf.c"],
         include_dirs=list(include_dirs),
         extra_compile_args=list(base_args),
+        extra_link_args=list(strip_args),
     ),
     Extension(
         "stario_cython.exchange",
         sources=["src/stario_cython/exchange.pyx", "vendor/compression_buf.c"],
         include_dirs=list(include_dirs),
         extra_compile_args=list(base_args),
+        extra_link_args=list(strip_args),
     ),
     Extension(
         "stario_cython.xxh64",
         sources=["src/stario_cython/xxh64.pyx"],
         extra_compile_args=list(base_args),
+        extra_link_args=list(strip_args),
     ),
     Extension(
         "stario_cython.protocol",
@@ -185,6 +192,7 @@ extensions = [
         ],
         include_dirs=list(include_dirs),
         extra_compile_args=[*base_args, *llhttp_sse],
+        extra_link_args=list(strip_args),
     ),
 ]
 
