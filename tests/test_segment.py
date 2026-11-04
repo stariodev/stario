@@ -74,7 +74,7 @@ class TestSegmentParse:
         segment = Segment.parse("/users", "users")
 
         with pytest.raises(AttributeError, match="immutable"):
-            segment.name = "other"  # type: ignore[misc]
+            segment.name = "other"
 
 
 class TestHostPatternLabels:

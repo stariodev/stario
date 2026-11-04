@@ -453,7 +453,7 @@ class TestDatastarAttributeValidation:
     def test_signal_names_reject_only_empty_or_broken_paths(self):
         for bad in ("", "a..b", ".a", "a.", 5, None):
             with pytest.raises(StarioError, match="Invalid Datastar signal name"):
-                check_signal_name(bad)  # type: ignore[arg-type]
+                check_signal_name(bad)
 
     def test_attr_rejects_quote_breakout_key(self):
         with pytest.raises(StarioError, match="Invalid attribute name"):

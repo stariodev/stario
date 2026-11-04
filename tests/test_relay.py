@@ -37,7 +37,7 @@ class TestRelayBasic:
     def test_subscribe_requires_at_least_one_pattern(self) -> None:
         relay = Relay()
         with pytest.raises(StarioError, match="at least one pattern"):
-            relay.subscribe()  # type: ignore[call-arg]
+            relay.subscribe()
 
     def test_subscribe_rejects_invalid_patterns(self) -> None:
         relay = Relay()
@@ -555,7 +555,7 @@ class TestRelayThreadSafety:
             hops += 1
             return real(callback, *args, **kwargs)
 
-        loop.call_soon_threadsafe = counting  # type: ignore[method-assign]
+        loop.call_soon_threadsafe = counting
         ready = asyncio.Event()
         received: list[int] = []
         count = 1000
