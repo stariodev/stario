@@ -6,6 +6,8 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ## Unreleased
 
+## 5.4.0 - 2026-11-05
+
 ### Changed
 
 - `RequestPolicy.max_body_bytes` (`STARIO_REQUESTS_MAX_BODY_BYTES`) is now
