@@ -1921,3 +1921,34 @@ async def test_h2_stream_reset_disconnects_only_that_stream() -> None:
         server.close()
         await server.wait_closed()
         await app.drain_tasks()
+
+
+@pytest.mark.asyncio
+async def test_h2_get_route_answers_head_without_a_body() -> None:
+    app = App()
+
+    async def page(_c, w) -> None:
+        w.text("hello world")
+
+    app.add(Route("GET /"), page)
+    loop = asyncio.get_running_loop()
+    port = free_port()
+    server = await loop.create_server(
+        lambda: make_protocol(loop, app),
+        "127.0.0.1",
+        port,
+    )
+    try:
+        result = await _curl(
+            "--http2-prior-knowledge",
+            "-I",
+            f"http://127.0.0.1:{port}/",
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.startswith("HTTP/2 200")
+        assert "content-length: 11" in result.stdout
+        assert "hello world" not in result.stdout
+    finally:
+        server.close()
+        await server.wait_closed()
+        await app.drain_tasks()

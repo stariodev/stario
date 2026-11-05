@@ -344,3 +344,76 @@ async def test_a_body_read_with_a_larger_limit_reads_again() -> None:
     assert await held[0].body() == b"y" * 100
     with pytest.raises(RequestBodyError):
         await held[0].body(max_size=50)
+
+
+async def test_get_route_answers_head_without_a_body() -> None:
+    """RFC 9110 9.3.2: a GET route answers HEAD with the same headers."""
+    seen: list[tuple[str, str]] = []
+
+    async def page(c: Context, w: Writer) -> None:
+        seen.append((c.req.method, c.match.pattern))
+        w.text("hello world")
+
+    async def stream(_c: Context, w: Writer) -> None:
+        w.write_headers(200)
+        w.write(b"alpha")
+        w.write(b"bravo")
+        w.end()
+
+    app = App()
+    app.add(Route("GET /page/{id}"), page)
+    app.add(Route("GET /stream"), stream)
+    async with TestClient(app) as client:
+        get = await client.get("/page/1")
+        head = await client.head("/page/1")
+        streamed = await client.head("/stream")
+    assert head.status_code == 200
+    assert head.content == b""
+    assert head.headers.get("content-length") == get.headers.get("content-length")
+    assert head.headers.get("content-type") == get.headers.get("content-type")
+    assert seen == [("GET", "GET /page/{id}"), ("HEAD", "GET /page/{id}")]
+    assert streamed.status_code == 200
+    assert streamed.content == b""
+
+
+async def test_explicit_head_route_wins_over_get() -> None:
+    async def page(_c: Context, w: Writer) -> None:
+        w.text("page")
+
+    async def head_only(_c: Context, w: Writer) -> None:
+        w.headers.set("x-head", "1")
+        w.empty(204)
+
+    app = App()
+    app.add(Route("HEAD /page"), head_only)
+    app.add(Route("GET /page"), page)
+    async with TestClient(app) as client:
+        head = await client.head("/page")
+        get = await client.get("/page")
+    assert (head.status_code, head.headers.get("x-head")) == (204, "1")
+    assert (get.status_code, get.text) == (200, "page")
+
+
+async def test_head_runs_the_get_route_middleware() -> None:
+    calls: list[str] = []
+
+    def track(handler):
+        async def wrapped(c: Context, w: Writer) -> None:
+            calls.append(c.req.method)
+            await handler(c, w)
+
+        return wrapped
+
+    async def page(_c: Context, w: Writer) -> None:
+        w.text("page")
+
+    app = App()
+    app.use("/admin", track)
+    app.add(Route("GET /admin/page"), page)
+    async with TestClient(app) as client:
+        head = await client.head("/admin/page")
+        post = await client.post("/admin/page")
+    assert head.status_code == 200
+    assert post.status_code == 405
+    assert post.headers.get("allow") == "GET, HEAD"
+    assert calls == ["HEAD", "POST"]

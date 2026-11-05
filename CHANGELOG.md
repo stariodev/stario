@@ -21,6 +21,13 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 - A body that the handler does not read drains up to the default, then the
   HTTP/1 connection closes. A small declared body (256 KiB or less) still
   drains and keeps the connection.
+- A GET route also answers HEAD (RFC 9110 9.3.2). The handler runs with
+  `c.req.method == "HEAD"`, and the server drops the body. Before, HEAD on
+  a GET route was 405, and each route needed a HEAD twin. An explicit HEAD
+  route still wins. The `Allow` header of a 405 now lists `HEAD` next to
+  `GET`.
+- `read_signals()` reads the `datastar` query parameter for HEAD, as for
+  GET.
 
 ### Added
 

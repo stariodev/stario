@@ -15,9 +15,11 @@ class TestReadSignals:
 
         assert result == {"name": "test", "count": 42}
 
-    async def test_reads_get_query_datastar_payload(self):
+    @pytest.mark.parametrize("method", ["GET", "HEAD"])
+    async def test_reads_get_query_datastar_payload(self, method: str):
+        # A GET route also answers HEAD, so HEAD reads the same signals.
         req = make_request(
-            method="GET", query={"datastar": '{"name":"test","count":42}'}
+            method=method, query={"datastar": '{"name":"test","count":42}'}
         )
 
         result = await read_signals(req)
