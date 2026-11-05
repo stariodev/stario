@@ -374,3 +374,23 @@ class TestReadFormEdges:
         async with TestClient(app) as client:
             r = await client.post("/keep", files={"f": ("big.bin", payload)})
         assert (r.status_code, r.text) == (200, f"{len(payload)} True")
+
+    async def test_quote_cr_lf_escapes_round_trip(self):
+        """Browsers write `"`, CR, LF as %22, %0D, %0A; the reader decodes them."""
+
+        async def names(c: Context, w: Writer) -> None:
+            with await read_form(c.req) as form:
+                (field_name, value), *_ = form.items()
+                upload = form.file('photo "1"')
+                assert upload is not None
+                w.text(f"{field_name}|{value}|{upload.filename}")
+
+        app = App()
+        app.add(Route("POST /names"), names)
+        async with TestClient(app) as client:
+            r = await client.post(
+                "/names",
+                data={'say "hi"\n': "v"},
+                files={'photo "1"': ('kot "a".jpg', b"x")},
+            )
+        assert (r.status_code, r.text) == (200, 'say "hi"\n|v|kot "a".jpg')

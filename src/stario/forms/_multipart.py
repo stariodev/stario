@@ -108,7 +108,9 @@ def _parse_part_headers(block: bytes) -> PartStart:
     if kind != "form-data" or "name" not in params:
         raise MultipartError("Part is not form-data with a name")
     filename = params.get("filename")
-    if filename is None and "filename*" in params:
+    if filename is not None:
+        filename = _unescape_quoted(filename)
+    elif "filename*" in params:
         # RFC 5987 (charset''percent-encoded), which RFC 7578 forbids but
         # some non-browser clients still send.
         charset, _, encoded = params["filename*"].partition("''")
@@ -116,7 +118,13 @@ def _parse_part_headers(block: bytes) -> PartStart:
             filename = unquote(encoded, encoding=charset or "utf-8", errors="replace")
         except LookupError:
             filename = unquote(encoded, errors="replace")
-    return PartStart(params["name"], filename, content_type)
+    return PartStart(_unescape_quoted(params["name"]), filename, content_type)
+
+
+def _unescape_quoted(value: str) -> str:
+    # HTML multipart/form-data encoding: browsers (and curl) write `"`, CR
+    # and LF in a name or filename as %22, %0D and %0A. Only these three.
+    return value.replace("%22", '"').replace("%0D", "\r").replace("%0A", "\n")
 
 
 class MultipartParser:

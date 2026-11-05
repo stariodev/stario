@@ -51,7 +51,8 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
   `Content-Type` is 415.
 - `RequestBodyError` accepts 415.
 - The test client quotes multipart names and filenames as browsers do
-  (`"` as `%22`), not with backslashes.
+  (`"` as `%22`), not with backslashes. `read_form` decodes `%22`, `%0D`, and
+  `%0A` in names and filenames back to `"`, CR, and LF.
 
 ## 5.3.4 - 2026-11-04
 
