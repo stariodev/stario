@@ -251,6 +251,48 @@ class TestSignedCookie:
         with pytest.raises(StarioError, match="name"):
             cookies.SignedCookie(name, keys=[KEY])
 
+    def test_host_prefix_round_trip(self) -> None:
+        jar = cookies.SignedCookie("__Host-session", keys=[KEY])
+        value = _get(jar, _set_value(jar, {"user": "42"}))
+        assert value is not None
+        assert value.data == {"user": "42"}
+
+    @pytest.mark.parametrize(
+        ("name", "kwargs"),
+        [
+            ("__Host-session", {"secure": False}),
+            ("__Host-session", {"path": "/app"}),
+            ("__host-session", {"domain": "example.com"}),
+            ("__Secure-session", {"secure": False}),
+        ],
+    )
+    def test_prefix_needs_its_flags(self, name: str, kwargs: dict) -> None:
+        with pytest.raises(StarioError, match="cookie needs"):
+            cookies.SignedCookie(name, keys=[KEY], **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("name", "kwargs"),
+    [
+        ("__Host-sid", {}),
+        ("__Host-sid", {"secure": True, "path": "/app"}),
+        ("__Host-sid", {"secure": True, "domain": "example.com"}),
+        ("__Secure-sid", {}),
+    ],
+)
+def test_set_cookie_prefix_needs_its_flags(name: str, kwargs: dict) -> None:
+    with pytest.raises(StarioError, match="cookie needs"):
+        cookies.set_cookie(make_writer(), name, "v", **kwargs)
+    with pytest.raises(StarioError, match="cookie needs"):
+        cookies.delete_cookie(make_writer(), name, **kwargs)
+
+
+def test_set_cookie_prefix_with_its_flags() -> None:
+    w = make_writer()
+    cookies.set_cookie(w, "__Host-sid", "v", secure=True)
+    cookies.set_cookie(w, "__Secure-sid", "v", samesite="none")
+    assert len(w.headers.unsafe_getlist(b"set-cookie")) == 2
+
 
 async def test_signed_cookie_through_the_test_client() -> None:
     from stario import App, Context, Route, Writer

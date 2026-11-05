@@ -103,6 +103,9 @@ cdef class HttpConnection:
     cdef void set_body_paused(self, RequestExchange exchange, bint paused):
         raise NotImplementedError("set_body_paused")
 
+    cdef void close_lingering(self):
+        raise NotImplementedError("close_lingering")
+
     cdef object ensure_disconnect(self):
         raise NotImplementedError("ensure_disconnect")
 
@@ -537,6 +540,17 @@ cdef bint _connection_gone(object connection) except -1:
     return future is not None and future.done()
 
 
+cdef inline Py_ssize_t _limit_for(object max_size, Py_ssize_t default) except -1:
+    """Limit of one body read: `max_size`, else `default`; at most BODY_LIMIT_MAX."""
+    if max_size is None:
+        return default
+    if max_size < 0:
+        raise ValueError("max_size must be non-negative.")
+    if max_size >= BODY_LIMIT_MAX:
+        return BODY_LIMIT_MAX
+    return <Py_ssize_t>max_size
+
+
 @cython.final
 @cython.freelist(64)
 cdef class Request:
@@ -563,7 +577,7 @@ cdef class Request:
         self._q_off = 0
         self._q_len = 0
         self._body = None
-        self._body_limit = -1
+        self._body_limit = BODY_LIMIT_MAX
         self._query = None
         self._cookies = None
         self._host = None
@@ -619,7 +633,7 @@ cdef class Request:
             self._body_limit = (
                 exchange._max_size
                 if exchange._consumed_as == CONSUMED_NONE
-                else -1
+                else BODY_LIMIT_MAX
             )
         else:
             self._body = _BODY_GONE
@@ -706,26 +720,14 @@ cdef class Request:
             self._cookies = parsed
         return self._cookies
 
-    cdef int _check_bytes_limit(self, object max_size) except -1:
-        cdef Py_ssize_t limit
-        if max_size is None:
-            limit = self._body_limit
-        elif max_size >= BODY_LIMIT_MAX:
-            return 0
-        else:
-            limit = <Py_ssize_t>max_size
-        if limit >= 0 and PyBytes_GET_SIZE(self._body) > limit:
-            raise RequestBodyError(413, "Request body too large")
-        return 0
-
     async def body(self, max_size=None):
         cdef object data
-        if max_size is not None and max_size < 0:
-            raise ValueError("max_size must be non-negative.")
+        cdef Py_ssize_t limit = _limit_for(max_size, self._body_limit)
         if self._body is None:
             return b""
         if type(self._body) is bytes:
-            self._check_bytes_limit(max_size)
+            if PyBytes_GET_SIZE(self._body) > limit:
+                raise RequestBodyError(413, "Request body too large")
             return self._body
         if self._body is _BODY_GONE:
             raise StarioRuntime(BODY_GONE_ERROR)
@@ -733,12 +735,12 @@ cdef class Request:
         return data
 
     async def stream(self, max_chunk=None, max_size=None):
-        if max_size is not None and max_size < 0:
-            raise ValueError("max_size must be non-negative.")
+        cdef Py_ssize_t limit = _limit_for(max_size, self._body_limit)
         if self._body is None:
             return
         if type(self._body) is bytes:
-            self._check_bytes_limit(max_size)
+            if PyBytes_GET_SIZE(self._body) > limit:
+                raise RequestBodyError(413, "Request body too large")
             yield self._body
             return
         if self._body is _BODY_GONE:
@@ -875,7 +877,6 @@ cdef class RequestExchange:
         self._bytes_written = 0
         self._completed = False
         self._close_delimited = False
-        self._skip_body = False
         self._out_len = 0
         self.headers.c_clear()
 
@@ -1452,7 +1453,6 @@ cdef class RequestExchange:
         # No leftover from the last response or upload may survive.
         self._completed = False
         self._status_code = -1
-        self._skip_body = False
         self._close_delimited = False
         self._expect_continue = False
         self._discard_body = False
@@ -2396,7 +2396,6 @@ cdef class RequestExchange:
                 ),
             )
         _require_final_status(status_code)
-        self._skip_body = self._head_request
         self._bytes_written = 0
 
         raw_length = headers.c_get(b"content-length")
@@ -2500,7 +2499,7 @@ cdef class RequestExchange:
                     "204/304 and 1xx responses must not include a message body."
                 ),
             )
-        if self._skip_body or n == 0:
+        if self._head_request or n == 0:
             return self
         if self._declared_length >= 0 and self._bytes_written + n > self._declared_length:
             raise StarioRuntime(
@@ -2993,13 +2992,8 @@ cdef class RequestExchange:
             self._clear_body_storage()
             self._connection.set_body_paused(self, False)
             self._wake()
-            if (
-                not self._http2
-                and self._discard_body
-                and self._transport is not None
-                and not self._transport.is_closing()
-            ):
-                self._transport.close()
+            if not self._http2 and self._discard_body:
+                self._connection.close_lingering()
             return 0
 
         if self._discard_body:
@@ -3125,15 +3119,7 @@ cdef class RequestExchange:
         buffer is sized from a large declared length, and a client that
         waits for ``100 Continue`` never gets it.
         """
-        cdef Py_ssize_t limit
-        if max_size is None:
-            limit = self._max_size
-        elif max_size < 0:
-            raise ValueError("max_size must be non-negative.")
-        elif max_size >= BODY_LIMIT_MAX:
-            limit = BODY_LIMIT_MAX
-        else:
-            limit = <Py_ssize_t>max_size
+        cdef Py_ssize_t limit = _limit_for(max_size, self._max_size)
         if self._cached is not None:
             if PyBytes_GET_SIZE(self._cached) > limit:
                 raise RequestBodyError(413, "Request body too large")

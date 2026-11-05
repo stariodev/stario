@@ -453,7 +453,7 @@ class _Mount:
         *,
         cache_control: str | None = None,
     ) -> None:
-        """Attach GET and HEAD routes. Prefer `attach()` in bootstrap."""
+        """Attach the GET route (it answers HEAD too). Prefer `attach()` in bootstrap."""
         kind = type(self).__name__
         if self.prefix.startswith("//"):
             raise StarioError(
@@ -472,7 +472,6 @@ class _Mount:
             field="cache_control",
         )
         app.add(self._route, self)
-        app.add(Route("HEAD", self._route.target), self)
 
     async def load(
         self,
@@ -568,7 +567,7 @@ class _Mount:
         precompress: Iterable[str] | None = None,
         compression: CompressionConfig = COMPRESSION,
     ) -> Mapping[str, int]:
-        """Register GET/HEAD, then load the tree. Returns the same stats as `load()`."""
+        """Register GET (and so HEAD), then load the tree. Returns the stats of `load()`."""
         self.register(app, cache_control=cache_control)
         if self._loaded:
             return self.stats

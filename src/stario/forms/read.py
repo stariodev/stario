@@ -5,8 +5,8 @@ read the query string; other methods read the body by its `Content-Type`
 (`application/x-www-form-urlencoded` or `multipart/form-data`).
 """
 
-import asyncio
 import re
+from functools import partial
 from tempfile import SpooledTemporaryFile
 
 from stario.exceptions import RequestBodyError
@@ -21,7 +21,7 @@ from ._multipart import (
     PartStart,
     parse_options,
 )
-from .form import Form, UploadFile
+from .form import Form, UploadFile, in_thread
 
 _URLENCODED = "application/x-www-form-urlencoded"
 _MULTIPART = "multipart/form-data"
@@ -177,7 +177,7 @@ async def _read_multipart(
                             raise RequestBodyError(413, "File too large")
                         if size > spool_size:
                             # On disk now: keep the event loop free.
-                            await asyncio.to_thread(spool.write, event)
+                            await in_thread(partial(spool.write, event))
                         else:
                             spool.write(event)
         parser.close()

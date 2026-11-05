@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import random
+import threading
 from typing import ClassVar
 
 import pytest
@@ -18,6 +20,7 @@ from stario.forms._multipart import (
     PartStart,
     parse_options,
 )
+from stario.forms.form import in_thread
 from stario.http.config import RequestPolicy
 from stario.testing import TestClient
 from tests.helpers import make_request
@@ -394,3 +397,25 @@ class TestReadFormEdges:
                 files={'photo "1"': ('kot "a".jpg', b"x")},
             )
         assert (r.status_code, r.text) == (200, 'say "hi"\n|v|kot "a".jpg')
+
+
+async def test_cancel_waits_for_the_spool_thread():
+    # A cancelled upload must not close a spool while a thread writes it.
+    started = threading.Event()
+    release = threading.Event()
+    done: list[int] = []
+
+    def write() -> None:
+        started.set()
+        release.wait(2)
+        done.append(1)
+
+    task = asyncio.create_task(in_thread(write))
+    assert await asyncio.to_thread(started.wait, 2)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert done == [1]

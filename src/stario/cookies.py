@@ -53,6 +53,25 @@ def parse_cookie_headers(cookie_strings: Iterable[str]) -> dict[str, str]:
     return cookies
 
 
+def _check_prefix(name: str, *, secure: bool, path: str, domain: str | None) -> None:
+    """Browsers drop a `__Secure-` / `__Host-` cookie without the flags its name needs."""
+    lowered = name.lower()
+    if lowered.startswith("__host-") and (not secure or path != "/" or domain):
+        raise StarioError(
+            "A __Host- cookie needs secure=True, path='/', and no domain",
+            context={"name": name},
+            help_text="Browsers drop it otherwise. Chrome and Firefox treat "
+            "http://localhost as secure.",
+        )
+    if lowered.startswith("__secure-") and not secure:
+        raise StarioError(
+            "A __Secure- cookie needs secure=True",
+            context={"name": name},
+            help_text="Browsers drop it otherwise. Chrome and Firefox treat "
+            "http://localhost as secure.",
+        )
+
+
 def set_cookie(
     w: Writer,
     name: str,
@@ -78,7 +97,17 @@ def set_cookie(
     * An `int` — treated as a **Unix timestamp in seconds** (UTC); converted to an HTTP-date.
 
     For relative expiry, prefer `max_age` (seconds from now).
+
+    A name that starts with `__Host-` needs `secure=True`, `path="/"`, and no
+    `domain`; one that starts with `__Secure-` needs `secure=True`. Browsers
+    drop such a cookie otherwise, so this raises `StarioError`.
     """
+    _check_prefix(
+        name,
+        secure=secure or (samesite is not None and samesite.lower() == "none"),
+        path=path,
+        domain=domain,
+    )
     if path and (";" in path or "," in path):
         raise StarioError(
             "Invalid cookie path",
@@ -211,21 +240,26 @@ class SignedCookie:
     server checks, has not passed; otherwise `None`. The payload is not
     encrypted: store ids, never secrets.
 
+    Name a login cookie `__Host-session`. The browser then keeps it only
+    with `Secure`, `Path=/`, and no `Domain`, so a subdomain cannot set a
+    cookie with the same name.
+
     `keys`: the first key signs; every key verifies. To rotate, put the new key
     first and keep the old one for one `max_age`. Each key is 32 bytes or more.
     The signing key is derived from the key and the cookie name, so one secret
     serves several cookies and a value cannot move to another cookie name.
 
     ```python
-    jar = SignedCookie("session", keys=[config.session_secret])
+    jar = SignedCookie("__Host-session", keys=[config.session_secret])
     jar.set(w, {"user": user_id})
     value = jar.get(c.req)            # SignedValue | None
     jar.delete(w)
     ```
 
     Sliding expiry: when `value.age` is past half of `max_age`, call `set`
-    again with `value.data`. `secure=True` is the default; pass
-    `secure=False` only for plain HTTP in development.
+    again with `value.data`. `secure=True` is the default. Chrome and Firefox
+    accept it on http://localhost; pass `secure=False` only for other plain
+    HTTP in development, with a name that has no prefix.
     """
 
     __slots__ = (
@@ -270,6 +304,7 @@ class SignedCookie:
                 help_text="Generate one with: python -c 'import secrets; "
                 "print(secrets.token_urlsafe(32))'",
             )
+        _check_prefix(name, secure=secure, path=path, domain=domain)
         if max_age <= 0:
             raise StarioError(
                 "SignedCookie max_age must be greater than 0",

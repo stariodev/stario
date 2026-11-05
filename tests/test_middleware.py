@@ -246,6 +246,21 @@ class TestSameOrigin:
             response = await client.post(path, headers={"sec-fetch-site": "cross-site"})
         assert response.status_code == status
 
+    @pytest.mark.parametrize("path", ["/hooks%2Fx", "/hooks%2F..%2Faccount"])
+    async def test_exempt_prefix_matches_the_raw_path(self, path: str):
+        # The decoded path starts with /hooks/, but the router matches one
+        # segment (`/{page}`) outside /hooks: the check must still run.
+        app = App()
+
+        async def handler(_c: Context, w: Writer) -> None:
+            w.text("ok")
+
+        app.use("/", same_origin(exempt=["/hooks"]))
+        app.add(Route("POST /{page}"), handler)
+        async with TestClient(app) as client:
+            response = await client.post(path, headers={"sec-fetch-site": "cross-site"})
+        assert response.status_code == 403
+
     def test_exempt_paths_must_be_absolute(self):
         with pytest.raises(StarioError, match="exempt"):
             same_origin(exempt=["hooks"])

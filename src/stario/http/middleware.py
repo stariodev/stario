@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Literal
+from urllib.parse import quote
 
 from stario.exceptions import StarioError
 from stario.http.context import Context, Handler, Middleware
+from stario.http.request import Request
 from stario.http.writer import Writer
 
 type ErrorResponder = Callable[[Context, Writer, BaseException], Awaitable[None]]
@@ -70,15 +72,17 @@ def _origin(value: str) -> str:
     return f"{scheme}://{authority}" if authority else ""
 
 
-def _exempt_prefixes(paths: Iterable[str]) -> tuple[str, ...]:
-    out: list[str] = []
+def _exempt_prefixes(paths: Iterable[str]) -> tuple[bytes, ...]:
+    # Compared with the raw path: the decoded path of `/hooks%2Fx` starts
+    # with `/hooks/`, but the router matches it as one segment elsewhere.
+    out: list[bytes] = []
     for path in paths:
         if not path.startswith("/"):
             raise StarioError(
                 "same_origin exempt paths must start with '/'",
                 context={"path": path},
             )
-        out.append(path.rstrip("/"))
+        out.append(quote(path.rstrip("/"), safe="/!$&'()*+,;=:@").encode("ascii"))
     return tuple(out)
 
 
@@ -111,7 +115,8 @@ def same_origin(
       `Origin` is in the list passes, for a cross-site form that may post
       here (a payment return).
     - `exempt` (`"/hooks"`): requests under these path prefixes skip the
-      check (`/hooks` covers `/hooks` and `/hooks/...`, not `/hooksx`).
+      check (`/hooks` covers `/hooks` and `/hooks/...`, not `/hooksx`). The
+      prefix matches the path as sent, so `/hooks%2Fx` is not exempt.
 
     The check does not cover GET: a GET must never change state. The only
     gap is a browser older than about 2023 with neither header; CSRF tokens
@@ -129,31 +134,29 @@ def same_origin(
     prefixes = _exempt_prefixes(exempt)
     allowed_sites = _FETCH_SITES_OK_SAME_SITE if allow_same_site else _FETCH_SITES_OK
 
-    def is_exempt(path: str) -> bool:
-        return any(path == p or path.startswith(p + "/") for p in prefixes)
-
-    def is_trusted(c: Context) -> bool:
-        origin = c.req.headers.get("origin")
-        return origin is not None and _origin(origin) in trusted
+    def blocked(req: Request) -> bool:
+        if req.method.upper() in _FETCH_SAFE_METHODS:
+            return False
+        if prefixes:
+            raw = req.raw_path
+            if any(raw == p or raw.startswith(p + b"/") for p in prefixes):
+                return False
+        fetch_site = req.headers.get("sec-fetch-site")
+        origin = req.headers.get("origin")
+        if fetch_site is not None:
+            cross = fetch_site.lower() not in allowed_sites
+        elif origin is not None:
+            host = req.headers.get("host") or ""
+            cross = origin.strip() == "null" or _authority(origin) != _authority(host)
+        else:
+            return False
+        return cross and (origin is None or _origin(origin) not in trusted)
 
     def middleware(handler: Handler) -> Handler:
         async def wrapped(c: Context, w: Writer) -> None:
-            if c.req.method.upper() not in _FETCH_SAFE_METHODS and not is_exempt(
-                c.req.path
-            ):
-                fetch_site = c.req.headers.get("sec-fetch-site")
-                if fetch_site is not None:
-                    blocked = fetch_site.lower() not in allowed_sites
-                else:
-                    origin = c.req.headers.get("origin")
-                    host = c.req.headers.get("host") or ""
-                    blocked = origin is not None and (
-                        origin.strip() == "null"
-                        or _authority(origin) != _authority(host)
-                    )
-                if blocked and not is_trusted(c):
-                    w.text("Cross-origin request blocked", 403)
-                    return
+            if blocked(c.req):
+                w.text("Cross-origin request blocked", 403)
+                return
             await handler(c, w)
 
         return wrapped

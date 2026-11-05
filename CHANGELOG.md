@@ -21,6 +21,11 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 - A body that the handler does not read drains up to the default, then the
   HTTP/1 connection closes. A small declared body (256 KiB or less) still
   drains and keeps the connection.
+- An HTTP/1 close while the client still sends a body is a lingering close
+  (RFC 9112 9.6): the server sends FIN after the response, then reads and
+  drops input for up to 2 seconds. Before, the close sent RST, and a
+  browser in the middle of an upload could lose the 413 and show a reset.
+- `StaticFiles` and `Assets` register only the GET route; it answers HEAD.
 - A GET route also answers HEAD (RFC 9110 9.3.2). The handler runs with
   `c.req.method == "HEAD"`, and the server drops the body. Before, HEAD on
   a GET route was 405, and each route needed a HEAD twin. An explicit HEAD
@@ -45,8 +50,9 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
   `multipart/form-data` body. Multipart bodies stream: each file is an
   `UploadFile` in a `SpooledTemporaryFile` that moves to disk past
   `spool_size`. Writes to disk and `await upload.read()` run in a thread,
-  so the event loop keeps serving. `Form.get` / `getlist` / `items` / `as_dict` match
-  `req.query`. `max_size`, `max_fields`, `max_field_size`, `max_files`, and
+  so the event loop keeps serving. A cancelled request waits for that
+  thread before it closes the spool. `Form.get` / `getlist` / `items` /
+  `as_dict` match `req.query`. `max_size`, `max_fields`, `max_field_size`, `max_files`, and
   `max_file_size` limit the body (413). A malformed body is 400, and another
   `Content-Type` is 415.
 - `RequestBodyError` accepts 415.
@@ -55,9 +61,10 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
   `%0A` in names and filenames back to `"`, CR, and LF.
 - `same_origin(trusted_origins=[...])` lets a listed origin post cross-site
   (a payment return), and `same_origin(exempt=["/hooks"])` skips the check
-  under a path prefix. The docstring now names `same_origin()` as the CSRF
-  protection for current browsers: CSRF tokens would only add browsers from
-  before about 2023.
+  under a path prefix. The prefix matches the path as sent, so
+  `/hooks%2Fx` (one segment for the router) is not exempt. The docstring
+  now names `same_origin()` as the CSRF protection for current browsers:
+  CSRF tokens would only add browsers from before about 2023.
 - `stario.cookies.SignedCookie`: a cookie with a JSON payload that the
   client can read but not change. `set(w, data)` signs it with HMAC-SHA256,
   and `get(req)` returns a `SignedValue` (`data`, `issued_at`, `expires_at`,
@@ -68,6 +75,10 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
   cookie. A value past about 3.9 KB raises an error instead of being
   dropped by the browser. The defaults are `HttpOnly`, `Secure`, and
   `SameSite=Lax`.
+- `set_cookie`, `delete_cookie`, and `SignedCookie` raise `StarioError` for a
+  `__Host-` name without `secure=True`, `path="/"`, and no domain, and for a
+  `__Secure-` name without `secure=True`. Browsers drop such a cookie
+  without an error.
 
 ## 5.3.4 - 2026-11-04
 

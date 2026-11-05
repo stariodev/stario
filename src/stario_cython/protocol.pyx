@@ -298,6 +298,8 @@ cdef int PAUSE_REJECTED = 8
 cdef int HEADER_FIELD_OVERHEAD = 32
 # Wait for the shutdown-notice PING ACK before the final GOAWAY (one RTT).
 cdef double H2_GOAWAY_GRACE = 1.0
+# HTTP/1 lingering close: read and drop input this long after the FIN.
+cdef double LINGER_TIME = 2.0
 cdef int PARSER_QUANTUM = 512 * 1024
 cdef int TIMEOUT_NONE = 0
 cdef int TIMEOUT_HEADER = 1
@@ -779,6 +781,8 @@ cdef class CHttpProtocol(HttpConnection):
     # Streams holding their WINDOW_UPDATE (body backpressure).
     cdef int h2_paused_streams
     cdef object h2_goaway_timer
+    # Set while a lingering close drops input (``close_lingering``).
+    cdef object linger_timer
     cdef bint h1_headers_too_large
     # Set at headers-complete: later header callbacks are chunked trailers.
     cdef bint h1_in_trailers
@@ -942,6 +946,7 @@ cdef class CHttpProtocol(HttpConnection):
         self.held_offset = 0
         self.pump_scheduled = False
         self.rejected = False
+        self.linger_timer = None
         self.timeout_kind = TIMEOUT_NONE
         self.timeout_deadline = 0.0
         self.parse_mode = PARSE_NONE
@@ -991,6 +996,9 @@ cdef class CHttpProtocol(HttpConnection):
         if self.h2_goaway_timer is not None:
             self.h2_goaway_timer.cancel()
             self.h2_goaway_timer = None
+        if self.linger_timer is not None:
+            self.linger_timer.cancel()
+            self.linger_timer = None
         self.connections._connection_closed(self)
 
         if self.h2 != NULL:
@@ -1489,6 +1497,44 @@ cdef class CHttpProtocol(HttpConnection):
             transport = self.transport
             if transport is not None and not transport.is_closing():
                 transport.resume_reading()
+
+    cdef void close_lingering(self):
+        """Close an HTTP/1 connection whose client may still be sending.
+
+        A close with unread input makes the kernel send RST, and the client
+        can lose a response it has not read yet (a 413 in the middle of an
+        upload). So send FIN after the response, then read and drop input
+        until the client closes or LINGER_TIME passes (RFC 9112 9.6).
+        """
+        cdef object transport = self.transport
+        if (
+            transport is None
+            or transport.is_closing()
+            or self.linger_timer is not None
+        ):
+            return
+        # ``rejected`` drops input before the parser; reading stays on.
+        self.rejected = True
+        self._cancel_timeout()
+        self.held_data = None
+        self.held_offset = 0
+        self.pause_reasons = 0
+        self.body_pause_owner = None
+        try:
+            transport.resume_reading()
+            if transport.can_write_eof():
+                transport.write_eof()
+        except Exception:
+            transport.close()
+            return
+        self.linger_timer = self.loop.call_later(LINGER_TIME, transport.close)
+
+    cdef void _close_after_response(self, RequestExchange exchange):
+        # The client may still be sending the body of this request.
+        if exchange._body_active and not exchange._body_complete:
+            self.close_lingering()
+        else:
+            self.transport.close()
 
     cdef void set_body_paused(self, RequestExchange exchange, bint paused):
         if exchange._http2:
@@ -2287,7 +2333,7 @@ cdef class CHttpProtocol(HttpConnection):
         if conn is not None and (
             conn == b"close" or conn.lower() == b"close"
         ):
-            transport.close()
+            self._close_after_response(exchange)
             self._drop_pending()
             return
 
@@ -2297,7 +2343,7 @@ cdef class CHttpProtocol(HttpConnection):
             if self._app_state is not None
             else self.app.shutting_down
         ):
-            transport.close()
+            self._close_after_response(exchange)
             self._drop_pending()
             return
 
@@ -2501,7 +2547,11 @@ cdef class CHttpProtocol(HttpConnection):
             self._finish_protocol_span(status, span, method, path)
             self._abort_reading_and_pending()
             self.reading_exchange = None
-            transport.close()
+            if status == 413:
+                # The client is likely still sending the body.
+                self.close_lingering()
+            else:
+                transport.close()
         except Exception:
             _log.exception("Failed to write a protocol error")
             try:
@@ -3412,7 +3462,7 @@ cdef class CHttpProtocol(HttpConnection):
                 return
             ex._h2_headers_sent = True
             ex._h2_outbound = True
-            if ex._skip_body:
+            if ex._head_request:
                 ex._h2_body_done = True
                 rv = nghttp2_submit_response(
                     self.h2, ex._h2_stream_id, nvs, <size_t>nvlen, NULL
