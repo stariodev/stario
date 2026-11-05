@@ -66,7 +66,7 @@ async def test_middleware_wraps_405_under_its_prefix() -> None:
         response = await client.post("/api/users")
 
     assert response.status_code == 405
-    assert response.headers.get("allow") == "GET"
+    assert response.headers.get("allow") == "GET, HEAD"
     assert calls == ["api"]
 
 

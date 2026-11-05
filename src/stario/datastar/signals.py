@@ -27,9 +27,9 @@ class FileSignal(TypedDict):
 async def read_signals(req: Request, *, max_size: int | None = None) -> dict[str, Any]:
     """Parse the JSON signals blob Datastar sends.
 
-    `GET` and `DELETE` use the `datastar` query parameter. Other methods use the
-    request body, limited by `max_size` as in `Request.body()`. Pass a larger
-    `max_size` for signals that carry a `FileSignal`.
+    `GET`, `HEAD`, and `DELETE` use the `datastar` query parameter. Other methods
+    use the request body, limited by `max_size` as in `Request.body()`. Pass a
+    larger `max_size` for signals that carry a `FileSignal`.
 
     This is convenience parsing only. Incoming signals are untrusted; validate
     types, sizes, and nested shapes before using them as application data.
@@ -48,7 +48,7 @@ async def read_signals(req: Request, *, max_size: int | None = None) -> dict[str
         SSE(w).patch_signals({"n": int(sig.get("n", 0)) + 1})
     ```
     """
-    if req.method.upper() in ("GET", "DELETE"):
+    if req.method.upper() in ("GET", "HEAD", "DELETE"):
         raw = req.query.get("datastar", "")
     else:
         raw = await req.body(max_size=max_size)

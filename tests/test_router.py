@@ -170,7 +170,7 @@ class TestFindHandler:
 
         w = DummyWriter()
         run_handler(handler, "/r", method="DELETE", writer=w)
-        assert w.headers.get("Allow") == "GET, PATCH, POST"
+        assert w.headers.get("Allow") == "GET, HEAD, PATCH, POST"
 
     def test_literal_http_verb_segment_is_not_false_405(self):
         router = Router()
@@ -301,7 +301,7 @@ class TestFindHandler:
 
         handler, route, _ = router.find_handler("api.example.com", "/api", "POST")
 
-        assert handler is method_not_allowed_handler(frozenset({"GET"}))
+        assert handler is method_not_allowed_handler(frozenset({"GET", "HEAD"}))
         assert route is EMPTY_ROUTE
 
 

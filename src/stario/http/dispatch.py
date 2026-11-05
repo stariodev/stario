@@ -385,6 +385,11 @@ class Router:
                     route=endpoint.route,
                     middleware=endpoint.middleware,
                 )
+            # RFC 9110 9.3.2: a GET route answers HEAD too. The exchange drops
+            # the body; an explicit HEAD route wins.
+            get = out.endpoints.get("GET")
+            if get is not None and "HEAD" not in out.endpoints:
+                out.endpoints["HEAD"] = get
 
         def child_args(
             kind: str, name: str
