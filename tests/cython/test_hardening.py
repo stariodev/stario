@@ -2118,3 +2118,44 @@ async def test_max_connections_rejects_over_cap_with_503() -> None:
             if not transport.is_closing():
                 transport.close()
         await _drain(app)
+
+
+@pytest.mark.asyncio
+async def test_head_on_sse_frees_the_connection_for_the_next_request() -> None:
+    """A HEAD on a stream ends at its headers; a pipelined GET then runs."""
+    app = App()
+    events: list[str] = []
+
+    async def feed(c, w) -> None:
+        sse = SSE(w)
+        try:
+            async with c.alive():
+                while True:
+                    sse.patch_signals({"n": 1})
+                    await asyncio.sleep(0.01)
+        finally:
+            events.append("feed done")
+
+    async def ping(c, w) -> None:
+        events.append(f"ping disconnected={c.disconnected}")
+        w.text("pong")
+
+    app.add(Route("GET /feed"), feed)
+    app.add(Route("GET /ping"), ping)
+    proto, app, transport = _attach(app=app)
+    try:
+        proto.data_received(
+            b"HEAD /feed HTTP/1.1\r\nHost: t\r\n\r\n"
+            b"GET /ping HTTP/1.1\r\nHost: t\r\n\r\n"
+        )
+        await asyncio.wait_for(_drain(app), 2)
+        assert response_statuses(transport.writes) == [200, 200]
+        raw = b"".join(transport.writes)
+        assert b"text/event-stream" in raw
+        assert raw.endswith(b"pong")
+        assert sorted(events) == ["feed done", "ping disconnected=False"]
+        assert not transport.is_closing()
+    finally:
+        if not transport.is_closing():
+            transport.close()
+        await _drain(app)

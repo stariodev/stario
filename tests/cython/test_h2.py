@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from stario import App, Route
+from stario.datastar import SSE
 from stario.http.tls import load_tls_context
 from tests.cython.h2wire import (
     FLAG_ACK,
@@ -1948,6 +1949,45 @@ async def test_h2_get_route_answers_head_without_a_body() -> None:
         assert result.stdout.startswith("HTTP/2 200")
         assert "content-length: 11" in result.stdout
         assert "hello world" not in result.stdout
+    finally:
+        server.close()
+        await server.wait_closed()
+        await app.drain_tasks()
+
+
+@pytest.mark.asyncio
+async def test_h2_head_on_sse_ends_at_the_headers() -> None:
+    app = App()
+    done = asyncio.Event()
+
+    async def feed(c, w) -> None:
+        sse = SSE(w)
+        try:
+            async with c.alive():
+                while True:
+                    sse.patch_signals({"n": 1})
+                    await asyncio.sleep(0.01)
+        finally:
+            done.set()
+
+    app.add(Route("GET /feed"), feed)
+    loop = asyncio.get_running_loop()
+    port = free_port()
+    server = await loop.create_server(
+        lambda: make_protocol(loop, app),
+        "127.0.0.1",
+        port,
+    )
+    try:
+        result = await _curl(
+            "--http2-prior-knowledge",
+            "-I",
+            f"http://127.0.0.1:{port}/feed",
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.startswith("HTTP/2 200")
+        assert "text/event-stream" in result.stdout
+        await asyncio.wait_for(done.wait(), 2)
     finally:
         server.close()
         await server.wait_closed()

@@ -487,6 +487,7 @@ cdef class RequestExchange:
     cdef void fire_body_stall(self)
     cdef void _maybe_continue(self)
     cdef void _done(self)
+    cdef void _finish_head(self)
     cdef void _maybe_pause(self)
     cdef Py_ssize_t _feed_limit(self) noexcept
     cdef Py_ssize_t _read_limit(self, object max_size) except -1
