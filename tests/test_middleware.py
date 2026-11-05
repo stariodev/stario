@@ -3,8 +3,10 @@
 import asyncio
 import logging
 
+import pytest
+
 from stario import App, Route
-from stario.exceptions import RedirectException, RequestBodyError
+from stario.exceptions import RedirectException, RequestBodyError, StarioError
 from stario.http.context import Context
 from stario.http.middleware import catch_errors, same_origin, security_headers
 from stario.http.writer import Writer
@@ -198,6 +200,55 @@ class TestSameOrigin:
         # Non-browser clients send neither Sec-Fetch-Site nor Origin.
         response = await self._post(self._app())
         assert response.status_code == 200
+
+    @pytest.mark.parametrize(
+        ("origin", "status"),
+        [
+            ("https://pay.example.com", 200),
+            ("https://PAY.example.com:443", 200),
+            ("http://pay.example.com", 403),
+            ("https://evil.example.com", 403),
+            ("null", 403),
+        ],
+    )
+    async def test_trusted_origins_pass_cross_site(self, origin: str, status: int):
+        app = self._app(trusted_origins=["https://pay.example.com"])
+        cross_site = await self._post(
+            app, **{"sec-fetch-site": "cross-site", "origin": origin}
+        )
+        assert cross_site.status_code == status
+        no_fetch_site = await self._post(
+            self._app(trusted_origins=["https://pay.example.com"]),
+            **{"origin": origin, "host": "example.com"},
+        )
+        assert no_fetch_site.status_code == status
+
+    @pytest.mark.parametrize(
+        "value", ["pay.example.com", "https://pay.example.com/return", "null", ""]
+    )
+    def test_trusted_origins_must_be_origins(self, value: str):
+        with pytest.raises(StarioError, match="trusted_origins"):
+            same_origin(trusted_origins=[value])
+
+    @pytest.mark.parametrize(
+        ("path", "status"),
+        [("/hooks", 200), ("/hooks/github", 200), ("/hooksx", 403), ("/x", 403)],
+    )
+    async def test_exempt_paths_skip_the_check(self, path: str, status: int):
+        app = App()
+
+        async def handler(_c: Context, w: Writer) -> None:
+            w.text("ok")
+
+        app.use("/", same_origin(exempt=["/hooks/"]))
+        app.add(Route(f"POST {path}"), handler)
+        async with TestClient(app) as client:
+            response = await client.post(path, headers={"sec-fetch-site": "cross-site"})
+        assert response.status_code == status
+
+    def test_exempt_paths_must_be_absolute(self):
+        with pytest.raises(StarioError, match="exempt"):
+            same_origin(exempt=["hooks"])
 
 
 class TestSecurityHeaders:
