@@ -7,6 +7,7 @@ import asyncio
 import pytest
 
 from stario import App, Context, Route, Writer
+from stario.datastar import SSE
 from stario.exceptions import RequestBodyError
 from stario.http.compression import CompressionConfig
 from stario.http.config import RequestPolicy
@@ -417,3 +418,79 @@ async def test_head_runs_the_get_route_middleware() -> None:
     assert post.status_code == 405
     assert post.headers.get("allow") == "GET, HEAD"
     assert calls == ["HEAD", "POST"]
+
+
+async def test_head_on_a_stream_ends_at_the_headers() -> None:
+    """RFC 9112 6.3: a HEAD response ends at its headers; c.alive() ends too."""
+    events: list[str] = []
+
+    async def feed(c: Context, w: Writer) -> None:
+        sse = SSE(w)
+        try:
+            async with c.alive():
+                for i in range(1000):
+                    sse.patch_signals({"n": i})
+                    events.append(f"tick {c.disconnected}")
+                    await asyncio.sleep(0.01)
+        finally:
+            events.append("cleanup")
+
+    app = App()
+    app.add(Route("GET /feed"), feed)
+    async with TestClient(app) as client:
+        head = await asyncio.wait_for(client.head("/feed"), 2)
+        await asyncio.sleep(0.05)
+    assert head.status_code == 200
+    assert head.headers.get("content-type") == "text/event-stream"
+    assert head.content == b""
+    assert events == ["tick True", "cleanup"]
+
+
+async def test_head_writes_after_the_headers_are_dropped() -> None:
+    errors: list[BaseException] = []
+
+    async def stream(_c: Context, w: Writer) -> None:
+        try:
+            w.write_headers(200)
+            w.write(b"alpha")
+            w.write(b"bravo")
+            w.end(b"charlie")
+            w.end()
+        except BaseException as exc:
+            errors.append(exc)
+            raise
+
+    async def ended(_c: Context, w: Writer) -> None:
+        w.end(b"hello")
+
+    app = App()
+    app.add(Route("GET /stream"), stream)
+    app.add(Route("GET /ended"), ended)
+    async with TestClient(app) as client:
+        streamed = await client.head("/stream")
+        head = await client.head("/ended")
+        get = await client.get("/ended")
+    assert (streamed.status_code, streamed.content) == (200, b"")
+    assert errors == []
+    assert head.headers.get("content-length") == "5"
+    assert (get.status_code, get.text) == (200, "hello")
+
+
+async def test_head_request_ends_with_any_response_helper() -> None:
+    """After w.text() on HEAD, c.disconnect resolves: the request is over."""
+    seen: list[tuple[str, bool]] = []
+
+    async def page(c: Context, w: Writer) -> None:
+        w.text("hello")
+        if c.req.method == "HEAD":
+            await asyncio.wait_for(c.disconnect, 1)
+        seen.append((c.req.method, c.disconnected))
+
+    app = App()
+    app.add(Route("GET /page"), page)
+    async with TestClient(app) as client:
+        head = await client.head("/page")
+        get = await client.get("/page")
+        await asyncio.sleep(0.05)
+    assert (head.status_code, get.status_code) == (200, 200)
+    assert seen == [("HEAD", True), ("GET", False)]

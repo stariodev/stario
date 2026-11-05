@@ -28,6 +28,11 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
   `GET`.
 - `read_signals()` reads the `datastar` query parameter for HEAD, as for
   GET.
+- A HEAD response ends at its headers (RFC 9112 6.3). The connection then
+  serves the next request, and later `write()` / `end()` calls are no-ops.
+  For HEAD, `c.disconnect` resolves and `c.disconnected` is true once the
+  response is sent, so `c.alive()` stops an SSE handler. Before, an SSE
+  handler kept running under HEAD and held a keep-alive connection.
 
 ### Added
 

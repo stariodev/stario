@@ -1706,11 +1706,15 @@ cdef class RequestExchange:
                 handle._req = self.ensure_request()
                 handle._final_status = self._status_code
                 handle._ex = None
-                # Snapshot the right future (stream for H2, conn otherwise)
-                # so a retained ``c`` stops pinning the protocol.
+                # Snapshot the right future (request-scoped for H2 and HEAD,
+                # conn otherwise) so a retained ``c`` stops pinning the protocol.
                 handle._disc = self._stream_disc
                 if handle._disc is None:
-                    handle._disc = self._connection.ensure_disconnect()
+                    if self._head_request:
+                        # detach() resolves it right after this.
+                        handle._disc = self._connection.ensure_stream_disconnect(self)
+                    else:
+                        handle._disc = self._connection.ensure_disconnect()
                 handle._conn = None
             else:
                 # Only this local refers to it. start_handle() rebinds every field.
@@ -1848,6 +1852,15 @@ cdef class RequestExchange:
             pool.append(self)
 
     cdef void _done(self):
+        if (
+            self._head_request
+            and self._stream_disc is not None
+            and not self._stream_disc.done()
+        ):
+            # A HEAD request ends with its response (any helper): wake
+            # c.disconnect / c.alive() before the connection moves on.
+            # A future made later is resolved in RequestHandle.disconnect.
+            self._stream_disc.set_result(None)
         if self._body_active and self._consumed_as == CONSUMED_NONE:
             # Response is out; an unread body may buffer again (up to the cap)
             # so the connection can move on.
@@ -2421,6 +2434,8 @@ cdef class RequestExchange:
             ]
             self._connection.h2_write_headers(self, nva, False, False, False)
             self._status_code = status_code
+            if self._head_request:
+                self._finish_head()
             return self
 
         self._buf_bytes(_status_line(status_code))
@@ -2431,7 +2446,24 @@ cdef class RequestExchange:
         self._buf_bytes(CRLF)
         self._flush()
         self._status_code = status_code
+        if self._head_request:
+            self._finish_head()
         return self
+
+    cdef void _finish_head(self):
+        """End a HEAD response at its headers (RFC 9112 6.3, rule 1).
+
+        The client reads no body, so the connection moves on now. Later
+        write() / end() calls are no-ops, and ``_done()`` ends the request's
+        own disconnect future, so ``c.alive()`` stops a streaming handler
+        (SSE) instead of letting it run on a keep-alive connection.
+        """
+        # Completed first: END_STREAM can close the stream synchronously,
+        # and an incomplete close reads as a client abort.
+        self._completed = True
+        if self._http2:
+            self._connection.h2_end(self)
+        self._done()
 
     cpdef object write(self, object data):
         cdef Py_ssize_t n
@@ -2442,6 +2474,9 @@ cdef class RequestExchange:
             self._free_compressors()
             return self
         if self._completed:
+            if self._head_request:
+                # The HEAD response ended at its headers; drop the body.
+                return self
             raise StarioRuntime(
                 "Cannot write after response is completed. "
                 "This happens after calling w.end() or a response helper has "
@@ -2577,17 +2612,12 @@ cdef class RequestExchange:
                 self.write_headers(200)
             else:
                 self.write_headers(204)
+        if self._completed:
+            # HEAD: write_headers() already ended the response.
+            return
         if data:
             self.write(data)
 
-        if self._skip_body:
-            # Completed first: END_STREAM can close the stream synchronously,
-            # and an incomplete close reads as a client abort.
-            self._completed = True
-            if self._http2:
-                self._connection.h2_end(self)
-            self._done()
-            return
         if self._declared_length >= 0 and self._bytes_written != self._declared_length:
             raise StarioRuntime(
                 "Response body length mismatch: wrote "
@@ -3647,9 +3677,14 @@ cdef class RequestHandle:
     @property
     def disconnect(self):
         cdef RequestExchange ex = self._ex
-        if ex is not None and ex._http2:
-            # Stream-scoped: a reset stream goes away without the connection.
-            return self._conn.ensure_stream_disconnect(ex)
+        cdef object fut
+        if ex is not None and (ex._http2 or ex._head_request):
+            # Request-scoped: a reset stream goes away without the
+            # connection, and a HEAD request ends with its response.
+            fut = self._conn.ensure_stream_disconnect(ex)
+            if ex._head_request and ex._completed and not fut.done():
+                fut.set_result(None)
+            return fut
         if self._conn is not None:
             return self._conn.ensure_disconnect()
         # Detached handle: _detach_views snapshotted the right future.
@@ -3659,7 +3694,9 @@ cdef class RequestHandle:
     def disconnected(self):
         cdef RequestExchange ex = self._ex
         cdef object fut
-        if ex is not None and ex._http2:
+        if ex is not None and (ex._http2 or ex._head_request):
+            if ex._head_request and ex._completed:
+                return True
             fut = ex._stream_disc
             if fut is not None and fut.done():
                 return True
