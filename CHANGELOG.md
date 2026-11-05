@@ -53,6 +53,11 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 - The test client quotes multipart names and filenames as browsers do
   (`"` as `%22`), not with backslashes. `read_form` decodes `%22`, `%0D`, and
   `%0A` in names and filenames back to `"`, CR, and LF.
+- `same_origin(trusted_origins=[...])` lets a listed origin post cross-site
+  (a payment return), and `same_origin(exempt=["/hooks"])` skips the check
+  under a path prefix. The docstring now names `same_origin()` as the CSRF
+  protection for current browsers: CSRF tokens would only add browsers from
+  before about 2023.
 
 ## 5.3.4 - 2026-11-04
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from typing import Literal
 
 from stario.exceptions import StarioError
@@ -58,45 +58,102 @@ def _authority(value: str) -> str:
     return authority
 
 
-def same_origin(*, allow_same_site: bool = False) -> Middleware:
-    """Reject cross-origin state-changing requests (403).
+def _origin(value: str) -> str:
+    """`scheme://host[:port]` lowercased, default port stripped; "" if not one."""
+    scheme, sep, rest = value.strip().lower().partition("://")
+    if not sep or scheme not in ("http", "https") or not rest or "/" in rest:
+        return ""
+    authority = rest.rsplit("@", 1)[-1]
+    default = ":443" if scheme == "https" else ":80"
+    if authority.endswith(default):
+        authority = authority[: -len(default)]
+    return f"{scheme}://{authority}" if authority else ""
+
+
+def _exempt_prefixes(paths: Iterable[str]) -> tuple[str, ...]:
+    out: list[str] = []
+    for path in paths:
+        if not path.startswith("/"):
+            raise StarioError(
+                "same_origin exempt paths must start with '/'",
+                context={"path": path},
+            )
+        out.append(path.rstrip("/"))
+    return tuple(out)
+
+
+def same_origin(
+    *,
+    allow_same_site: bool = False,
+    trusted_origins: Iterable[str] = (),
+    exempt: Iterable[str] = (),
+) -> Middleware:
+    """CSRF protection: reject cross-origin state-changing requests (403).
+
+    Browsers send `Sec-Fetch-Site` (all major ones since 2023) and `Origin`,
+    and a page cannot set either one. So a form or `fetch` on another site
+    cannot post here with the user's cookies. This needs no tokens and no
+    state. Use it on every app with a cookie login:
+
+    ```python
+    app.use("/", same_origin(exempt=["/hooks"]))
+    ```
 
     For methods other than GET/HEAD/OPTIONS/TRACE:
 
-    - `Sec-Fetch-Site` present: only `same-origin` and `none` pass
-      (`same-site` too when `allow_same_site=True`); anything else is 403.
-    - `Sec-Fetch-Site` absent, `Origin` present: `null` is 403; otherwise the
-      Origin authority must equal the `Host` authority (lowercased, default
-      ports 80/443 stripped).
-    - Neither header: allowed — non-browser clients send neither.
+    - `Sec-Fetch-Site` present: `same-origin` and `none` pass (`same-site`
+      too with `allow_same_site=True`).
+    - `Sec-Fetch-Site` absent, `Origin` present: the Origin authority must
+      equal the `Host` authority; `null` fails.
+    - Neither header: pass. The client is not a browser (curl, a webhook from
+      a server), so it has no cookies of the user to misuse.
+    - `trusted_origins` (`"https://pay.example.com"`): a request whose
+      `Origin` is in the list passes, for a cross-site form that may post
+      here (a payment return).
+    - `exempt` (`"/hooks"`): requests under these path prefixes skip the
+      check (`/hooks` covers `/hooks` and `/hooks/...`, not `/hooksx`).
 
-    This complements SameSite cookies, which older browsers may not send and
-    which do not cover every embedding case; it is not a substitute for CSRF
-    tokens on flows SameSite cannot reach.
+    The check does not cover GET: a GET must never change state. The only
+    gap is a browser older than about 2023 with neither header; CSRF tokens
+    would add only that.
     """
+    trusted: set[str] = set()
+    for value in trusted_origins:
+        origin = _origin(value)
+        if not origin:
+            raise StarioError(
+                "same_origin trusted_origins must be origins like 'https://host[:port]'",
+                context={"origin": value},
+            )
+        trusted.add(origin)
+    prefixes = _exempt_prefixes(exempt)
+    allowed_sites = _FETCH_SITES_OK_SAME_SITE if allow_same_site else _FETCH_SITES_OK
+
+    def is_exempt(path: str) -> bool:
+        return any(path == p or path.startswith(p + "/") for p in prefixes)
+
+    def is_trusted(c: Context) -> bool:
+        origin = c.req.headers.get("origin")
+        return origin is not None and _origin(origin) in trusted
 
     def middleware(handler: Handler) -> Handler:
         async def wrapped(c: Context, w: Writer) -> None:
-            if c.req.method.upper() not in _FETCH_SAFE_METHODS:
+            if c.req.method.upper() not in _FETCH_SAFE_METHODS and not is_exempt(
+                c.req.path
+            ):
                 fetch_site = c.req.headers.get("sec-fetch-site")
                 if fetch_site is not None:
-                    allowed = (
-                        _FETCH_SITES_OK_SAME_SITE
-                        if allow_same_site
-                        else _FETCH_SITES_OK
-                    )
-                    if fetch_site.lower() not in allowed:
-                        w.text("Cross-origin request blocked", 403)
-                        return
+                    blocked = fetch_site.lower() not in allowed_sites
                 else:
                     origin = c.req.headers.get("origin")
-                    if origin is not None:
-                        host = c.req.headers.get("host") or ""
-                        if origin.strip() == "null" or _authority(origin) != _authority(
-                            host
-                        ):
-                            w.text("Cross-origin request blocked", 403)
-                            return
+                    host = c.req.headers.get("host") or ""
+                    blocked = origin is not None and (
+                        origin.strip() == "null"
+                        or _authority(origin) != _authority(host)
+                    )
+                if blocked and not is_trusted(c):
+                    w.text("Cross-origin request blocked", 403)
+                    return
             await handler(c, w)
 
         return wrapped
