@@ -1,17 +1,26 @@
-"""Cookie parsing and `Set-Cookie` emission.
+"""Cookie parsing, `Set-Cookie` emission, and signed cookies.
 
 Read inbound cookies via `req.cookies` (Cython ``ParsedCookies``, on demand).
 Write outbound cookies with `set_cookie` / `delete_cookie` on a `Writer`.
+`SignedCookie` signs a JSON payload that the client can read but not change.
 """
 
+import base64
+import hashlib
+import hmac
 import http.cookies
-from collections.abc import Iterable, Iterator
+import re
+import time
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import format_datetime
-from typing import Literal
+from typing import Any, Literal
 
 from stario.exceptions import StarioError
+from stario.http.request import Request
 from stario.http.writer import Writer
+from stario.json import dumps_bytes, loads
 
 _SAMESITE = frozenset(("lax", "strict", "none"))
 
@@ -161,3 +170,194 @@ def delete_cookie(
         httponly=httponly,
         samesite=samesite,
     )
+
+
+# RFC 6265 4.1.1: a cookie name is an RFC 9110 token.
+_TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+_SIGNED_VERSION = "v1"
+_MIN_KEY_BYTES = 32
+# Browsers keep at least 4096 bytes of name, value, and attributes (RFC 6265
+# 6.1); past it they drop the cookie without telling anyone.
+_MAX_COOKIE_BYTES = 4096
+
+
+def _b64encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _b64decode(text: str) -> bytes:
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+@dataclass(frozen=True, slots=True)
+class SignedValue:
+    """A verified, unexpired payload from `SignedCookie.get`."""
+
+    data: dict[str, Any]
+    issued_at: int
+    expires_at: int
+
+    @property
+    def age(self) -> float:
+        """Seconds since `SignedCookie.set` issued it."""
+        return time.time() - self.issued_at
+
+
+class SignedCookie:
+    """A cookie with a JSON payload that the client can read but not change.
+
+    `set` signs `{data, issued, expires}` with HMAC-SHA256. `get` returns a
+    `SignedValue` only when the signature is valid and the expiry, which the
+    server checks, has not passed; otherwise `None`. The payload is not
+    encrypted: store ids, never secrets.
+
+    `keys`: the first key signs; every key verifies. To rotate, put the new key
+    first and keep the old one for one `max_age`. Each key is 32 bytes or more.
+    The signing key is derived from the key and the cookie name, so one secret
+    serves several cookies and a value cannot move to another cookie name.
+
+    ```python
+    jar = SignedCookie("session", keys=[config.session_secret])
+    jar.set(w, {"user": user_id})
+    value = jar.get(c.req)            # SignedValue | None
+    jar.delete(w)
+    ```
+
+    Sliding expiry: when `value.age` is past half of `max_age`, call `set`
+    again with `value.data`. `secure=True` is the default; pass
+    `secure=False` only for plain HTTP in development.
+    """
+
+    __slots__ = (
+        "_keys",
+        "domain",
+        "httponly",
+        "max_age",
+        "name",
+        "path",
+        "samesite",
+        "secure",
+    )
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        keys: Sequence[str | bytes],
+        max_age: int = 14 * 24 * 3600,
+        path: str = "/",
+        domain: str | None = None,
+        secure: bool = True,
+        httponly: bool = True,
+        samesite: Literal["lax", "strict", "none"] | None = "lax",
+    ) -> None:
+        if not _TOKEN.fullmatch(name):
+            raise StarioError(
+                "Invalid signed cookie name",
+                context={"name": name},
+                help_text="A cookie name is letters, digits, and !#$%&'*+-.^_`|~.",
+            )
+        if not keys:
+            raise StarioError(
+                "SignedCookie needs at least one key",
+                help_text="Pass keys=[secret], with the secret from the app env.",
+            )
+        raw_keys = [k.encode() if isinstance(k, str) else k for k in keys]
+        if any(len(k) < _MIN_KEY_BYTES for k in raw_keys):
+            raise StarioError(
+                f"SignedCookie keys must be at least {_MIN_KEY_BYTES} bytes",
+                context={"name": name},
+                help_text="Generate one with: python -c 'import secrets; "
+                "print(secrets.token_urlsafe(32))'",
+            )
+        if max_age <= 0:
+            raise StarioError(
+                "SignedCookie max_age must be greater than 0",
+                context={"max_age": max_age},
+            )
+        label = f"stario.cookie.{name}".encode()
+        self._keys = tuple(
+            hmac.new(k, label, hashlib.sha256).digest() for k in raw_keys
+        )
+        self.name = name
+        self.max_age = max_age
+        self.path = path
+        self.domain = domain
+        self.secure = secure
+        self.httponly = httponly
+        self.samesite = samesite
+
+    def _sign(self, key: bytes, body: str) -> str:
+        return _b64encode(hmac.new(key, body.encode("ascii"), hashlib.sha256).digest())
+
+    def set(self, w: Writer, data: Mapping[str, Any]) -> Writer:
+        """Sign `data` (JSON) and add `Set-Cookie`; a new expiry starts now."""
+        now = int(time.time())
+        payload = dumps_bytes({"d": dict(data), "i": now, "e": now + self.max_age})
+        body = f"{_SIGNED_VERSION}.{_b64encode(payload)}"
+        value = f"{body}.{self._sign(self._keys[0], body)}"
+        # Leave about 200 bytes of the browser limit for the attributes.
+        if len(self.name) + len(value) > _MAX_COOKIE_BYTES - 200:
+            raise StarioError(
+                "Signed cookie too large",
+                context={"name": self.name, "bytes": len(value)},
+                help_text="Store an id in the cookie and the data on the server.",
+            )
+        return set_cookie(
+            w,
+            self.name,
+            value,
+            max_age=self.max_age,
+            path=self.path,
+            domain=self.domain,
+            secure=self.secure,
+            httponly=self.httponly,
+            samesite=self.samesite,
+        )
+
+    def get(self, req: Request) -> SignedValue | None:
+        """The verified, unexpired payload, or `None` (missing, changed, expired)."""
+        raw = req.cookies.get(self.name)
+        if not raw:
+            return None
+        body, _, signature = raw.rpartition(".")
+        version, _, encoded = body.partition(".")
+        # A client can send any bytes; only an ASCII value can be ours.
+        if (
+            version != _SIGNED_VERSION
+            or not encoded
+            or not signature
+            or not raw.isascii()
+        ):
+            return None
+        if not any(
+            hmac.compare_digest(self._sign(key, body), signature) for key in self._keys
+        ):
+            return None
+        try:
+            payload = loads(_b64decode(encoded))
+        except ValueError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        data, issued, expires = payload.get("d"), payload.get("i"), payload.get("e")
+        if (
+            not isinstance(data, dict)
+            or not isinstance(issued, int)
+            or not isinstance(expires, int)
+            or expires <= time.time()
+        ):
+            return None
+        return SignedValue(data, issued, expires)
+
+    def delete(self, w: Writer) -> Writer:
+        """Expire the cookie, with the same path, domain, and flags as `set`."""
+        return delete_cookie(
+            w,
+            self.name,
+            path=self.path,
+            domain=self.domain,
+            secure=self.secure,
+            httponly=self.httponly,
+            samesite=self.samesite,
+        )
