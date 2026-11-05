@@ -92,7 +92,7 @@ class StarioRuntime(StarioError):
 class RequestBodyError(StarioRuntime):
     """
     Request body read failed: payload too large (413), upload stalled (408),
-    or the body did not parse (400).
+    the body did not parse (400), or its media type is not supported (415).
 
     Raised while buffering or streaming the request body. Uncaught in a handler,
     the protocol answers with `status_code` and `detail` as a plain-text body
@@ -109,11 +109,12 @@ class RequestBodyError(StarioRuntime):
     __slots__ = ("detail", "status_code")
 
     def __init__(self, status_code: int, detail: str = "") -> None:
-        if status_code not in (400, 408, 413):
+        if status_code not in (400, 408, 413, 415):
             raise StarioError(
-                f"RequestBodyError requires status 400, 408 or 413, got {status_code}",
+                f"RequestBodyError requires status 400, 408, 413 or 415, got {status_code}",
                 help_text="Use 413 for oversize bodies, 408 for upload stalls, "
-                "400 for bodies that do not parse.",
+                "400 for bodies that do not parse, 415 for an unsupported "
+                "Content-Type.",
             )
         self.status_code = status_code
         self.detail = detail

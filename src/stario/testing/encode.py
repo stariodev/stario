@@ -28,6 +28,11 @@ def expand_pairs(items: QueryParamInput | FormData) -> list[tuple[str, str]]:
     return out
 
 
+def _quote_disposition(value: str) -> str:
+    # As browsers do (HTML multipart/form-data encoding): no backslash escapes.
+    return value.replace('"', "%22").replace("\r", "%0D").replace("\n", "%0A")
+
+
 def _encode_multipart(
     data: FormData | bytes | str | None,
     files: FileData,
@@ -42,7 +47,7 @@ def _encode_multipart(
 
     if data is not None:
         for name, value in expand_pairs(data):
-            esc = name.replace('"', '\\"')
+            esc = _quote_disposition(name)
             disp = f'Content-Disposition: form-data; name="{esc}"'
             parts.extend(
                 (
@@ -71,8 +76,8 @@ def _encode_multipart(
         payload_bytes = (
             payload if isinstance(payload, bytes) else payload.encode("utf-8")
         )
-        esc = field_name.replace('"', '\\"')
-        sf = filename.replace('"', '\\"')
+        esc = _quote_disposition(field_name)
+        sf = _quote_disposition(filename)
         disp = f'Content-Disposition: form-data; name="{esc}"; filename="{sf}"'
         parts.extend(
             (

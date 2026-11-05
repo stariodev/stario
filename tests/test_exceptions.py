@@ -20,13 +20,14 @@ class TestStarioError:
 class TestRequestBodyError:
     @pytest.mark.parametrize("status", [404, 500, 422])
     def test_rejects_non_body_status_at_construction(self, status: int):
-        with pytest.raises(StarioError, match="requires status 400, 408 or 413"):
+        with pytest.raises(StarioError, match="requires status 400, 408, 413 or 415"):
             RequestBodyError(status, "nope")
 
-    def test_accepts_408_and_413(self):
+    def test_accepts_body_statuses(self):
         RequestBodyError(400, "bad body")
         RequestBodyError(413, "too large")
         RequestBodyError(408, "stalled")
+        RequestBodyError(415, "not a form")
 
 
 class TestRedirectException:
