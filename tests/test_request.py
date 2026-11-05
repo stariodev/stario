@@ -151,6 +151,25 @@ class TestRequestBody:
         req = Request(method="POST", path="/", body=b"chunk")
         assert [chunk async for chunk in req.stream()] == [b"chunk"]
 
+    async def test_stream_max_size_limits_a_bytes_body(self):
+        req = Request(method="POST", path="/", body=b"chunk")
+
+        with pytest.raises(RequestBodyError) as excinfo:
+            _ = [chunk async for chunk in req.stream(max_size=4)]
+
+        assert excinfo.value.status_code == 413
+        assert [chunk async for chunk in req.stream(max_size=5)] == [b"chunk"]
+
+    async def test_negative_stream_max_size_is_rejected(self):
+        req = Request(method="POST", path="/", body=b"chunk")
+        with pytest.raises(ValueError, match="max_size"):
+            _ = [chunk async for chunk in req.stream(max_size=-1)]
+
+    async def test_huge_max_size_is_accepted(self):
+        req = Request(method="POST", path="/", body=b"chunk")
+        assert await req.body(max_size=2**70) == b"chunk"
+        assert [chunk async for chunk in req.stream(max_size=2**70)] == [b"chunk"]
+
 
 class TestRequestHeaders:
     def test_constructed_request_gets_read_only_request_headers(self):

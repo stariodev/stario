@@ -311,24 +311,59 @@ async def test_body_over_limit_returns_413() -> None:
 
 
 @pytest.mark.asyncio
-async def test_declared_body_over_limit_fails_before_handler_runs() -> None:
+async def test_body_over_default_with_larger_max_size_is_read() -> None:
+    """max_body_bytes is only the default: a read may accept more."""
     app = App()
-    hits = 0
+    seen: list[int] = []
 
-    async def ignore_body(_c, w) -> None:
-        nonlocal hits
-        hits += 1
+    async def read_body(c, w) -> None:
+        seen.append(len(await c.req.body(max_size=200)))
         w.text("ok")
 
-    app.add(Route("POST /"), ignore_body)
+    app.add(Route("POST /"), read_body)
     proto, app, transport = _attach(app=app, max_body_bytes=20)
     try:
         proto.data_received(
-            b"POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 100\r\n\r\n"
+            b"POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 100\r\n\r\n" + (b"y" * 100)
         )
         await _drain(app)
-        assert response_status(transport.writes) == 413
-        assert hits == 0
+        assert response_status(transport.writes) == 200
+        assert seen == [100]
+    finally:
+        if not transport.is_closing():
+            transport.close()
+        await _drain(app)
+
+
+@pytest.mark.asyncio
+async def test_large_body_over_default_with_larger_max_size_is_read() -> None:
+    """A body past SMALL_BODY streams in after dispatch, above the default."""
+    app = App()
+    seen: list[int] = []
+    size = 300 * 1024
+
+    async def read_body(c, w) -> None:
+        seen.append(len(await c.req.body(max_size=size)))
+        w.text("ok")
+
+    app.add(Route("POST /"), read_body)
+    proto, app, transport = _attach(app=app, max_body_bytes=20)
+    try:
+        proto.data_received(
+            b"POST / HTTP/1.1\r\nHost: t\r\nContent-Length: "
+            + str(size).encode()
+            + b"\r\n\r\n"
+        )
+        await asyncio.sleep(0)
+        sent = 0
+        while sent < size:
+            step = min(64 * 1024, size - sent)
+            proto.data_received(b"y" * step)
+            sent += step
+            await asyncio.sleep(0)
+        await _drain(app)
+        assert seen == [size]
+        assert response_status(transport.writes) == 200
         assert not transport.is_closing()
     finally:
         if not transport.is_closing():
@@ -337,21 +372,226 @@ async def test_declared_body_over_limit_fails_before_handler_runs() -> None:
 
 
 @pytest.mark.asyncio
-async def test_huge_declared_body_over_limit_closes() -> None:
-    """Declared CL above the 256 KiB drain cap still closes (read-DoS)."""
+async def test_chunked_body_over_max_size_returns_413() -> None:
+    app = App()
+
+    async def read_body(c, w) -> None:
+        await c.req.body(max_size=50)
+        w.text("ok")
+
+    app.add(Route("POST /"), read_body)
+    proto, app, transport = _attach(app=app, max_body_bytes=1000)
+    try:
+        proto.data_received(
+            b"POST / HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n"
+            b"40\r\n" + (b"y" * 64) + b"\r\n0\r\n\r\n"
+        )
+        await _drain(app)
+        assert response_status(transport.writes) == 413
+    finally:
+        if not transport.is_closing():
+            transport.close()
+        await _drain(app)
+
+
+@pytest.mark.asyncio
+async def test_stream_uses_default_and_max_size() -> None:
+    app = App()
+    results: list[object] = []
+
+    async def stream_body(c, w) -> None:
+        limit = int(c.req.query.get("limit", "0")) or None
+        total = 0
+        try:
+            async for chunk in c.req.stream(max_size=limit):
+                total += len(chunk)
+        except Exception as exc:
+            results.append(type(exc).__name__)
+            raise
+        results.append(total)
+        w.text("ok")
+
+    app.add(Route("POST /"), stream_body)
+    proto, app, transport = _attach(app=app, max_body_bytes=20)
+    try:
+        proto.data_received(
+            b"POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 100\r\n\r\n" + (b"y" * 100)
+        )
+        await _drain(app)
+        proto.data_received(
+            b"POST /?limit=100 HTTP/1.1\r\nHost: t\r\nContent-Length: 100\r\n\r\n"
+            + (b"y" * 100)
+        )
+        await _drain(app)
+        assert response_statuses(transport.writes) == [413, 200]
+        assert results == ["RequestBodyError", 100]
+    finally:
+        if not transport.is_closing():
+            transport.close()
+        await _drain(app)
+
+
+@pytest.mark.asyncio
+async def test_declared_body_over_limit_fails_before_continue() -> None:
+    """A read checks Content-Length first: 413 and no 100 Continue."""
     app = App()
     hits = 0
 
-    async def ignore_body(_c, w) -> None:
+    async def read_body(c, w) -> None:
         nonlocal hits
         hits += 1
+        await c.req.body()
         w.text("ok")
 
-    app.add(Route("POST /"), ignore_body)
+    app.add(Route("POST /"), read_body)
+    proto, app, transport = _attach(app=app, max_body_bytes=20)
+    try:
+        proto.data_received(
+            b"POST / HTTP/1.1\r\nHost: t\r\nExpect: 100-continue\r\n"
+            b"Content-Length: 100\r\n\r\n"
+        )
+        await _drain(app)
+        assert response_status(transport.writes) == 413
+        assert b"100 Continue" not in b"".join(transport.writes)
+        assert hits == 1
+        assert not transport.is_closing()
+    finally:
+        if not transport.is_closing():
+            transport.close()
+        await _drain(app)
+
+
+@pytest.mark.asyncio
+async def test_continue_is_sent_when_max_size_accepts_the_body() -> None:
+    app = App()
+    seen: list[int] = []
+
+    async def read_body(c, w) -> None:
+        seen.append(len(await c.req.body(max_size=100)))
+        w.text("ok")
+
+    app.add(Route("POST /"), read_body)
+    proto, app, transport = _attach(app=app, max_body_bytes=20)
+    try:
+        proto.data_received(
+            b"POST / HTTP/1.1\r\nHost: t\r\nExpect: 100-continue\r\n"
+            b"Content-Length: 100\r\n\r\n"
+        )
+        await asyncio.sleep(0)
+        assert b"100 Continue" in b"".join(transport.writes)
+        proto.data_received(b"y" * 100)
+        await _drain(app)
+        assert seen == [100]
+        assert response_statuses(transport.writes)[-1] == 200
+    finally:
+        if not transport.is_closing():
+            transport.close()
+        await _drain(app)
+
+
+@pytest.mark.asyncio
+async def test_huge_declared_body_over_limit_closes() -> None:
+    """A 413 on a body past the 256 KiB drain cap closes (read-DoS)."""
+    app = App()
+    hits = 0
+
+    async def read_body(c, w) -> None:
+        nonlocal hits
+        hits += 1
+        await c.req.body()
+        w.text("ok")
+
+    app.add(Route("POST /"), read_body)
     proto, app, transport = _attach(app=app, max_body_bytes=20)
     try:
         proto.data_received(
             b"POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 262145\r\n\r\n"
+        )
+        await _drain(app)
+        assert response_status(transport.writes) == 413
+        assert hits == 1
+        proto.data_received(b"y" * 100)
+        await _drain(app)
+        assert transport.is_closing()
+    finally:
+        if not transport.is_closing():
+            transport.close()
+        await _drain(app)
+
+
+@pytest.mark.asyncio
+async def test_unread_large_body_drains_up_to_default_then_closes() -> None:
+    app = App()
+
+    async def ignore_body(_c, w) -> None:
+        w.text("ok")
+
+    app.add(Route("POST /"), ignore_body)
+    proto, app, transport = _attach(app=app, max_body_bytes=1000)
+    try:
+        proto.data_received(
+            b"POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 262145\r\n\r\n"
+        )
+        await _drain(app)
+        assert response_status(transport.writes) == 200
+        proto.data_received(b"y" * 500)
+        await _drain(app)
+        assert not transport.is_closing()
+        proto.data_received(b"y" * 600)
+        await _drain(app)
+        assert transport.is_closing()
+    finally:
+        if not transport.is_closing():
+            transport.close()
+        await _drain(app)
+
+
+@pytest.mark.asyncio
+async def test_abandoned_large_read_drains_only_up_to_default() -> None:
+    """A handler that stops a large-limit stream drains the rest only up to the default."""
+    app = App()
+
+    async def first_chunk(c, w) -> None:
+        async for _chunk in c.req.stream(max_chunk=64, max_size=2**31 - 1):
+            break
+        w.text("ok")
+
+    app.add(Route("POST /"), first_chunk)
+    proto, app, transport = _attach(app=app, max_body_bytes=1000)
+    try:
+        proto.data_received(
+            b"POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 1000000\r\n\r\n"
+            + (b"y" * 100)
+        )
+        await _drain(app)
+        assert response_status(transport.writes) == 200
+        assert not transport.is_closing()
+        proto.data_received(b"y" * 2000)
+        await _drain(app)
+        assert transport.is_closing()
+    finally:
+        if not transport.is_closing():
+            transport.close()
+        await _drain(app)
+
+
+@pytest.mark.asyncio
+async def test_content_length_above_read_cap_fails_before_handler() -> None:
+    """No read can accept more than 2^31-1 bytes: 413 at headers, close."""
+    app = App()
+    hits = 0
+
+    async def read_body(c, w) -> None:
+        nonlocal hits
+        hits += 1
+        await c.req.body(max_size=2**40)
+        w.text("ok")
+
+    app.add(Route("POST /"), read_body)
+    proto, app, transport = _attach(app=app)
+    try:
+        proto.data_received(
+            b"POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 2147483648\r\n\r\n"
         )
         await _drain(app)
         assert response_status(transport.writes) == 413
@@ -364,13 +604,65 @@ async def test_huge_declared_body_over_limit_closes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_queued_upload_over_default_is_read_after_the_queue() -> None:
+    """A pipelined upload waits paused behind a slow response, then reads past the default."""
+    app = App()
+    release = asyncio.Event()
+    seen: list[int] = []
+    size = 1024 * 1024
+
+    async def slow(_c, w) -> None:
+        await release.wait()
+        w.text("slow")
+
+    async def read_body(c, w) -> None:
+        seen.append(len(await c.req.body(max_size=size)))
+        w.text("ok")
+
+    app.add(Route("GET /slow"), slow)
+    app.add(Route("POST /"), read_body)
+    proto, app, transport = _attach(app=app, max_body_bytes=20)
+    try:
+        proto.data_received(
+            b"GET /slow HTTP/1.1\r\nHost: t\r\n\r\n"
+            b"POST / HTTP/1.1\r\nHost: t\r\nContent-Length: "
+            + str(size).encode()
+            + b"\r\n\r\n"
+        )
+        await asyncio.sleep(0)
+        sent = 0
+        while sent <= 300 * 1024:
+            proto.data_received(b"y" * (64 * 1024))
+            sent += 64 * 1024
+        assert "pause" in transport.reading_calls
+        assert seen == []
+        release.set()
+        for _ in range(3):
+            await asyncio.sleep(0)
+        while sent < size:
+            step = min(64 * 1024, size - sent)
+            proto.data_received(b"y" * step)
+            sent += step
+            await asyncio.sleep(0)
+        await _drain(app)
+        assert seen == [size]
+        assert response_statuses(transport.writes) == [200, 200]
+    finally:
+        release.set()
+        if not transport.is_closing():
+            transport.close()
+        await _drain(app)
+
+
+@pytest.mark.asyncio
 async def test_keep_alive_413_does_not_keep_header_timer() -> None:
     app = App()
 
-    async def ignore_body(_c, w) -> None:
+    async def read_body(c, w) -> None:
+        await c.req.body()
         w.text("ok")
 
-    app.add(Route("POST /"), ignore_body)
+    app.add(Route("POST /"), read_body)
     proto, app, transport = _attach(
         app=app, max_body_bytes=20, header_timeout=_TIMEOUT, keep_alive_timeout=5.0
     )
@@ -392,10 +684,11 @@ async def test_keep_alive_413_does_not_keep_header_timer() -> None:
 async def test_keep_alive_413_idle_times_out() -> None:
     app = App()
 
-    async def ignore_body(_c, w) -> None:
+    async def read_body(c, w) -> None:
+        await c.req.body()
         w.text("ok")
 
-    app.add(Route("POST /"), ignore_body)
+    app.add(Route("POST /"), read_body)
     proto, app, transport = _attach(
         app=app, max_body_bytes=20, header_timeout=5.0, keep_alive_timeout=_TIMEOUT
     )
@@ -416,14 +709,20 @@ async def test_keep_alive_413_idle_times_out() -> None:
 
 @pytest.mark.asyncio
 async def test_keep_alive_413_deferred_body_then_second_get() -> None:
+    """A small body over the default dispatches once complete; 413 keeps the socket."""
     app = App()
     hits = 0
+
+    async def read_body(c, w) -> None:
+        await c.req.body()
+        w.text("ok")
 
     async def hello(_c, w) -> None:
         nonlocal hits
         hits += 1
         w.text("ok")
 
+    app.add(Route("POST /"), read_body)
     app.add(Route("GET /"), hello)
     proto, app, transport = _attach(app=app, max_body_bytes=20)
     try:
@@ -431,10 +730,11 @@ async def test_keep_alive_413_deferred_body_then_second_get() -> None:
             b"POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 100\r\n\r\n"
         )
         await _drain(app)
-        assert response_status(transport.writes) == 413
-        assert not transport.is_closing()
+        assert transport.writes == []
         proto.data_received(b"y" * 100)
         await _drain(app)
+        assert response_status(transport.writes) == 413
+        assert not transport.is_closing()
         proto.data_received(b"GET / HTTP/1.1\r\nHost: t\r\n\r\n")
         await _drain(app)
         assert response_statuses(transport.writes) == [413, 200]
@@ -448,6 +748,12 @@ async def test_keep_alive_413_deferred_body_then_second_get() -> None:
 @pytest.mark.asyncio
 async def test_declared_body_over_limit_with_connection_close() -> None:
     app = App()
+
+    async def read_body(c, w) -> None:
+        await c.req.body()
+        w.text("ok")
+
+    app.add(Route("POST /"), read_body)
     proto, app, transport = _attach(app=app, max_body_bytes=20)
     try:
         proto.data_received(
@@ -1193,10 +1499,11 @@ def test_request_host_is_lowercased_without_port() -> None:
 @pytest.mark.asyncio
 async def test_protocol_413_finishes_span_without_fail() -> None:
     with TestTracer() as tracer:
-        proto, app, transport = _attach(tracer=tracer, max_body_bytes=20)
+        proto, app, transport = _attach(tracer=tracer)
         try:
             proto.data_received(
-                b"POST /upload HTTP/1.1\r\nHost: t\r\nContent-Length: 100\r\n\r\n"
+                b"POST /upload HTTP/1.1\r\nHost: t\r\n"
+                b"Content-Length: 2147483648\r\n\r\n"
             )
             await _drain(app)
             assert response_status(transport.writes) == 413

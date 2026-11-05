@@ -23,9 +23,12 @@ cdef enum:
     ABORT_DISCONNECTED = 2
     ABORT_TIMEOUT = 3
     # Bodies this size dispatch once complete (body() is already bytes).
-    # An oversize declared body this small is drained on keep-alive
+    # An unread declared body this small is drained on keep-alive
     # instead of closing the connection.
     SMALL_BODY = 256 * 1024
+    # The largest body a read can accept (the limits are C ints).
+    # ``RequestPolicy.max_body_bytes`` is only the default for one read.
+    BODY_LIMIT_MAX = 2147483647
 
 # ``scan_request_path`` result bits (a negative result means 400).
 cdef enum:
@@ -113,6 +116,8 @@ cdef class Request:
     cdef Py_ssize_t _q_off
     cdef Py_ssize_t _q_len
     cdef object _body
+    # Default read limit once the body is detached bytes; -1 means none.
+    cdef Py_ssize_t _body_limit
     cdef object _query
     cdef object _cookies
     cdef object _host
@@ -121,6 +126,7 @@ cdef class Request:
     cdef object _ensure_query(self)
     cdef void prefetch_host(self) noexcept
     cdef void detach_body(self, RequestExchange exchange) noexcept
+    cdef int _check_bytes_limit(self, object max_size) except -1
 
 cdef Request make_request(
     object method,
@@ -482,6 +488,8 @@ cdef class RequestExchange:
     cdef void _maybe_continue(self)
     cdef void _done(self)
     cdef void _maybe_pause(self)
+    cdef Py_ssize_t _feed_limit(self) noexcept
+    cdef Py_ssize_t _read_limit(self, object max_size) except -1
 
 cdef class RequestHeaders:
     # Live view of the exchange arena while the request runs; owns a copy

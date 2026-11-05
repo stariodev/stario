@@ -42,7 +42,11 @@ DEFAULT_THREADS = 1
 
 
 class RequestPolicy:
-    """Header/body size caps, pipelining limit, and timeouts for a connection."""
+    """Header size cap, body read default, pipelining limit, and timeouts.
+
+    `max_body_bytes` is the default limit for `body()` and `stream()`. A
+    handler passes `max_size=` to accept more or less on one read.
+    """
 
     __slots__ = (
         "body_timeout",
@@ -119,7 +123,7 @@ def _config_from_env[T](build: Callable[[], T]) -> T:
 
 
 def request_policy_from_env() -> RequestPolicy:
-    """Read `STARIO_REQUESTS_*` size caps, read/write timeouts, and keep-alive idle timeout."""
+    """Read `STARIO_REQUESTS_*` header cap, body read default, and timeouts."""
     return _config_from_env(
         lambda: RequestPolicy(
             max_header_bytes=env_int(

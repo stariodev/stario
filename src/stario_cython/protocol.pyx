@@ -52,6 +52,7 @@ from stario.telemetry.noop import NoOpTracer
 
 from stario_cython.exchange cimport (
     ABORT_TOO_LARGE,
+    BODY_LIMIT_MAX,
     SMALL_BODY,
     PATH_BAD,
     PATH_HAS_PCT,
@@ -1348,9 +1349,9 @@ cdef class CHttpProtocol(HttpConnection):
     cdef void _after_pump(self):
         """Arm header or idle deadlines after this read.
 
-        Unfinished headers (or a keep-alive 413 drain) get HEADER. A pump
-        that left the HTTP/1 connection empty with no timer — protocol
-        413/431 never goes through ``response_completed`` — gets IDLE.
+        Unfinished headers get HEADER. A pump that left the HTTP/1
+        connection empty with no timer — a protocol 431 never goes through
+        ``response_completed`` — gets IDLE.
         Full keep-alive requests dispatch inside the pump, so HEADER is a
         no-op on that path.
         """
@@ -1745,7 +1746,6 @@ cdef class CHttpProtocol(HttpConnection):
                 has_body
                 or not exchange._keep_alive
                 or llhttp_should_keep_alive(self.parser) == 0,
-                -1,
             )
             return
 
@@ -1756,22 +1756,10 @@ cdef class CHttpProtocol(HttpConnection):
             # HTTP/1.1 requires Host.
             self._protocol_error(400, "Invalid HTTP request")
             return
-        if flags & F_CONTENT_LENGTH and content_length > <uint64_t>self.max_body_bytes:
-            # Keep-alive only when the declared body is small enough to drain.
-            # A huge or chunked upload after 413 would keep the socket reading.
-            if (
-                content_length <= <uint64_t>SMALL_BODY
-                and exchange._keep_alive
-            ):
-                self.h1_headers_too_large = True
-                self._protocol_error(
-                    413,
-                    "Request body too large",
-                    False,
-                    <Py_ssize_t>content_length,
-                )
-            else:
-                self._protocol_error(413, "Request body too large")
+        # max_body_bytes is only the default for a read: the handler decides
+        # (body(max_size=...)). Here only a length no read can accept is 413.
+        if flags & F_CONTENT_LENGTH and content_length > <uint64_t>BODY_LIMIT_MAX:
+            self._protocol_error(413, "Request body too large")
             return
 
         exchange.cache_hot_request_headers()
@@ -1838,7 +1826,7 @@ cdef class CHttpProtocol(HttpConnection):
                         self.reading_exchange = None
                         self.h1_headers_too_large = False
                         return
-                # A queued 413/431 is finished by its in-order answer.
+                # A queued 431 is finished by its in-order answer.
                 if exchange.handler_started:
                     exchange.handler_finished()
             self.reading_exchange = None
@@ -2398,13 +2386,11 @@ cdef class CHttpProtocol(HttpConnection):
         int status,
         object message,
         bint close_conn=True,
-        Py_ssize_t drain_len=-1,
     ) noexcept:
         """Write a protocol HTTP status without dispatch.
 
-        Keep-alive 413/431 (``close_conn=False``) uses ``respond()`` so the
-        connection stays open. ``drain_len >= 0`` discards that many body
-        bytes so llhttp stays synced. Close writes Connection: close (HTTP/1
+        Keep-alive 431 (``close_conn=False``) uses ``respond()`` so the
+        connection stays open. Close writes Connection: close (HTTP/1
         only, and only if nothing is already on the wire) then hangs up.
         """
         cdef RequestExchange exchange
@@ -2416,7 +2402,7 @@ cdef class CHttpProtocol(HttpConnection):
 
         if self.rejected:
             return
-        # A keep-alive 413/431 already dispatched; do not write a second status.
+        # A keep-alive 431 already dispatched; do not write a second status.
         if not close_conn and self.request_dispatched:
             return
 
@@ -2445,16 +2431,12 @@ cdef class CHttpProtocol(HttpConnection):
                 path = None
 
         if not close_conn:
-            # Keep-alive 413/431: answered through the normal dispatch queue,
+            # Keep-alive 431: answered through the normal dispatch queue,
             # so it goes out after any pipelined responses ahead of it.
             if exchange is None:
                 return
             try:
-                if drain_len >= 0:
-                    exchange.reset_body(False, drain_len)
-                    exchange._discard_body = True
-                else:
-                    exchange.mark_nobody()
+                exchange.mark_nobody()
                 self._bind_request(exchange)
                 exchange._protocol_status = status
                 exchange._protocol_body = message.encode("utf-8")
@@ -2962,7 +2944,8 @@ cdef class CHttpProtocol(HttpConnection):
         ex.finish_request_header()
         ex.cache_hot_request_headers()
         content_length = ex._req_content_length
-        if content_length > self.max_body_bytes:
+        # Only a length no read can accept; the handler applies the limit.
+        if content_length > BODY_LIMIT_MAX:
             self._h2_protocol_status(ex, 413)
             return
 

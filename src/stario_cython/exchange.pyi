@@ -139,8 +139,17 @@ class Request:
     def query(self) -> ParsedQuery: ...
     @property
     def cookies(self) -> ParsedCookies: ...
-    async def body(self, max_size: int | None = None) -> bytes: ...
-    def stream(self, max_chunk: int | None = None) -> AsyncIterator[bytes]: ...
+    async def body(self, max_size: int | None = None) -> bytes:
+        """Read the whole body. Raise `RequestBodyError` (413) above `max_size`.
+
+        `max_size=None` uses `RequestPolicy.max_body_bytes`. A larger
+        `max_size` lets this handler accept more than that default. A
+        declared Content-Length above the limit fails before any read.
+        """
+    def stream(
+        self, max_chunk: int | None = None, max_size: int | None = None
+    ) -> AsyncIterator[bytes]:
+        """Yield the body in chunks. `max_size` limits the total, as for `body()`."""
 
 class CRouter:
     def lookup(
