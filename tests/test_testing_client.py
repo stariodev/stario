@@ -344,6 +344,8 @@ async def test_a_body_read_with_a_larger_limit_reads_again() -> None:
     assert await held[0].body() == b"y" * 100
     with pytest.raises(RequestBodyError):
         await held[0].body(max_size=50)
+
+
 async def test_get_route_answers_head_without_a_body() -> None:
     """RFC 9110 9.3.2: a GET route answers HEAD with the same headers."""
     seen: list[tuple[str, str]] = []
