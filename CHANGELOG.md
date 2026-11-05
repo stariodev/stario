@@ -39,6 +39,19 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 - `stream(max_size=)` limits the total bytes of a streamed body.
 - `read_signals(req, max_size=)` passes the limit to `body()`, for signals
   that carry a `FileSignal`.
+- `stario.forms`: `read_form(req)` returns a `Form` with the text fields and
+  the uploaded files of an HTML form. GET and HEAD read the query string.
+  Other methods read an `application/x-www-form-urlencoded` or
+  `multipart/form-data` body. Multipart bodies stream: each file is an
+  `UploadFile` in a `SpooledTemporaryFile` that moves to disk past
+  `spool_size`. Writes to disk and `await upload.read()` run in a thread,
+  so the event loop keeps serving. `Form.get` / `getlist` / `items` / `as_dict` match
+  `req.query`. `max_size`, `max_fields`, `max_field_size`, `max_files`, and
+  `max_file_size` limit the body (413). A malformed body is 400, and another
+  `Content-Type` is 415.
+- `RequestBodyError` accepts 415.
+- The test client quotes multipart names and filenames as browsers do
+  (`"` as `%22`), not with backslashes.
 
 ## 5.3.4 - 2026-11-04
 

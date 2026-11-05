@@ -1992,3 +1992,44 @@ async def test_h2_head_on_sse_ends_at_the_headers() -> None:
         server.close()
         await server.wait_closed()
         await app.drain_tasks()
+
+
+@pytest.mark.asyncio
+async def test_h2_multipart_upload_streams(tmp_path) -> None:
+    from stario.forms import read_form
+
+    payload = bytes(range(256)) * 2000
+    photo = tmp_path / "photo.bin"
+    photo.write_bytes(payload)
+    app = App()
+
+    async def report(c, w) -> None:
+        with await read_form(c.req, max_size=1_000_000) as form:
+            upload = form.file("photo")
+            assert upload is not None
+            data = await upload.read()
+            w.text(f"{form.get('name')}|{upload.filename}|{data == payload}")
+
+    app.add(Route("POST /"), report)
+    loop = asyncio.get_running_loop()
+    port = free_port()
+    server = await loop.create_server(
+        lambda: make_protocol(loop, app, max_body_bytes=1000),
+        "127.0.0.1",
+        port,
+    )
+    try:
+        result = await _curl(
+            "--http2-prior-knowledge",
+            "-F",
+            "name=Mruczek",
+            "-F",
+            f"photo=@{photo};filename=kot.jpg",
+            f"http://127.0.0.1:{port}/",
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "Mruczek|kot.jpg|True"
+    finally:
+        server.close()
+        await server.wait_closed()
+        await app.drain_tasks()
