@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import gc
 import logging
 import random
@@ -19,8 +20,10 @@ from tests.cython.http import (
     connection_set,
     free_port,
     make_protocol,
+    read_response,
     response_status,
     response_statuses,
+    running_server,
 )
 from tests.helpers import assert_status_span
 
@@ -52,6 +55,16 @@ def _attach(app: App | None = None, **kwargs):
 async def _drain(app: App) -> None:
     await asyncio.sleep(0)
     await app.drain_tasks()
+
+
+def _assert_lingering(proto, transport) -> None:
+    """Lingering close: FIN is out, later input is dropped, the peer's EOF closes."""
+    assert transport.eof
+    assert not transport.is_closing()
+    before = len(transport.writes)
+    proto.data_received(b"GET / HTTP/1.1\r\nHost: t\r\n\r\n")
+    assert len(transport.writes) == before
+    assert not proto.eof_received()
 
 
 @pytest.mark.asyncio
@@ -512,7 +525,7 @@ async def test_huge_declared_body_over_limit_closes() -> None:
         assert hits == 1
         proto.data_received(b"y" * 100)
         await _drain(app)
-        assert transport.is_closing()
+        _assert_lingering(proto, transport)
     finally:
         if not transport.is_closing():
             transport.close()
@@ -539,7 +552,7 @@ async def test_unread_large_body_drains_up_to_default_then_closes() -> None:
         assert not transport.is_closing()
         proto.data_received(b"y" * 600)
         await _drain(app)
-        assert transport.is_closing()
+        _assert_lingering(proto, transport)
     finally:
         if not transport.is_closing():
             transport.close()
@@ -568,11 +581,52 @@ async def test_abandoned_large_read_drains_only_up_to_default() -> None:
         assert not transport.is_closing()
         proto.data_received(b"y" * 2000)
         await _drain(app)
-        assert transport.is_closing()
+        _assert_lingering(proto, transport)
     finally:
         if not transport.is_closing():
             transport.close()
         await _drain(app)
+
+
+@pytest.mark.asyncio
+async def test_413_during_an_upload_reaches_the_client() -> None:
+    """A client that keeps uploading reads the 413, then EOF, not a reset.
+
+    Without a lingering close, the server closes with unread input, the
+    kernel sends RST, and the client drops the 413 it has not read yet.
+    """
+    app = App()
+
+    async def read_body(c, w) -> None:
+        await c.req.body()
+        w.text("ok")
+
+    app.add(Route("POST /"), read_body)
+    async with running_server(app, max_body_bytes=1000) as port:
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+
+        async def upload() -> None:
+            chunk = b"y" * 65536
+            with contextlib.suppress(ConnectionError):
+                for _ in range(64):
+                    writer.write(chunk)
+                    await writer.drain()
+
+        sender = asyncio.create_task(upload())
+        try:
+            writer.write(
+                b"POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 50000000\r\n\r\n"
+            )
+            await asyncio.sleep(0.2)
+            response = await read_response(reader)
+            assert response.startswith(b"HTTP/1.1 413")
+            async with asyncio.timeout(5):
+                assert await reader.read() == b""
+        finally:
+            sender.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sender
+            writer.close()
 
 
 @pytest.mark.asyncio
@@ -596,7 +650,7 @@ async def test_content_length_above_read_cap_fails_before_handler() -> None:
         await _drain(app)
         assert response_status(transport.writes) == 413
         assert hits == 0
-        assert transport.is_closing()
+        _assert_lingering(proto, transport)
     finally:
         if not transport.is_closing():
             transport.close()
@@ -1407,7 +1461,7 @@ async def test_stalled_chunked_body_aborts_without_hanging() -> None:
         # RFC 9110 15.5.9: a 408 carries the close option; the stalled
         # upload is not waited for.
         assert b"connection: close" in b"".join(transport.writes).lower()
-        assert transport.is_closing()
+        _assert_lingering(proto, transport)
     finally:
         if not transport.is_closing():
             transport.close()

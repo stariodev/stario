@@ -6,10 +6,24 @@ moves from `method="get"` to `method="post"` keeps the same handler code.
 """
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from tempfile import SpooledTemporaryFile
 from types import TracebackType
 from typing import Self, overload
+
+
+async def in_thread[T](fn: Callable[[], T]) -> T:
+    """Run `fn` in a thread; a cancelled caller still waits for it to end.
+
+    Without the wait, cleanup after the cancel (`Form.close`) could close a
+    spool file while the thread still writes or reads it.
+    """
+    task = asyncio.ensure_future(asyncio.to_thread(fn))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await asyncio.wait({task})
+        raise
 
 
 class UploadFile:
@@ -41,7 +55,7 @@ class UploadFile:
         keeps serving other requests.
         """
         if getattr(self.file, "_rolled", False):
-            return await asyncio.to_thread(self._read_all)
+            return await in_thread(self._read_all)
         return self._read_all()
 
     def _read_all(self) -> bytes:

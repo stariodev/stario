@@ -116,7 +116,7 @@ cdef class Request:
     cdef Py_ssize_t _q_off
     cdef Py_ssize_t _q_len
     cdef object _body
-    # Default read limit once the body is detached bytes; -1 means none.
+    # Default read limit once the body is detached bytes.
     cdef Py_ssize_t _body_limit
     cdef object _query
     cdef object _cookies
@@ -126,7 +126,6 @@ cdef class Request:
     cdef object _ensure_query(self)
     cdef void prefetch_host(self) noexcept
     cdef void detach_body(self, RequestExchange exchange) noexcept
-    cdef int _check_bytes_limit(self, object max_size) except -1
 
 cdef Request make_request(
     object method,
@@ -142,6 +141,7 @@ cdef class HttpConnection:
     cdef public int timeout_cleanup
     cdef void release_exchange(self, RequestExchange exchange)
     cdef void response_completed(self, RequestExchange exchange)
+    cdef void close_lingering(self)
     cdef void set_body_paused(self, RequestExchange exchange, bint paused)
     cdef object ensure_disconnect(self)
     cdef object ensure_stream_disconnect(self, RequestExchange ex)
@@ -370,8 +370,6 @@ cdef class RequestExchange:
     cdef object _h2_date_bare
     cdef object _handler_task
     cdef bint _head_request
-    # No body bytes follow the response headers (HEAD requests).
-    cdef bint _skip_body
     cdef bint _expect_continue
     cdef bint _waiting
     cdef bint _discard_body

@@ -27,18 +27,26 @@ def connection_set() -> Connections:
 class RecordingTransport(asyncio.Transport):
     """Minimal transport used by mock-protocol hardening tests."""
 
-    __slots__ = ("_closing", "_protocol", "reading_calls", "writes")
+    __slots__ = ("_closing", "_protocol", "eof", "reading_calls", "writes")
 
     def __init__(self, protocol: asyncio.Protocol) -> None:
         super().__init__()
         self._protocol = protocol
         self.writes: list[bytes] = []
         self._closing = False
+        self.eof = False
         self.reading_calls: list[str] = []
 
     def write(self, data: bytes | bytearray | memoryview[Any]) -> None:
         assert not self._closing, "write after transport close"
+        assert not self.eof, "write after write_eof"
         self.writes.append(bytes(data))
+
+    def can_write_eof(self) -> bool:
+        return True
+
+    def write_eof(self) -> None:
+        self.eof = True
 
     def close(self) -> None:
         if self._closing:
