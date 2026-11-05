@@ -84,16 +84,16 @@ in application code.
 
 ### From an example
 
-Clone the repo (or copy an example directory) and run:
+The recommended first app is [Tiles](https://github.com/stariodev/tiles), a board that every visitor paints at once. It lives in its own repository, laid out as a full project with tests:
 
 ```bash
-git clone https://github.com/stariodev/stario.git
-cd stario/examples/tiles
+git clone https://github.com/stariodev/tiles
+cd tiles
 uv sync
-uv run python -m main
+uv run python -m app.main
 ```
 
-See [`examples/`](examples/) for **tiles** (recommended), **hello-world**, and **chat-room** (multi-file layout).
+The [Realtime tiles tutorial](https://stario.dev/docs/tutorials/realtime-tiles) builds it step by step. See [`examples/`](examples/) for **hello-world**, **jinja**, and **chat-room** (multi-file layout with SQLite).
 
 ### Manual setup
 

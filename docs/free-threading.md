@@ -244,16 +244,18 @@ For **mutable** process state, pick one of:
    assets, baked markup plans).
 
 There is no safe “just use the dict, 3.14t locks builtins.” Single
-`d[k] = v` will not corrupt the dict. `paint_cell` is still a race:
+`d[k] = v` will not corrupt the dict. `Game.paint` in
+[stariodev/tiles](https://github.com/stariodev/tiles) (`app/features/board/data.py`) is still a race:
 
-```135:143:examples/tiles/main.py
-    def paint_cell(self, user_id: str, cell_id: int) -> str:
-        color = self.user_colors[user_id]
-        if self.board.get(cell_id) == color:
-            self.board.pop(cell_id, None)
-            return "cleared"
-        self.board[cell_id] = color
-        return "painted"
+```python
+    def paint(self, user_id: str, cell: int) -> bool:
+        if self.celebrating:
+            return False
+        color = self.players[user_id]
+        if self.board.get(cell) == color:
+            del self.board[cell]
+        else:
+            self.board[cell] = color
 ```
 
 Two clicks interleave → lost toggle. `board_view` iterating `game.board`
@@ -365,8 +367,9 @@ on every core.
 
 ### 6. Application code we ship as examples
 
-`examples/tiles`: `Game` has no lock. `join` / `leave` / `paint_cell` /
-`board_view` will lose updates and can throw during iteration.
+[stariodev/tiles](https://github.com/stariodev/tiles), the demo in its own repository: `Game` has no
+lock. `join` / `leave` / `paint` / `board_view` will lose updates and can
+throw during iteration.
 
 `examples/chat-room`: `Database` is `sqlite3.connect` with default
 `check_same_thread=True` and the comment “Stario serves on a single
@@ -477,6 +480,6 @@ connections, making `Writer` thread-safe, multiprocess + Relay.
   `vendor/compression_buf.c`
 - Relay: `src/stario/relay.py`, `tests/test_relay.py`
 - Alive/shutdown: `src/stario/http/context.py`
-- Tiles state: `examples/tiles/main.py` (`Game`)
+- Tiles state: `app/features/board/data.py` (`Game`) in [stariodev/tiles](https://github.com/stariodev/tiles)
 - Chat sqlite: `examples/chat-room/app/db.py`
 )

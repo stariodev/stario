@@ -7,7 +7,7 @@ Stario app: a `Route`, a handler that writes through `Writer`, and a
 
 Run with: uv run python -m main
 
-For Datastar, SSE, and shared state, see `examples/tiles`.
+For Datastar, SSE, and shared state, see Tiles: https://github.com/stariodev/tiles
 """
 
 from stario import App, Context, Route, Span, Writer, h

@@ -3,7 +3,7 @@
 One route, one handler, one HTML page — the smallest runnable Stario app.
 
 This example is Stario only. It does not load Datastar. For the live board
-(SSE, Relay, multiplayer), start with [tiles](../tiles/).
+(SSE, Relay, multiplayer), start with [Tiles](https://github.com/stariodev/tiles).
 
 ## Run
 

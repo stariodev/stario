@@ -1,6 +1,6 @@
 # Chat room
 
-Multi-room realtime chat — the **larger-app** counterpart to the single-file **tiles** example, and the reference layout for **Stario + SQLite + Datastar** apps.
+Multi-room realtime chat — the SQLite counterpart to **[Tiles](https://github.com/stariodev/tiles)**, which keeps its board in memory, and the reference layout for **Stario + SQLite + Datastar** apps.
 
 Rooms live in SQLite — the lobby starts empty. Create or delete from the lobby — **New room** opens a dialog; each card has a **×** delete button.
 
