@@ -41,7 +41,7 @@ The counter lives in one server process and resets when it restarts.
 The subscription stays on the outer `main` element while only the counter
 fragment is patched. A reconnect receives the current count immediately.
 
-See [hello-world](../hello-world/) for a minimal page or [tiles](../tiles/) for
+See [hello-world](../hello-world/) for a minimal page or [Tiles](https://github.com/stariodev/tiles) for
 a larger interactive app using Stario markup.
 
 ## Test
