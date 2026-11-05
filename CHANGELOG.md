@@ -58,6 +58,16 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
   under a path prefix. The docstring now names `same_origin()` as the CSRF
   protection for current browsers: CSRF tokens would only add browsers from
   before about 2023.
+- `stario.cookies.SignedCookie`: a cookie with a JSON payload that the
+  client can read but not change. `set(w, data)` signs it with HMAC-SHA256,
+  and `get(req)` returns a `SignedValue` (`data`, `issued_at`, `expires_at`,
+  `age`) only when the signature is valid and the expiry, which the server
+  checks, has not passed. The first of `keys` signs and every key verifies,
+  for rotation. Each key is 32 bytes or more. The signing key is derived
+  from the key and the cookie name, so a value cannot move to another
+  cookie. A value past about 3.9 KB raises an error instead of being
+  dropped by the browser. The defaults are `HttpOnly`, `Secure`, and
+  `SameSite=Lax`.
 
 ## 5.3.4 - 2026-11-04
 
