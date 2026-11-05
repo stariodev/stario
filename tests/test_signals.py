@@ -58,6 +58,14 @@ class TestReadSignals:
             await read_signals(req)
         assert info.value.status_code == 400
 
+    async def test_max_size_limits_the_body(self):
+        req = make_request(method="POST", body=b'{"n":1}')
+
+        with pytest.raises(RequestBodyError) as info:
+            await read_signals(req, max_size=3)
+        assert info.value.status_code == 413
+        assert await read_signals(req, max_size=7) == {"n": 1}
+
     async def test_deep_nesting_raises_body_error_400(self):
         # Past the decoder's depth cap stdlib json raises RecursionError, not
         # ValueError; it must still map to a 400, not a 500.

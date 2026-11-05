@@ -6,6 +6,28 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ## Unreleased
 
+### Changed
+
+- `RequestPolicy.max_body_bytes` (`STARIO_REQUESTS_MAX_BODY_BYTES`) is now
+  the default limit for one read, not a cap for the server. A handler
+  passes `max_size=` to `body()` or `stream()` to accept more or less. An
+  upload route reads `await c.req.body(max_size=6_000_000)`, and every
+  other route keeps the default.
+- The server no longer answers 413 before the handler runs when
+  `Content-Length` is above the default. The read raises 413 instead. It
+  checks the declared length first, so it allocates nothing and sends no
+  `100 Continue`. Only a length above 2^31-1 bytes still gets a 413 before
+  the handler.
+- A body that the handler does not read drains up to the default, then the
+  HTTP/1 connection closes. A small declared body (256 KiB or less) still
+  drains and keeps the connection.
+
+### Added
+
+- `stream(max_size=)` limits the total bytes of a streamed body.
+- `read_signals(req, max_size=)` passes the limit to `body()`, for signals
+  that carry a `FileSignal`.
+
 ## 5.3.4 - 2026-11-04
 
 ### Changed

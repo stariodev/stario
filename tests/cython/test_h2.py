@@ -664,12 +664,13 @@ async def test_h2_declared_body_over_limit_returns_413() -> None:
     app = App()
     hits = 0
 
-    async def hello(_c, w) -> None:
+    async def read_body(c, w) -> None:
         nonlocal hits
         hits += 1
+        await c.req.body()
         w.text("should not run")
 
-    app.add(Route("POST /"), hello)
+    app.add(Route("POST /"), read_body)
     loop = asyncio.get_running_loop()
     port = free_port()
     server = await loop.create_server(
@@ -693,7 +694,87 @@ async def test_h2_declared_body_over_limit_returns_413() -> None:
         assert result.returncode == 0, result.stderr
         assert "HTTP/2 413" in result.stdout
         assert "should not run" not in result.stdout
-        assert hits == 0
+        assert hits == 1
+    finally:
+        server.close()
+        await server.wait_closed()
+        await app.drain_tasks()
+
+
+@pytest.mark.asyncio
+async def test_h2_body_over_default_with_larger_max_size_is_read() -> None:
+    app = App()
+
+    async def read_body(c, w) -> None:
+        w.text(str(len(await c.req.body(max_size=200))))
+
+    app.add(Route("POST /"), read_body)
+    loop = asyncio.get_running_loop()
+    port = free_port()
+    server = await loop.create_server(
+        lambda: make_protocol(loop, app, max_body_bytes=20),
+        "127.0.0.1",
+        port,
+    )
+    try:
+        result = await _curl(
+            "--http2-prior-knowledge",
+            "-X",
+            "POST",
+            "-d",
+            "x" * 100,
+            f"http://127.0.0.1:{port}/",
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "100"
+    finally:
+        server.close()
+        await server.wait_closed()
+        await app.drain_tasks()
+
+
+@pytest.mark.asyncio
+async def test_h2_content_length_above_read_cap_is_413_before_handler() -> None:
+    app = App()
+    hits = 0
+
+    async def read_body(c, w) -> None:
+        nonlocal hits
+        hits += 1
+        await c.req.body(max_size=2**40)
+        w.text("ok")
+
+    app.add(Route("POST /"), read_body)
+    loop = asyncio.get_running_loop()
+    port = free_port()
+    server = await loop.create_server(
+        lambda: make_protocol(loop, app),
+        "127.0.0.1",
+        port,
+    )
+    try:
+        reader, writer, buf = await h2_handshake("127.0.0.1", port)
+        try:
+            writer.write(
+                pack_frame(
+                    TYPE_HEADERS,
+                    FLAG_END_HEADERS,
+                    1,
+                    encode_request(
+                        method="POST",
+                        path="/",
+                        extra=[(b"content-length", b"2147483648")],
+                    ),
+                )
+            )
+            await writer.drain()
+            frames, buf = await read_stream(reader, buf, 1)
+            assert hits == 0
+            assert not has_goaway(frames)
+            assert b"413" in stream_headers_blob(frames, 1)
+        finally:
+            writer.close()
+            await writer.wait_closed()
     finally:
         server.close()
         await server.wait_closed()
@@ -705,13 +786,17 @@ async def test_h2_oversize_body_does_not_kill_connection() -> None:
     app = App()
     hits = 0
 
+    async def read_body(c, w) -> None:
+        await c.req.body()
+        w.text("should not run")
+
     async def hello(_c, w) -> None:
         nonlocal hits
         hits += 1
         w.text("ok")
 
     app.add(Route("GET /"), hello)
-    app.add(Route("POST /"), hello)
+    app.add(Route("POST /"), read_body)
     loop = asyncio.get_running_loop()
     port = free_port()
     server = await loop.create_server(
@@ -730,7 +815,7 @@ async def test_h2_oversize_body_does_not_kill_connection() -> None:
                     encode_request(
                         method="POST",
                         path="/",
-                        extra=[(b"content-length", b"100")],
+                        extra=[(b"content-length", b"1000000")],
                     ),
                 )
             )

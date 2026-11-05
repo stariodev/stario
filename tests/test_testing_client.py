@@ -7,9 +7,12 @@ import asyncio
 import pytest
 
 from stario import App, Context, Route, Writer
+from stario.exceptions import RequestBodyError
 from stario.http.compression import CompressionConfig
+from stario.http.config import RequestPolicy
 from stario.testing import TestClient
 from stario.testing.wire import ResponseReader
+from stario_cython.exchange import Request
 
 
 async def test_invalid_target_is_the_protocols_400() -> None:
@@ -275,3 +278,69 @@ def test_response_reader_frames_chunked_and_length_bodies() -> None:
     head = ResponseReader(head_request=True)
     head.feed(b"HTTP/1.1 200 OK\r\ncontent-length: 99\r\n\r\n")
     assert head.done
+
+
+async def test_body_limit_is_a_default_each_read_can_raise() -> None:
+    """`RequestPolicy.max_body_bytes` is the default; `max_size` overrides it."""
+
+    async def default_limit(c: Context, w: Writer) -> None:
+        w.text(str(len(await c.req.body())))
+
+    async def upload(c: Context, w: Writer) -> None:
+        w.text(str(len(await c.req.body(max_size=1000))))
+
+    app = App()
+    app.add(Route("POST /small"), default_limit)
+    app.add(Route("POST /upload"), upload)
+    async with TestClient(app, requests=RequestPolicy(max_body_bytes=20)) as client:
+        small_ok = await client.post("/small", content=b"y" * 20)
+        small_big = await client.post("/small", content=b"y" * 100)
+        upload_big = await client.post("/upload", content=b"y" * 100)
+        upload_huge = await client.post("/upload", content=b"y" * 1001)
+    assert (small_ok.status_code, small_ok.text) == (200, "20")
+    assert small_big.status_code == 413
+    assert (upload_big.status_code, upload_big.text) == (200, "100")
+    assert upload_huge.status_code == 413
+
+
+async def test_detached_body_keeps_the_default_limit() -> None:
+    """A body read after the handler returns still gets the server default."""
+
+    held: list[Request] = []
+
+    async def keep(c: Context, w: Writer) -> None:
+        held.append(c.req)
+        w.text("ok")
+
+    app = App()
+    app.add(Route("POST /"), keep)
+    async with TestClient(app, requests=RequestPolicy(max_body_bytes=20)) as client:
+        response = await client.post("/", content=b"y" * 100)
+        await asyncio.sleep(0)
+    assert response.status_code == 200
+    req = held[0]
+    with pytest.raises(RequestBodyError) as info:
+        await req.body()
+    assert info.value.status_code == 413
+    assert await req.body(max_size=100) == b"y" * 100
+
+
+async def test_a_body_read_with_a_larger_limit_reads_again() -> None:
+    """A second read without max_size returns the body the first read accepted."""
+    held: list[Request] = []
+
+    async def upload(c: Context, w: Writer) -> None:
+        first = await c.req.body(max_size=1000)
+        again = await c.req.body()
+        held.append(c.req)
+        w.text(f"{len(first)} {len(again)}")
+
+    app = App()
+    app.add(Route("POST /"), upload)
+    async with TestClient(app, requests=RequestPolicy(max_body_bytes=20)) as client:
+        response = await client.post("/", content=b"y" * 100)
+        await asyncio.sleep(0)
+    assert (response.status_code, response.text) == (200, "100 100")
+    assert await held[0].body() == b"y" * 100
+    with pytest.raises(RequestBodyError):
+        await held[0].body(max_size=50)
