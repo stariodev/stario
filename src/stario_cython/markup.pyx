@@ -116,7 +116,13 @@ cdef void _bind():
 # ---------------------------------------------------------------------------
 # Escaping
 
-cdef object _escape_1byte(object s, bint quotes):
+cdef enum:
+    ESC_TEXT = 0      # & < >
+    ESC_DQUOTE = 1    # & < > "
+    ESC_SQUOTE = 2    # & < > '
+
+
+cdef object _escape_1byte(object s, int mode):
     """Escape a Latin-1 / ASCII ``str`` in one C pass; same object if clean."""
     cdef const unsigned char* src = <const unsigned char*>PyUnicode_DATA(s)
     cdef Py_ssize_t n = PyUnicode_GET_LENGTH(s)
@@ -124,6 +130,7 @@ cdef object _escape_1byte(object s, bint quotes):
     cdef Py_ssize_t extra = 0
     cdef Py_ssize_t w = 0
     cdef unsigned char c
+    cdef unsigned char quote = 34 if mode == ESC_DQUOTE else (39 if mode == ESC_SQUOTE else 0)
     cdef unsigned char* dst
     cdef object out
     for i in range(n):
@@ -132,8 +139,8 @@ cdef object _escape_1byte(object s, bint quotes):
             extra += 4
         elif c == 60 or c == 62:
             extra += 3
-        elif quotes and c == 34:
-            extra += 5
+        elif c == quote and quote != 0:
+            extra += 5 if quote == 34 else 4
     if extra == 0:
         return s
     out = PyUnicode_New(n + extra, PyUnicode_MAX_CHAR_VALUE(s))
@@ -149,10 +156,13 @@ cdef object _escape_1byte(object s, bint quotes):
         elif c == 62:
             dst[w] = 38; dst[w + 1] = 103; dst[w + 2] = 116; dst[w + 3] = 59
             w += 4
-        elif quotes and c == 34:
+        elif c == 34 and quote == 34:
             dst[w] = 38; dst[w + 1] = 113; dst[w + 2] = 117; dst[w + 3] = 111
             dst[w + 4] = 116; dst[w + 5] = 59
             w += 6
+        elif c == 39 and quote == 39:
+            dst[w] = 38; dst[w + 1] = 35; dst[w + 2] = 51; dst[w + 3] = 57; dst[w + 4] = 59
+            w += 5
         else:
             dst[w] = c
             w += 1
@@ -161,7 +171,7 @@ cdef object _escape_1byte(object s, bint quotes):
 
 cdef inline object c_escape_text(object s):
     if PyUnicode_KIND(s) == PyUnicode_1BYTE_KIND:
-        return _escape_1byte(s, False)
+        return _escape_1byte(s, ESC_TEXT)
     if "&" not in s and "<" not in s and ">" not in s:
         return s
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -169,7 +179,7 @@ cdef inline object c_escape_text(object s):
 
 cdef inline object c_escape_attr(object s):
     if PyUnicode_KIND(s) == PyUnicode_1BYTE_KIND:
-        return _escape_1byte(s, True)
+        return _escape_1byte(s, ESC_DQUOTE)
     if "&" not in s and "<" not in s and ">" not in s and '"' not in s:
         return s
     return (
@@ -177,6 +187,19 @@ cdef inline object c_escape_attr(object s):
         .replace("<", "&lt;")
         .replace(">", "&gt;")
         .replace('"', "&quot;")
+    )
+
+
+cdef inline object c_escape_sq_attr(object s):
+    if PyUnicode_KIND(s) == PyUnicode_1BYTE_KIND:
+        return _escape_1byte(s, ESC_SQUOTE)
+    if "'" not in s and "&" not in s and "<" not in s and ">" not in s:
+        return s
+    return (
+        s.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("'", "&#39;")
     )
 
 
@@ -197,6 +220,15 @@ def escape_attribute_value(str s not None):
     keeps Datastar/JS expressions with string literals readable on the wire.
     """
     return c_escape_attr(s)
+
+
+def escape_sq_attribute_value(str s not None):
+    """Escape for single-quoted attribute values (`'`, `&`, `<`, `>`).
+
+    Use when the value is JSON or other text that already contains double
+    quotes, so the attribute can be wrapped in single quotes on the wire.
+    """
+    return c_escape_sq_attr(s)
 
 
 def check_raw_text(str text not None, str tag not None):
