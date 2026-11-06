@@ -119,6 +119,58 @@ class TestValidateAttributeKey:
             validate_attribute_key(bad_key)
 
 
+class TestCacheBounds:
+    """Bounded caches stop filling at their cap and are never cleared in place.
+
+    Both caches are read without a lock from every thread (see
+    docs/free-threading.md), so past the cap a miss must still validate and
+    render correctly, just without being remembered.
+    """
+
+    def test_attribute_keys_past_the_cache_cap_still_validate(self):
+        from stario_cython.markup import _valid_key_cache_size
+
+        cap = 4096
+        keys = [f"data-k{i}" for i in range(cap + 64)]
+        for key in keys:
+            assert render(h.Div({key: "v"})) == f'<div {key}="v"></div>'
+        with pytest.raises(StarioError, match="Invalid attribute name"):
+            h.Div({"bad key": "v"})
+        # Full, and still full: entries past the cap are not remembered and
+        # the ones before it were not thrown away.
+        assert _valid_key_cache_size() == cap
+
+    def test_class_fragments_past_the_cache_cap_still_render(self):
+        from stario.markup import attributes
+
+        cap = attributes._CLASSES_CACHE_MAX
+        for i in range(cap + 64):
+            assert classes(f"c{i}", "x") == Attrs(f' class="c{i} x"')
+        assert len(attributes._CLASSES_CACHE) == cap
+        assert ("c0", "x") in attributes._CLASSES_CACHE
+
+    def test_concurrent_builds_with_many_distinct_keys(self):
+        import threading
+
+        errors: list[BaseException] = []
+
+        def worker(offset: int) -> None:
+            try:
+                for i in range(5000):
+                    key = f"data-t{offset}-{i}"
+                    node = h.Div({key: "v"}, classes("a", f"b{i}"), "t")
+                    assert render(node) == f'<div {key}="v" class="a b{i}">t</div>'
+            except BaseException as error:  # pragma: no cover - reported below
+                errors.append(error)
+
+        threads = [threading.Thread(target=worker, args=(n,)) for n in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert errors == []
+
+
 class TestSvgNamespace:
     """SVG tags live on `stario.markup.svg`."""
 

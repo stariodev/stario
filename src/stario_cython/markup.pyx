@@ -33,7 +33,6 @@ cdef extern from "Python.h":
     unsigned int PyUnicode_MAX_CHAR_VALUE(object o)
     object PyUnicode_New(Py_ssize_t size, unsigned int maxchar)
     int PyUnicode_1BYTE_KIND
-    PyObject* PyDict_GetItemWithError(object d, object key) except? NULL
     int PyDict_Next(object d, Py_ssize_t* pos, PyObject** key, PyObject** value)
 
 cdef extern from *:
@@ -74,6 +73,9 @@ cdef object _Mapping = None
 cdef bint _bound = False
 
 # Validated attribute names: str -> str, so the hot path is one dict lookup.
+# Bounded by refusing new entries past the cap, never by clearing: a clear
+# in place could free a key another thread is still reading (free-threaded
+# builds), and the dict object itself is never replaced for the same reason.
 cdef dict _VALID_KEYS = {}
 cdef int _VALID_KEYS_MAX = 4096
 
@@ -84,6 +86,13 @@ cdef int _MAX_DEPTH = 1000
 
 
 cdef void _bind():
+    """Bind the Python symbols once.
+
+    The first call happens while ``stario.markup.html`` builds its tags at
+    import, under the import lock, so every later caller (any thread) sees
+    the symbols already set. The imports are idempotent and ``_bound`` is
+    written last, so a repeated call can only rewrite the same values.
+    """
     global _Element, _SafeString, _Attrs, _BakeSlot, _AttrSlot, _RawSlot
     global _slot_name, _validate_attribute_key, _Mapping, _bound
     if _bound:
@@ -228,17 +237,23 @@ cdef object _attrs_before_children_error(object tag_repr):
     )
 
 
+def _valid_key_cache_size():
+    """Entries in the attribute-name cache (tests check it stops at the cap)."""
+    return len(_VALID_KEYS)
+
+
 cdef inline object _valid_key(object raw_key):
     """The validated attribute name: one dict hit, else the Python validator."""
-    cdef PyObject* hit
+    cdef object hit
     if type(raw_key) is str:
-        hit = PyDict_GetItemWithError(_VALID_KEYS, raw_key)
-        if hit != NULL:
-            return <object>hit
+        # ``dict.get`` hands back a new reference (Cython uses the
+        # free-threading-safe lookup), so a concurrent writer cannot free it.
+        hit = _VALID_KEYS.get(raw_key)
+        if hit is not None:
+            return hit
     key = _validate_attribute_key(raw_key)
-    if len(_VALID_KEYS) >= _VALID_KEYS_MAX:
-        _VALID_KEYS.clear()
-    _VALID_KEYS[key] = key
+    if len(_VALID_KEYS) < _VALID_KEYS_MAX:
+        _VALID_KEYS[key] = key
     return key
 
 

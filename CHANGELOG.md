@@ -22,6 +22,10 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
   inside `h.Script` or `h.Style` is spliced verbatim too, with the same
   joined check on every call. `Tag(name, raw_text=True)` marks a custom
   raw-text tag.
+- The compiled attribute-name cache and the `classes()` fragment cache
+  stop filling at their cap instead of being cleared in place, and the
+  name cache reads with a strong reference, so a build on one thread can
+  no longer free an entry another thread is reading under free threading.
 - `data.on("myEvent", …)` emits `data-on:my-event__case.camel`, and
   `data.class_("myClass", …)` emits `data-class:my-class__case.camel`
   (`__case.pascal` for PascalCase), so the browser's lowercasing of the

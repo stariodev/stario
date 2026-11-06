@@ -18,7 +18,10 @@ from .wire import wire_scalar_attr_fragment
 # A property name or value that could start another declaration or block.
 _STYLE_KEY_BAD = re.compile(r"[:;{}\\]")
 _STYLE_VALUE_BAD = re.compile(r"[;{}\\]")
-# Rendered `class="..."` fragments for all-str token tuples (Tailwind lists repeat).
+# Rendered `class="..."` fragments for all-str token tuples (Tailwind lists
+# repeat). Bounded by refusing new entries past the cap, never by clearing:
+# a clear in place could free an entry another thread is still reading
+# (free-threaded builds). See docs/free-threading.md.
 _CLASSES_CACHE: dict[tuple[Any, ...], Attrs] = {}
 _CLASSES_CACHE_MAX = 1024
 
@@ -158,9 +161,11 @@ def classes(*tokens: ClassInput) -> Attrs:
         )
 
     result = Attrs(f' class="{" ".join(rendered)}"')
-    if cached is None and all(type(token) is str for token in tokens):
-        if len(_CLASSES_CACHE) >= _CLASSES_CACHE_MAX:
-            _CLASSES_CACHE.clear()
+    if (
+        cached is None
+        and len(_CLASSES_CACHE) < _CLASSES_CACHE_MAX
+        and all(type(token) is str for token in tokens)
+    ):
         _CLASSES_CACHE[tokens] = result
     return result
 
