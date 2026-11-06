@@ -67,6 +67,7 @@ cdef object _SafeString = None
 cdef object _Attrs = None
 cdef object _BakeSlot = None
 cdef object _AttrSlot = None
+cdef object _RawSlot = None
 cdef object _slot_name = None
 cdef object _validate_attribute_key = None
 cdef object _Mapping = None
@@ -83,19 +84,20 @@ cdef int _MAX_DEPTH = 1000
 
 
 cdef void _bind():
-    global _Element, _SafeString, _Attrs, _BakeSlot, _AttrSlot, _slot_name
-    global _validate_attribute_key, _Mapping, _bound
+    global _Element, _SafeString, _Attrs, _BakeSlot, _AttrSlot, _RawSlot
+    global _slot_name, _validate_attribute_key, _Mapping, _bound
     if _bound:
         return
     from collections.abc import Mapping
     from stario.markup.escape import validate_attribute_key
-    from stario.markup.slots import AttrSlot, BakeSlot, slot_name
+    from stario.markup.slots import AttrSlot, BakeSlot, RawSlot, slot_name
     from stario.markup.types import Attrs, Element, SafeString
     _Element = Element
     _SafeString = SafeString
     _Attrs = Attrs
     _BakeSlot = BakeSlot
     _AttrSlot = AttrSlot
+    _RawSlot = RawSlot
     _slot_name = slot_name
     _validate_attribute_key = validate_attribute_key
     _Mapping = Mapping
@@ -355,46 +357,76 @@ cdef class Tag:
     def __repr__(self):
         return self._repr()
 
-    cdef int _raw_walk(self, object child, list run, list out) except -1:
+    cdef int _raw_walk(self, object child, list run, list out, bint* slots) except -1:
         """Collect raw-text content in document order.
 
-        ``str`` pieces build up one *run*; lists are flattened into it.
-        Anything else (a ``SafeString`` the caller vouches for, a number,
-        ``None``) ends the run and passes through untouched.
+        ``str`` pieces and ``@baked`` slots build up one *run*; lists are
+        flattened into it. Anything else (a ``SafeString`` the caller vouches
+        for, a number, ``None``) ends the run and passes through untouched.
         """
         cdef object child_type = type(child)
         if child_type is str:
             PyList_Append(run, child)
         elif child_type is list:
             for item in <list>child:
-                self._raw_walk(item, run, out)
+                self._raw_walk(item, run, out, slots)
+        elif child_type is _BakeSlot:
+            PyList_Append(run, child)
+            slots[0] = True
         else:
-            self._raw_flush(run, out)
+            self._raw_flush(run, out, slots)
             if child is not None:
                 PyList_Append(out, child)
         return 0
 
-    cdef int _raw_flush(self, list run, list out) except -1:
+    cdef int _raw_flush(self, list run, list out, bint* slots) except -1:
         """Close a run: check it once, joined, and emit it as one child.
 
         The wire concatenates children, so ``"</scr"`` next to ``"ipt>"``
-        must fail like ``"</script>"`` does.
+        must fail like ``"</script>"`` does. Without slots the run becomes a
+        single ``SafeString``. With slots it becomes a ``RawSlot`` whose
+        ``parts`` alternate literal text and slots: adjacent literals are
+        joined and checked now, and the splice checks the whole run again
+        with the values in place.
         """
+        cdef list parts
+        cdef list literal
         cdef object text
         if not run:
             return 0
-        text = "".join(run)
-        _check_raw_text(text, self.name)
-        PyList_Append(out, _SafeString(text))
+        if not slots[0]:
+            text = "".join(run)
+            _check_raw_text(text, self.name)
+            PyList_Append(out, _SafeString(text))
+        else:
+            parts = []
+            literal = []
+            for item in run:
+                if type(item) is str:
+                    PyList_Append(literal, item)
+                    continue
+                if literal:
+                    text = "".join(literal)
+                    _check_raw_text(text, self.name)
+                    PyList_Append(parts, text)
+                    del literal[:]
+                PyList_Append(parts, item)
+            if literal:
+                text = "".join(literal)
+                _check_raw_text(text, self.name)
+                PyList_Append(parts, text)
+            PyList_Append(out, _RawSlot(self.name, tuple(parts)))
+            slots[0] = False
         del run[:]
         return 0
 
     cdef list _raw_text_children(self, list children):
         cdef list run = []
         cdef list out = []
+        cdef bint slots = False
         for child in children:
-            self._raw_walk(child, run, out)
-        self._raw_flush(run, out)
+            self._raw_walk(child, run, out, &slots)
+        self._raw_flush(run, out, &slots)
         return out
 
     cdef int _add_mapping(
@@ -567,6 +599,15 @@ cdef class Tag:
 # ---------------------------------------------------------------------------
 # Render
 
+cdef object _unfilled_slot_name(object node):
+    if type(node) is _BakeSlot:
+        return _slot_name(node)
+    for part in node.parts:
+        if type(part) is _BakeSlot:
+            return _slot_name(part)
+    return "?"
+
+
 cdef int _render_node(object node, list out, int depth) except -1:
     cdef object node_type = type(node)
     cdef object attrs
@@ -634,10 +675,10 @@ cdef int _render_node(object node, list out, int depth) except -1:
     if node is None:
         return 0
 
-    if node_type is _BakeSlot:
+    if node_type is _BakeSlot or node_type is _RawSlot:
         raise StarioError(
             "Unfilled @baked slot in render tree",
-            context={"slot_name": _slot_name(node)},
+            context={"slot_name": _unfilled_slot_name(node)},
             help_text="Call the baked function to substitute slots, then render the returned fragment.",
             example=(
                 "@baked\n"

@@ -13,16 +13,17 @@ from functools import update_wrapper
 from typing import Any, cast, overload
 
 from stario.exceptions import StarioError
+from stario_cython.markup import check_raw_text
 
 from .escape import escape_text
 from .render import render_nodes_to_string
-from .slots import AttrSlot, BakeSlot, slot_name
+from .slots import AttrSlot, BakeSlot, RawSlot, slot_name
 from .tag import Tag
 from .types import Element, HtmlElement, SafeString
 from .wire import wire_scalar_attr_fragment
 
 type BakedNode = HtmlElement | BakeSlot | Tag
-type PlanSegment = SafeString | BakeSlot | AttrSlot
+type PlanSegment = SafeString | BakeSlot | AttrSlot | RawSlot
 
 
 def _reject_unsupported_parameter_kinds(sig: inspect.Signature) -> None:
@@ -56,6 +57,10 @@ def _reject_unused_parameters(
             used.add(slot_name(cast(BakeSlot, segment)))
         elif segment_type is AttrSlot:
             used.add(cast(AttrSlot, segment).name)
+        elif segment_type is RawSlot:
+            for part in cast(RawSlot, segment).parts:
+                if type(part) is BakeSlot:
+                    used.add(slot_name(part))
 
     for name in sig.parameters:
         if name in used:
@@ -87,7 +92,7 @@ def _flatten_node_into_segments(
         return
 
     match node:
-        case BakeSlot():
+        case BakeSlot() | RawSlot():
             if pending:
                 segments.append(SafeString("".join(pending)))
                 pending.clear()
@@ -236,6 +241,35 @@ def _splice_child(value: Any) -> str:
     return render_nodes_to_string((value,), root_count=1)
 
 
+def _raw_text(value: Any) -> str:
+    """One raw-text piece: `str` verbatim, otherwise the `render` ladder."""
+    value_type = type(value)
+    if value_type is str:
+        return cast(str, value)
+    if value is None:
+        return ""
+    if value_type is SafeString:
+        return cast(SafeString, value).rendered
+    if value_type is int or value_type is float:
+        return str(value)
+    if value_type is list:
+        return "".join(_raw_text(item) for item in cast(list[Any], value))
+    return render_nodes_to_string((value,), root_count=1)
+
+
+def _splice_raw(tag: str, parts: tuple[Any, ...]) -> str:
+    """Splice one raw-text run (`h.Script(code)`): verbatim, checked once.
+
+    `parts` is the run with the call's values in place of the slots. The
+    breakout check runs over the joined text, as `Tag.__call__` does for
+    literal children, so `"</scr"` in the template and `"ipt>"` in a value
+    fail together the way `"</script>"` alone does.
+    """
+    text = "".join([_raw_text(part) for part in parts])
+    check_raw_text(text, tag)
+    return text
+
+
 def _generate_splice_function(
     builder: Callable[..., Any],
     sig: inspect.Signature,
@@ -247,6 +281,7 @@ def _generate_splice_function(
         "__stario_SafeString": SafeString,
         "__stario_attr": _splice_attribute,
         "__stario_child": _splice_child,
+        "__stario_raw": _splice_raw,
     }
 
     parameters_src: list[str] = []
@@ -283,6 +318,19 @@ def _generate_splice_function(
             elif segment_type is AttrSlot:
                 attr_slot = cast(AttrSlot, segment)
                 expr_parts.append(f"__stario_attr({attr_slot.key!r}, {attr_slot.name})")
+            elif segment_type is RawSlot:
+                raw_slot = cast(RawSlot, segment)
+                parts_src: list[str] = []
+                for part_index, part in enumerate(raw_slot.parts):
+                    if type(part) is BakeSlot:
+                        parts_src.append(slot_name(part))
+                    else:
+                        literal_name = f"__stario_raw_{plan_index}_{part_index}"
+                        namespace[literal_name] = part
+                        parts_src.append(literal_name)
+                expr_parts.append(
+                    f"__stario_raw({raw_slot.tag!r}, ({', '.join(parts_src)},))"
+                )
             else:
                 slot = cast(BakeSlot, segment)
                 expr_parts.append(f"__stario_child({slot_name(slot)})")
@@ -328,7 +376,9 @@ def baked[**P](
 
     Parameters may appear as element children or whole attribute values. Every
     call returns a `SafeString` with dynamic children and attributes already
-    rendered.
+    rendered. A parameter inside `h.Script` or `h.Style` is spliced verbatim,
+    as a literal `str` child would be, and the element's breakout check runs
+    on every call.
 
     Use this for repeated application views whose structure is stable across
     calls. Keep baked builders declarative: compute conditionals, loops, and

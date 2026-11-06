@@ -18,8 +18,10 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
   `h.Script("if (a < b) go()")` now works. Text that would end the element
   early (`</script`, `<!--` in a script, `</style`) raises `StarioError`;
   the check runs once over the joined children, so `h.Script("</scr",
-  "ipt>")` fails like `h.Script("</script>")` does. `Tag(name,
-  raw_text=True)` marks a custom raw-text tag.
+  "ipt>")` fails like `h.Script("</script>")` does. A `@baked` parameter
+  inside `h.Script` or `h.Style` is spliced verbatim too, with the same
+  joined check on every call. `Tag(name, raw_text=True)` marks a custom
+  raw-text tag.
 - `data.on("myEvent", …)` emits `data-on:my-event__case.camel`, and
   `data.class_("myClass", …)` emits `data-class:my-class__case.camel`
   (`__case.pascal` for PascalCase), so the browser's lowercasing of the
