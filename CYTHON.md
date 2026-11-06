@@ -46,6 +46,7 @@ Direct TLS: `STARIO_SSL_CERTFILE` / `STARIO_SSL_KEYFILE` (or
 | `headers.pxi` | `Headers` (response, `w.headers`), name interning |
 | `router.pxi` | `CRouter` trie compiled from the Python `Router` |
 | `codecs.pyx` | Brotli / zstd / gzip for Python callers (`Assets`, `Files`) |
+| `markup.pyx` | `Tag.__call__` (element builder), the render walk, `escape_text` / `escape_attribute_value`; `stario.markup` re-exports them |
 | `vendor/compression_buf.c` | Encoder pools (thread-local), one-shot Brotli, decoders |
 
 ## Request path

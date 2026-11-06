@@ -184,6 +184,12 @@ extensions = [
         extra_link_args=list(strip_args),
     ),
     Extension(
+        "stario_cython.markup",
+        sources=["src/stario_cython/markup.pyx"],
+        extra_compile_args=list(base_args),
+        extra_link_args=list(strip_args),
+    ),
+    Extension(
         "stario_cython.protocol",
         sources=[
             "src/stario_cython/protocol.pyx",

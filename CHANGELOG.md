@@ -116,6 +116,16 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
   many optional file inputs still posts. Before, each empty part allocated
   and closed a spool and never counted, so an unlimited number of them was
   accepted.
+- Building and rendering markup runs in C. `Tag.__call__`, the render
+  walk, `escape_text`, and `escape_attribute_value` live in
+  `stario_cython.markup`; `stario.markup.tag`, `.render`, and `.escape`
+  re-export them. Elements, the `@baked` plan, `SafeString`, `Attrs`, and
+  every error message are unchanged, and the output is byte-identical.
+  On the in-process benchmark the 50-row page goes from 219 µs to 57 µs
+  per request; one `h.Div("text")` goes from 0.45 µs to 0.09 µs, and the
+  naive tree-per-call page now renders in the same time as a compiled
+  Jinja2 template (`benchmarks/html/compare.py`: 127 µs against 121 µs).
+  `Tag.empty_mode` is the name of the `empty=` setting on a tag.
 
 ### Added
 

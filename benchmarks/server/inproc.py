@@ -296,7 +296,7 @@ async def main(only: str | None) -> None:
             print(f"{name:<28}{ns / 1000:>10.2f}")
 
     for name, raw in EAGER.items():
-        if only is None or only == name:
+        if only is None or name.startswith(only):
             show(name, await bench_eager(app, raw))
     if only in (None, "await_once"):
         show("await_once", await bench_await_once(app))
