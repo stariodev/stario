@@ -2182,7 +2182,7 @@ async def test_h2_respond_after_client_reset_releases_exchange() -> None:
     app.add(Route("GET /slow"), slow)
     server, port = await _h2_server(app)
     try:
-        reader, writer, buf = await h2_handshake("127.0.0.1", port)
+        _reader, writer, _buf = await h2_handshake("127.0.0.1", port)
         try:
             writer.write(
                 pack_frame(
@@ -2230,7 +2230,7 @@ async def test_h2_disconnect_mid_stream_releases_exchange() -> None:
     app.add(Route("GET /stream"), stream)
     server, port = await _h2_server(app)
     try:
-        reader, writer, buf = await h2_handshake("127.0.0.1", port)
+        _reader, writer, _buf = await h2_handshake("127.0.0.1", port)
         writer.write(
             pack_frame(
                 TYPE_HEADERS,
