@@ -419,7 +419,7 @@ cdef bytes _quote_path(object path):
     return _url_quote(path or "/", safe="/!$&'()*+,;=:@~").encode("ascii")
 
 
-# Python-callable wrappers (``stario.http.wire`` fallback and tests).
+# Python-callable wrappers (tests).
 def canonical_request_path(raw):
     """``(status, target)`` for a raw origin-form path (bytes, no query).
 

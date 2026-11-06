@@ -178,6 +178,7 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
   writer encodes responses itself. `compress_bytes(config, encoding, data)`
   encodes one body for precompressed files, `Headers.unsafe_merge_vary(token)`
   replaces `merge_vary`, and the decoders are in `stario_cython.codecs`.
+- `stario.datastar.format.case_modifier`, which had no caller.
 
 ## 5.4.0 - 2026-11-05
 
