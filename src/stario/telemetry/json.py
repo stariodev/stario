@@ -7,6 +7,7 @@ import sys
 import threading
 from pathlib import Path
 from typing import Any, TextIO
+from uuid import UUID
 
 from stario._env import env_float, env_int, env_optional_str
 
@@ -19,25 +20,37 @@ _DEFAULT_MAX_PENDING_SPANS = 65536
 _DEFAULT_MAX_BATCH_SPANS = 512
 
 
+def _uuid_str(value: UUID) -> str:
+    """`str(value)`: the 32 hex digits with the four dashes."""
+    h = value.hex
+    return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
+
+
 def _serialize_span(span: RecordingSpan) -> dict[str, Any]:
     """Serialize one finished span."""
-    if span.start_ns is None or span.end_ns is None:
+    start_ns = span.start_ns
+    end_ns = span.end_ns
+    if start_ns is None or end_ns is None:
         raise RuntimeError("JsonTracer can only serialize finished spans")
+    span_id = _uuid_str(span.id)
+    # A root's trace id is its own id object; format it once.
+    trace_id = span_id if span.trace_id is span.id else _uuid_str(span.trace_id)
+    error = span.error
     result: dict[str, Any] = {
-        "span_id": str(span.id),
-        "trace_id": str(span.trace_id),
+        "span_id": span_id,
+        "trace_id": trace_id,
         "name": span.name,
-        "start_ns": span.start_ns,
-        "end_ns": span.end_ns,
-        "duration_ns": span.end_ns - span.start_ns,
-        "status": "error" if span.error else "ok",
+        "start_ns": start_ns,
+        "end_ns": end_ns,
+        "duration_ns": end_ns - start_ns,
+        "status": "ok" if error is None else "error",
     }
 
     if span.parent_id is not None:
-        result["parent_id"] = str(span.parent_id)
+        result["parent_id"] = _uuid_str(span.parent_id)
 
-    if span.error:
-        result["error"] = span.error
+    if error is not None:
+        result["error"] = error
 
     if span.attributes:
         result["attributes"] = span.attributes
@@ -61,7 +74,7 @@ def _serialize_span(span: RecordingSpan) -> dict[str, Any]:
         for link in span.links:
             item: dict[str, Any] = {
                 "name": link.name,
-                "span_id": str(link.span_id),
+                "span_id": _uuid_str(link.span_id),
             }
             if link.attributes:
                 item["attributes"] = link.attributes

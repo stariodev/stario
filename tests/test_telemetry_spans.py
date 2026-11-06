@@ -135,6 +135,26 @@ class TestRecordingSpanAttributes:
         assert payload["attributes"] == {"a": 1}
 
 
+class TestRecordingSpanEvents:
+    def test_events_are_capped_at_1000_and_drops_counted(self):
+        with tracing() as (tracer, output), tracer.create("work") as span:
+            for i in range(1005):
+                span.event("tick", {"i": i})
+            span.exception(RuntimeError("late"))  # dropped and counted too
+
+        (payload,) = emitted(output)
+        assert len(payload["events"]) == 1000
+        assert payload["events"][-1]["attributes"] == {"i": 999}
+        assert payload["attributes"] == {"span.dropped_events": 6}
+
+    def test_no_dropped_events_attribute_without_drops(self):
+        with tracing() as (tracer, output), tracer.create("work") as span:
+            span.event("tick")
+
+        (payload,) = emitted(output)
+        assert "attributes" not in payload
+
+
 class TestSpanParenting:
     def test_step_creates_child_span(self):
         with (
@@ -234,20 +254,26 @@ class TestSpanId:
         from stario.telemetry import spans
 
         std: Any = stdlib_uuid
-        saved = (
-            std._last_timestamp_v7,
-            std._last_counter_v7,
-            spans._last_timestamp_v7,
-            spans._last_counter_v7,
-        )
+        saved = (std._last_timestamp_v7, std._last_counter_v7)
+        # stdlib draws 10, 4, and 4 bytes per call; ours slices the same bytes
+        # off one pooled `os.urandom` call.
         blobs = [bytes(range(10)), bytes(range(4)), bytes(range(4, 8))]
         index = {"n": 0}
 
         def fake_urandom(n: int) -> bytes:
+            if n == spans._RANDOM_POOL_BYTES:
+                return b"".join(blobs).ljust(n, b"\0")
             blob = blobs[index["n"]]
             index["n"] += 1
             assert len(blob) == n
             return blob
+
+        def reset_ours() -> None:
+            state = spans._uuid7_state
+            state.last_timestamp = None
+            state.last_counter = 0
+            state.pool = b""
+            state.pos = 0
 
         monkeypatch.setattr(time, "time_ns", lambda: 1_700_000_000_000_000_000)
         monkeypatch.setattr(os, "urandom", fake_urandom)
@@ -255,18 +281,11 @@ class TestSpanId:
         try:
             std._last_timestamp_v7 = None
             std._last_counter_v7 = 0
-            spans._last_timestamp_v7 = None
-            spans._last_counter_v7 = 0
             theirs = [std.uuid7() for _ in range(3)]
-            std._last_timestamp_v7 = None
-            std._last_counter_v7 = 0
-            spans._last_timestamp_v7 = None
-            spans._last_counter_v7 = 0
-            index["n"] = 0
+            reset_ours()
             ours = [spans._span_id() for _ in range(3)]
             assert ours == theirs
         finally:
             std._last_timestamp_v7 = saved[0]
             std._last_counter_v7 = saved[1]
-            spans._last_timestamp_v7 = saved[2]
-            spans._last_counter_v7 = saved[3]
+            reset_ours()

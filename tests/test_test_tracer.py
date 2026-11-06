@@ -104,3 +104,20 @@ async def test_get_span_returns_none_while_span_open() -> None:
         r = await task
         assert r.status_code == 200
         assert client.tracer.get_span(r.span_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_test_tracer_reports_message_less_exception_as_error() -> None:
+    async def boom(c, w):
+        raise ValueError()
+
+    app = App()
+    app.add(Route("GET /boom"), boom)
+    async with TestClient(app) as client:
+        r = await client.get("/boom")
+        span = client.tracer.get_span(r.span_id)
+
+    assert r.status_code == 500
+    assert span is not None
+    assert span.status == "error"
+    assert span.error == "ValueError"
