@@ -3518,7 +3518,9 @@ cdef class CHttpProtocol(HttpConnection):
 
         ``interim`` sends a non-final HEADERS (100 Continue); otherwise this
         is the response, with the exchange as DATA provider when
-        ``with_provider``. Returns nghttp2's result (0 on success).
+        ``with_provider``. Returns nghttp2's result (0 on success, negative
+        on a submit error), or 1 when the stream was already reset here
+        because the header buffer could not be allocated.
         """
         cdef nghttp2_nv nvs_stack[64]
         cdef nghttp2_nv* nvs
@@ -3538,7 +3540,10 @@ cdef class CHttpProtocol(HttpConnection):
         else:
             nvs = <nghttp2_nv*>malloc(sizeof(nghttp2_nv) * <size_t>cap)
             if nvs == NULL:
-                raise MemoryError()
+                # Reset this one stream (as the old per-call prologue did)
+                # instead of raising into the handler's response path.
+                self._h2_fail_stream(ex._h2_stream_id)
+                return 1
             heap = 1
         try:
             nvlen = self._h2_fill_nva(nva, nvs, <size_t>cap)
@@ -3608,7 +3613,9 @@ cdef class CHttpProtocol(HttpConnection):
             ex, nva, True, skip_ce, skip_cl, skip_ct, False, len(payload) > 0
         )
         if rv != 0:
-            self._h2_submit_failed(ex, rv)
+            # rv == 1: the stream was already reset for an allocation failure.
+            if rv < 0:
+                self._h2_submit_failed(ex, rv)
             return
         ex._h2_outbound = True
         ex._h2_headers_sent = True
@@ -3648,7 +3655,8 @@ cdef class CHttpProtocol(HttpConnection):
             not ex._head_request,
         )
         if rv != 0:
-            self._h2_submit_failed(ex, rv)
+            if rv < 0:
+                self._h2_submit_failed(ex, rv)
             return
         ex._h2_headers_sent = True
         ex._h2_outbound = True
