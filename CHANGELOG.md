@@ -153,6 +153,9 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
   per body chunk. A 1 GB upload is about a thousand executor jobs instead
   of thousands. The `max_file_size` check runs per chunk, and a cancelled
   request still waits for the thread, as before.
+- Internal: `Files` and `Assets` answer a request through one `_Mount._serve`
+  pipeline (validators, `Range`, content-coding, then 304 / 416 / 206 / 200)
+  instead of three copies of it. The response bytes are unchanged.
 
 ### Added
 
