@@ -264,7 +264,7 @@ class SqliteTracer(_BufferedTracer):
                     except Exception as exc:
                         self._record_writer_error(exc)
                         self._emit_writer_error(exc)
-                        if not self._running:
+                        if self._stop_requested:
                             if shutdown_error_seen:
                                 return
                             shutdown_error_seen = True
@@ -272,7 +272,7 @@ class SqliteTracer(_BufferedTracer):
                         time.sleep(self._flush_interval)
                         continue
 
-                if self._running:
+                if not self._stop_requested:
                     self._wake.wait(self._flush_interval)
                     self._wake.clear()
                 else:
@@ -292,13 +292,13 @@ class SqliteTracer(_BufferedTracer):
                     self._emit_writer_error(exc)
                     connection.close()
                     connection = None
-                    if not self._running:
+                    if self._stop_requested:
                         if shutdown_error_seen:
                             return
                         shutdown_error_seen = True
                     continue
 
-                if not self._running:
+                if self._stop_requested:
                     pending = self._take_pending()
                     if pending:
                         retry_batch = self._merge_retry_batch(retry_batch, pending)
@@ -361,7 +361,7 @@ class SqliteTracer(_BufferedTracer):
                         span.start_ns,
                         span.end_ns,
                         span.end_ns - span.start_ns,
-                        "error" if span.error else "ok",
+                        "error" if span.error is not None else "ok",
                         span.error,
                         serialize_json(span.attributes),
                     )

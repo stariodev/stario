@@ -23,7 +23,7 @@ Reference: https://data-star.dev/reference/attributes
 """
 
 from collections.abc import Mapping
-from typing import Literal
+from typing import Literal, cast
 
 from stario.exceptions import StarioError
 from stario.json import dumps as json_dumps
@@ -44,6 +44,7 @@ from .format import (
     expand_signal_paths,
     filter_js,
     js_object,
+    key_case,
     require_mapping,
     signal_attr_key,
     signal_object,
@@ -51,6 +52,32 @@ from .format import (
     time_to_string,
     to_kebab_key,
 )
+
+
+def _reject_uppercase_key(helper: str, key: str, alternative: str) -> None:
+    """Key-form attributes travel in the attribute name, which HTML lowercases."""
+    if any(c.isupper() for c in key):
+        raise StarioError(
+            f"data.{helper}() cannot use a name with uppercase letters: {key!r}",
+            context={"helper": helper, "name": key},
+            help_text=(
+                "The name is part of the HTML attribute name, which the browser "
+                f"lowercases before Datastar reads it. Use {alternative}, where "
+                "the name is a JavaScript object key and keeps its case."
+            ),
+        )
+
+
+def _reject_uppercase_modifier(helper: str, modifier: str, value: str) -> None:
+    if any(c.isupper() for c in value):
+        raise StarioError(
+            f"data.{helper}() {modifier}={value!r} cannot carry uppercase letters",
+            context={"helper": helper, "modifier": modifier, "value": value},
+            help_text=(
+                "Modifier values are part of the HTML attribute name, which the "
+                "browser lowercases before Datastar reads it."
+            ),
+        )
 
 
 class DatastarAttributes:
@@ -89,6 +116,7 @@ class DatastarAttributes:
         ```
         """
         validate_attribute_key(key)
+        _reject_uppercase_key("attr", key, "data.attrs({key: expression})")
         return Attrs(f' {self.prefix}attr:{key}="{escape_attr(expression)}"')
 
     def attrs(self, mapping: dict[str, str]) -> Attrs:
@@ -124,8 +152,10 @@ class DatastarAttributes:
         check_signal_name(signal_name)
         if prop is not None:
             validate_attribute_key(prop)
+            _reject_uppercase_modifier("bind", "prop", prop)
         if event is not None:
             validate_attribute_key(event)
+            _reject_uppercase_modifier("bind", "event", event)
         modifiers = ""
         if prop is not None:
             modifiers += f"__prop.{prop}"
@@ -142,7 +172,10 @@ class DatastarAttributes:
         ```
         """
         validate_attribute_key(name)
-        return Attrs(f' {self.prefix}class:{name}="{escape_attr(expression)}"')
+        key, case = key_case(name)
+        if case is not None:
+            key = f"{key}__case.{case}"
+        return Attrs(f' {self.prefix}class:{key}="{escape_attr(expression)}"')
 
     def classes(self, mapping: dict[str, str]) -> Attrs:
         """Toggle several CSS classes from a mapping of expressions.
@@ -285,7 +318,7 @@ class DatastarAttributes:
             key = self.prefix + "json-signals"
         if value is True:
             return Attrs(f" {key}")
-        return Attrs(f' {key}="{escape_attr(value)}"')
+        return Attrs(f' {key}="{escape_attr(cast(str, value))}"')
 
     def on(
         self,
@@ -368,6 +401,13 @@ class DatastarAttributes:
         kebab_event = to_kebab_key(event)
         if case != "kebab":
             modifiers.append("case." + case)
+        else:
+            # `myEvent` has to travel as `my-event__case.camel`: the HTML
+            # parser lowercases the key and Datastar's default conversion
+            # for `data-on` is kebab.
+            _kebab, inferred = key_case(event)
+            if inferred is not None:
+                modifiers.append("case." + inferred)
 
         if modifiers:
             return Attrs(
@@ -600,6 +640,7 @@ class DatastarAttributes:
         ```
         """
         validate_attribute_key(prop)
+        _reject_uppercase_key("style", prop, "data.styles({prop: expression})")
         return Attrs(f' {self.prefix}style:{prop}="{escape_attr(expression)}"')
 
     def styles(self, mapping: dict[str, str]) -> Attrs:
@@ -736,7 +777,7 @@ class DatastarAttributes:
             key += "__session"
         if value is True:
             return Attrs(f" {key}")
-        return Attrs(f' {key}="{escape_attr(value)}"')
+        return Attrs(f' {key}="{escape_attr(cast(str, value))}"')
 
     def query_string(
         self,
@@ -767,7 +808,7 @@ class DatastarAttributes:
         value: str | bool = filters if filters is not None else True
         if value is True:
             return Attrs(f" {key}")
-        return Attrs(f' {key}="{escape_attr(value)}"')
+        return Attrs(f' {key}="{escape_attr(cast(str, value))}"')
 
     def replace_url(self, expression: str) -> Attrs:
         """Replace the current browser URL. **Datastar Pro only.**

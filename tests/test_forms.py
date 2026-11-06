@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import random
 import threading
+from collections.abc import Callable
 from typing import ClassVar
 
 import pytest
@@ -12,6 +13,7 @@ import pytest
 from stario import App, Context, Route, Writer
 from stario.exceptions import RequestBodyError
 from stario.forms import Form, UploadFile, read_form
+from stario.forms import read as forms_read
 from stario.forms._multipart import (
     MultipartError,
     MultipartLimitError,
@@ -222,6 +224,32 @@ class TestReadForm:
             )
         assert r.text == "title=t"
 
+    async def test_empty_file_inputs_count_as_fields_not_files(self):
+        # `echo` allows max_fields=3 and max_files=2. Three empty file inputs
+        # are not files (no spool is opened for them) and the form posts;
+        # four exceed max_fields, like four empty text fields would.
+        body = multipart_body(*[(file_part("photo", ""), b"")] * 3)
+        async with TestClient(form_app()) as client:
+            r = await client.post(
+                "/form", content=body, headers={"content-type": MULTIPART}
+            )
+            assert (r.status_code, r.text) == (200, "")
+            body = multipart_body(*[(file_part("photo", ""), b"")] * 4)
+            r = await client.post(
+                "/form", content=body, headers={"content-type": MULTIPART}
+            )
+        assert (r.status_code, r.text) == (413, "Too many form fields")
+
+    async def test_bytes_under_an_empty_filename_are_a_file(self):
+        # A part with filename="" that carries bytes opens a spool when the
+        # first byte arrives and counts toward max_files.
+        body = multipart_body(*[(file_part("photo", ""), b"x")] * 3)
+        async with TestClient(form_app()) as client:
+            r = await client.post(
+                "/form", content=body, headers={"content-type": MULTIPART}
+            )
+        assert (r.status_code, r.text) == (413, "Too many files")
+
     @pytest.mark.parametrize(
         ("kwargs", "detail"),
         [
@@ -377,6 +405,34 @@ class TestReadFormEdges:
         async with TestClient(app) as client:
             r = await client.post("/keep", files={"f": ("big.bin", payload)})
         assert (r.status_code, r.text) == (200, f"{len(payload)} True")
+
+    async def test_disk_writes_hop_to_a_thread_per_batch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Past the spool size, chunks gather and one hop writes about 1 MiB."""
+        payload = bytes(range(256)) * (3 * 4096)  # 3 MiB
+        hops = 0
+
+        async def counting[T](fn: Callable[[], T]) -> T:
+            nonlocal hops
+            hops += 1
+            return await in_thread(fn)
+
+        monkeypatch.setattr(forms_read, "in_thread", counting)
+
+        async def keep(c: Context, w: Writer) -> None:
+            with await read_form(c.req, spool_size=10) as form:
+                upload = form.file("f")
+                assert upload is not None
+                data = await upload.read()
+                w.text(f"{upload.size} {data == payload}")
+
+        app = App()
+        app.add(Route("POST /keep"), keep)
+        async with TestClient(app) as client:
+            r = await client.post("/keep", files={"f": ("big.bin", payload)})
+        assert (r.status_code, r.text) == (200, f"{len(payload)} True")
+        assert 1 <= hops <= 4, hops
 
     async def test_quote_cr_lf_escapes_round_trip(self):
         """Browsers write `"`, CR, LF as %22, %0D, %0A; the reader decodes them."""

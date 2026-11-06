@@ -142,6 +142,7 @@ cdef class HttpConnection:
     cdef void release_exchange(self, RequestExchange exchange)
     cdef void response_completed(self, RequestExchange exchange)
     cdef void close_lingering(self)
+    cdef object date_line(self)
     cdef void set_body_paused(self, RequestExchange exchange, bint paused)
     cdef object ensure_disconnect(self)
     cdef object ensure_stream_disconnect(self, RequestExchange ex)
@@ -226,7 +227,6 @@ cdef class RequestExchange:
     cdef object _transport
     cdef object _t_is_closing
     cdef object _t_writelines
-    cdef list _date_box
     cdef object _compression
     # Request-scoped flags reused by dispatch, body, and the writer.
     cdef int _req_encoding
@@ -384,7 +384,6 @@ cdef class RequestExchange:
         HttpConnection connection,
         object app,
         object transport,
-        list date_box,
         object compression,
         int max_body_size,
         double body_timeout,
@@ -538,7 +537,6 @@ cdef RequestExchange acquire_exchange(
     HttpConnection connection,
     object app,
     object transport,
-    list date_box,
     object compression,
     int max_body_size,
     double body_timeout,

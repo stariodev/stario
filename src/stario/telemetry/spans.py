@@ -5,9 +5,8 @@ from __future__ import annotations
 import os
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
-from threading import Lock
 from typing import Any
 from uuid import UUID
 
@@ -16,13 +15,40 @@ from .formatters import format_exception_for_telemetry, serialize_event_body
 
 # CPython 3.14 `uuid.uuid7` (RFC 9562 Method 1). stdlib uuid7 is 3.14-only.
 _RFC_4122_VERSION_7_FLAGS = 0x70008000000000000000
-_last_timestamp_v7: int | None = None
-_last_counter_v7 = 0
-_span_id_lock = Lock()
+# One `os.urandom` syscall feeds this many bytes of ids (10 per fresh id).
+_RANDOM_POOL_BYTES = 640
+# Spans outside a live-rendering tracer mutate under this no-op context.
+_NO_LOCK: AbstractContextManager[Any] = nullcontext()
+# Events kept per span; later ones are counted, see `RecordingSpan`.
+_MAX_EVENTS = 1000
 
 
-def _uuid7_get_counter_and_tail() -> tuple[int, int]:
-    rand = int.from_bytes(os.urandom(10))
+class _Uuid7State(threading.local):
+    """Per-thread uuid7 state: last timestamp and counter, plus a random pool."""
+
+    def __init__(self) -> None:
+        self.last_timestamp: int | None = None
+        self.last_counter = 0
+        self.pool = b""
+        self.pos = 0
+
+
+_uuid7_state = _Uuid7State()
+
+
+def _uuid7_random(state: _Uuid7State, n: int) -> bytes:
+    """The next `n` bytes of this thread's pool; refills from `os.urandom`."""
+    pos = state.pos
+    end = pos + n
+    if end > len(state.pool):
+        state.pool = os.urandom(_RANDOM_POOL_BYTES)
+        pos, end = 0, n
+    state.pos = end
+    return state.pool[pos:end]
+
+
+def _uuid7_get_counter_and_tail(state: _Uuid7State) -> tuple[int, int]:
+    rand = int.from_bytes(_uuid7_random(state, 10))
     # 42-bit counter with MSB set to 0
     counter = (rand >> 32) & 0x1FF_FFFF_FFFF
     tail = rand & 0xFFFF_FFFF
@@ -30,37 +56,39 @@ def _uuid7_get_counter_and_tail() -> tuple[int, int]:
 
 
 def _span_id() -> UUID:
-    """UUIDv7 for span and trace ids. Same bits as CPython 3.14 `uuid.uuid7`."""
-    global _last_timestamp_v7, _last_counter_v7
+    """UUIDv7 for span and trace ids. Same bits as CPython 3.14 `uuid.uuid7`.
 
-    # CPython uuid7 is not locked. Tracers allocate ids from several threads.
-    with _span_id_lock:
-        timestamp_ms = time.time_ns() // 1_000_000
+    The timestamp, counter, and random pool are per thread, so ids are
+    monotonic within one thread only; the random counter and tail keep them
+    unique across threads. (CPython's uuid7 is not locked either.)
+    """
+    state = _uuid7_state
+    timestamp_ms = time.time_ns() // 1_000_000
+    last_timestamp = state.last_timestamp
 
-        if _last_timestamp_v7 is None or timestamp_ms > _last_timestamp_v7:
-            counter, tail = _uuid7_get_counter_and_tail()
+    if last_timestamp is None or timestamp_ms > last_timestamp:
+        counter, tail = _uuid7_get_counter_and_tail(state)
+    else:
+        if timestamp_ms < last_timestamp:
+            timestamp_ms = last_timestamp + 1
+        counter = state.last_counter + 1
+        if counter > 0x3FF_FFFF_FFFF:
+            timestamp_ms += 1
+            counter, tail = _uuid7_get_counter_and_tail(state)
         else:
-            if timestamp_ms < _last_timestamp_v7:
-                timestamp_ms = _last_timestamp_v7 + 1
-            counter = _last_counter_v7 + 1
-            if counter > 0x3FF_FFFF_FFFF:
-                timestamp_ms += 1
-                counter, tail = _uuid7_get_counter_and_tail()
-            else:
-                tail = int.from_bytes(os.urandom(4))
+            tail = int.from_bytes(_uuid7_random(state, 4))
 
-        unix_ts_ms = timestamp_ms & 0xFFFF_FFFF_FFFF
-        counter_hi = (counter >> 30) & 0x0FFF
-        counter_lo = counter & 0x3FFF_FFFF
-        value = unix_ts_ms << 80
-        value |= counter_hi << 64
-        value |= counter_lo << 32
-        value |= tail & 0xFFFF_FFFF
-        value |= _RFC_4122_VERSION_7_FLAGS
-        result = UUID(int=value)
-        _last_timestamp_v7 = timestamp_ms
-        _last_counter_v7 = counter
-        return result
+    unix_ts_ms = timestamp_ms & 0xFFFF_FFFF_FFFF
+    counter_hi = (counter >> 30) & 0x0FFF
+    counter_lo = counter & 0x3FFF_FFFF
+    value = unix_ts_ms << 80
+    value |= counter_hi << 64
+    value |= counter_lo << 32
+    value |= tail & 0xFFFF_FFFF
+    value |= _RFC_4122_VERSION_7_FLAGS
+    state.last_timestamp = timestamp_ms
+    state.last_counter = counter
+    return UUID(int=value)
 
 
 @dataclass(slots=True, eq=False)
@@ -263,6 +291,11 @@ class RecordingSpan:
     (`step()` / `new_trace()` call back into it). State properties (`started`,
     `in_progress`, `finished`, `failed`) mirror the lifecycle described on
     `Span` in `core.py`.
+
+    Every mutation runs under `mutex`: a no-op context by default, or the
+    lock a tracer that renders open spans assigns (`TTYTracer`). A span keeps
+    at most 1000 events; later ones are dropped and counted, and `end()`
+    records the count as the attribute `span.dropped_events`.
     """
 
     id: UUID
@@ -276,16 +309,10 @@ class RecordingSpan:
     attributes: dict[str, Any] | None = None
     events: list[RecordedEvent] | None = None
     links: list[RecordedLink] | None = field(default=None, repr=False)
-    mutex: threading.RLock | None = field(default=None, repr=False, compare=False)
-
-    @contextmanager
-    def _mutate(self):
-        lock = self.mutex
-        if lock is None:
-            yield
-            return
-        with lock:
-            yield
+    mutex: AbstractContextManager[Any] = field(
+        default=_NO_LOCK, repr=False, compare=False
+    )
+    dropped_events: int = field(default=0, repr=False)
 
     @classmethod
     def create(
@@ -316,12 +343,6 @@ class RecordingSpan:
         return self.start_ns is not None
 
     @property
-    def duration_ns(self) -> int | None:
-        if self.start_ns is None or self.end_ns is None:
-            return None
-        return self.end_ns - self.start_ns
-
-    @property
     def in_progress(self) -> bool:
         return self.end_ns is None and self.started
 
@@ -334,7 +355,7 @@ class RecordingSpan:
         return self.error is not None
 
     def start(self) -> None:
-        with self._mutate():
+        with self.mutex:
             if self.start_ns is None:
                 self.start_ns = time.time_ns()
 
@@ -345,7 +366,7 @@ class RecordingSpan:
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         if exc_val is not None:
             self.exception(exc_val)
-            self.fail(str(exc_val))
+            self.fail(str(exc_val) or type(exc_val).__name__)
         self.end()
 
     def event(
@@ -356,8 +377,12 @@ class RecordingSpan:
         *,
         body: EventBody = None,
     ) -> None:
-        with self._mutate():
+        with self.mutex:
             if self.start_ns is None or self.end_ns is not None:
+                return
+            events = self.events
+            if events is not None and len(events) >= _MAX_EVENTS:
+                self.dropped_events += 1
                 return
             event = RecordedEvent(
                 time.time_ns(),
@@ -365,10 +390,10 @@ class RecordingSpan:
                 attributes=dict(attributes) if attributes else None,
                 body=serialize_event_body(body),
             )
-            if self.events is None:
+            if events is None:
                 self.events = [event]
             else:
-                self.events.append(event)
+                events.append(event)
 
     def exception(
         self,
@@ -388,7 +413,7 @@ class RecordingSpan:
         self.event("exception", attrs, body=body)
 
     def attr(self, name: str, value: Any) -> None:
-        with self._mutate():
+        with self.mutex:
             if self.end_ns is not None:
                 return
             if self.attributes is None:
@@ -397,7 +422,7 @@ class RecordingSpan:
                 self.attributes[name] = value
 
     def attrs(self, attributes: Attributes) -> None:
-        with self._mutate():
+        with self.mutex:
             if self.end_ns is not None:
                 return
             if not attributes:
@@ -427,7 +452,7 @@ class RecordingSpan:
         attributes: Attributes | None = None,
         /,
     ) -> None:
-        with self._mutate():
+        with self.mutex:
             if self.start_ns is None or self.end_ns is not None:
                 return
             link = RecordedLink(
@@ -441,19 +466,19 @@ class RecordingSpan:
                 self.links.append(link)
 
     def fail(self, message: str) -> None:
-        with self._mutate():
+        with self.mutex:
             if self.start_ns is None or self.end_ns is not None:
                 return
             self.error = message
 
     def rename(self, name: str) -> None:
-        with self._mutate():
+        with self.mutex:
             if self.end_ns is not None:
                 return
             self.name = name
 
     def end(self) -> None:
-        with self._mutate():
+        with self.mutex:
             if self.end_ns is not None:
                 return
             if self.start_ns is None:
@@ -461,5 +486,9 @@ class RecordingSpan:
                     "Cannot end a span that was never started. "
                     "Call span.start() or use the span as a context manager."
                 )
+            if self.dropped_events:
+                if self.attributes is None:
+                    self.attributes = {}
+                self.attributes["span.dropped_events"] = self.dropped_events
             self.end_ns = time.time_ns()
             self.tracer.on_end(self)

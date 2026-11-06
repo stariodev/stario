@@ -681,6 +681,10 @@ cdef class Headers:
     def unsafe_set(self, bytes name not None, bytes value not None):
         self.c_set(name, value)
 
+    def unsafe_merge_vary(self, bytes token not None):
+        """Append `token` to `Vary` unless it, or `*`, is already listed."""
+        self.c_merge_vary(token)
+
     def setdefault(self, str name, str value):
         cdef object key = _encode_name(name)
         cdef object existing = self.c_get(key)

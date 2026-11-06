@@ -34,14 +34,12 @@ async def test_trailing_slash_redirects_without_create_task() -> None:
 
     app.add(Route("GET /search"), search)
     connections = connection_set()
-    date = b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"
 
     def factory():
         return HttpProtocol(
             loop,
             app,
             NoOpTracer(),
-            [date],
             CompressionConfig(),
             connections,
         )
@@ -75,7 +73,6 @@ async def test_trailing_slash_redirect_finishes_span_without_fail() -> None:
     loop = asyncio.get_running_loop()
     app = TrackingApp()
     connections = connection_set()
-    date = b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"
 
     with TestTracer() as tracer:
 
@@ -84,7 +81,6 @@ async def test_trailing_slash_redirect_finishes_span_without_fail() -> None:
                 loop,
                 app,
                 tracer,
-                [date],
                 CompressionConfig(),
                 connections,
             )
@@ -133,14 +129,12 @@ async def test_not_found_and_method_not_allowed_use_handlers() -> None:
     app.not_found("/", custom_404)
     app.method_not_allowed("/", custom_405)
     connections = connection_set()
-    date = b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"
 
     def factory():
         return HttpProtocol(
             loop,
             app,
             NoOpTracer(),
-            [date],
             CompressionConfig(),
             connections,
         )
@@ -182,14 +176,12 @@ async def test_handler_exception_writes_500() -> None:
 
     app.add(Route("GET /boom"), boom)
     connections = connection_set()
-    date = b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"
 
     def factory():
         return HttpProtocol(
             loop,
             app,
             NoOpTracer(),
-            [date],
             CompressionConfig(),
             connections,
         )
@@ -231,14 +223,12 @@ async def test_plaintext_and_post_and_keepalive() -> None:
     app.add(Route("POST /echo"), echo)
 
     connections = connection_set()
-    date = b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"
 
     def factory():
         return HttpProtocol(
             loop,
             app,
             NoOpTracer(),
-            [date],
             CompressionConfig(),
             connections,
         )
@@ -287,7 +277,6 @@ async def test_small_content_length_body_is_complete_when_handler_runs() -> None
             loop,
             app,
             NoOpTracer(),
-            [b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"],
             CompressionConfig(),
             connections,
         ),
@@ -330,7 +319,6 @@ async def test_fragmented_headers_materialize_correctly() -> None:
             loop,
             app,
             NoOpTracer(),
-            [b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"],
             CompressionConfig(),
             connections,
         ),
@@ -384,7 +372,6 @@ async def test_request_headers_scan_arena_without_copy() -> None:
             loop,
             app,
             NoOpTracer(),
-            [b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"],
             CompressionConfig(),
             connections,
         ),
@@ -433,7 +420,6 @@ async def test_request_header_view_resets_when_exchange_is_reused() -> None:
             loop,
             app,
             NoOpTracer(),
-            [b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"],
             CompressionConfig(),
             connections,
         ),
@@ -471,14 +457,12 @@ async def test_stream_large_and_chunked_upload() -> None:
     app.add(Route("POST /upload"), upload)
 
     connections = connection_set()
-    date = b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"
 
     def factory():
         return HttpProtocol(
             loop,
             app,
             NoOpTracer(),
-            [date],
             CompressionConfig(),
             connections,
         )
@@ -543,7 +527,6 @@ async def test_ignored_slow_body_stays_owned_until_message_complete() -> None:
             loop,
             app,
             NoOpTracer(),
-            [b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"],
             CompressionConfig(),
             connections,
         ),
@@ -598,7 +581,6 @@ async def test_abandoned_stream_discards_remainder_and_advances_pipeline() -> No
             loop,
             app,
             NoOpTracer(),
-            [b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"],
             CompressionConfig(),
             connections,
         ),
@@ -647,7 +629,6 @@ async def test_small_expect_continue_is_sent_before_body() -> None:
             loop,
             app,
             NoOpTracer(),
-            [b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"],
             CompressionConfig(),
             connections,
         ),
@@ -695,14 +676,12 @@ async def test_disconnect_future_is_lazy() -> None:
 
     app.add(Route("GET /watch"), watch)
     connections = connection_set()
-    date = b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"
 
     def factory():
         return HttpProtocol(
             loop,
             app,
             NoOpTracer(),
-            [date],
             CompressionConfig(),
             connections,
         )
@@ -747,14 +726,12 @@ async def test_pipeline_waits_for_handler_and_uses_each_request_keepalive() -> N
     app.add(Route("GET /first"), first)
     app.add(Route("GET /second"), second)
     connections = connection_set()
-    date_box = [b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"]
 
     server = await loop.create_server(
         lambda: HttpProtocol(
             loop,
             app,
             NoOpTracer(),
-            date_box,
             CompressionConfig(),
             connections,
         ),
@@ -810,7 +787,6 @@ async def test_handler_after_respond_stays_on_app_tasks_and_next_request_starts(
             loop,
             app,
             NoOpTracer(),
-            [b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"],
             CompressionConfig(),
             connections,
         ),
@@ -866,7 +842,6 @@ async def test_large_single_read_pipeline_is_bounded() -> None:
             loop,
             app,
             NoOpTracer(),
-            [b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"],
             CompressionConfig(),
             connections,
         ),
@@ -918,13 +893,11 @@ async def test_pipelined_streaming_bodies_are_request_owned() -> None:
 
     app.add(Route("POST /upload"), upload)
     connections = connection_set()
-    date_box = [b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"]
     server = await loop.create_server(
         lambda: HttpProtocol(
             loop,
             app,
             NoOpTracer(),
-            date_box,
             CompressionConfig(),
             connections,
         ),
@@ -974,7 +947,6 @@ async def test_exchange_pool_reuses_across_connections() -> None:
             loop,
             app,
             NoOpTracer(),
-            [b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"],
             CompressionConfig(),
             connections,
         ),
@@ -1020,7 +992,6 @@ async def test_handler_starts_before_content_length_body_arrives() -> None:
             loop,
             app,
             NoOpTracer(),
-            [b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"],
             CompressionConfig(),
             connections,
         ),
@@ -1066,7 +1037,6 @@ async def test_body_wait_survives_multi_segment_upload() -> None:
             loop,
             app,
             NoOpTracer(),
-            [b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"],
             CompressionConfig(),
             connections,
         ),
@@ -1117,7 +1087,6 @@ async def test_content_length_body_survives_many_64k_segments() -> None:
             loop,
             app,
             NoOpTracer(),
-            [b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"],
             CompressionConfig(),
             connections,
         ),
@@ -1163,7 +1132,6 @@ async def test_content_length_body_in_same_packet_as_headers() -> None:
             loop,
             app,
             NoOpTracer(),
-            [b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"],
             CompressionConfig(),
             connections,
         ),
@@ -1220,7 +1188,6 @@ async def test_next_request_starts_after_respond_before_handler_returns() -> Non
             loop,
             app,
             NoOpTracer(),
-            [b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"],
             CompressionConfig(),
             connections,
         ),
@@ -1273,7 +1240,6 @@ async def test_stream_max_chunk_must_be_below_limit() -> None:
             loop,
             app,
             NoOpTracer(),
-            [b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"],
             CompressionConfig(),
             connections,
         ),
@@ -1323,7 +1289,6 @@ async def test_stream_respects_max_chunk_batches() -> None:
             loop,
             app,
             NoOpTracer(),
-            [b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"],
             CompressionConfig(),
             connections,
         ),
@@ -1372,7 +1337,6 @@ async def test_medium_content_length_body_is_complete_when_handler_runs() -> Non
             loop,
             app,
             NoOpTracer(),
-            [b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"],
             CompressionConfig(),
             connections,
         ),
@@ -1419,7 +1383,6 @@ async def test_stream_default_chunk_follows_content_length() -> None:
             loop,
             app,
             NoOpTracer(),
-            [b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"],
             CompressionConfig(),
             connections,
         ),
@@ -1471,7 +1434,6 @@ async def test_request_headers_are_read_only() -> None:
             loop,
             app,
             NoOpTracer(),
-            [b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"],
             CompressionConfig(),
             connections,
         ),
@@ -1523,7 +1485,6 @@ async def test_lazy_cookies_and_query_from_arena() -> None:
             loop,
             app,
             NoOpTracer(),
-            [b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"],
             CompressionConfig(),
             connections,
         ),
@@ -1569,7 +1530,6 @@ async def test_cookies_do_not_leak_across_keepalive() -> None:
             loop,
             app,
             NoOpTracer(),
-            [b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"],
             CompressionConfig(),
             connections,
         ),
@@ -1613,7 +1573,6 @@ async def test_host_routing_normalizes_host_header() -> None:
             loop,
             app,
             NoOpTracer(),
-            [b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"],
             CompressionConfig(),
             connections,
         ),

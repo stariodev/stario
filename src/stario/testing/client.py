@@ -143,10 +143,9 @@ class TestClient:
         self.requests = requests if requests is not None else RequestPolicy()
         self.request_timeout = request_timeout
         self._shutdown_timeout = shutdown_timeout
-        # One registry for every connection this client opens. The Server's
-        # Date tick would sweep it; here timeouts are off, so it only counts.
-        self._connections = Connections(server_driven=True)
-        self._date_box = [b""]
+        # One registry for every connection this client opens. Timeouts are
+        # off on these protocols, so it never ticks; it holds the Date line.
+        self._connections = Connections()
         self._async_app_cm: AbstractAsyncContextManager[AppRun] | None = None
         self._run: AppRun | None = None
         self._entered = False
@@ -163,7 +162,7 @@ class TestClient:
                 self._run = await self._async_app_cm.__aenter__()
                 self._app = self._run.app
             now = format_datetime(datetime.now(UTC), usegmt=True).encode("ascii")
-            self._date_box[0] = b"date: " + now + b"\r\n"
+            self._connections.pin_date(b"date: " + now + b"\r\n")
             self._entered = True
             return self
         except BaseException:
@@ -325,7 +324,6 @@ class TestClient:
         exchange = open_exchange(
             app=self.app,
             tracer=self.tracer,
-            date_box=self._date_box,
             compression=self.compression,
             connections=self._connections,
             policy={

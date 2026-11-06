@@ -6,6 +6,168 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ## Unreleased
 
+### Fixed
+
+- A plain tuple in child position is no longer rendered as markup. Elements
+  built by `h.*` are now an `Element` (a `tuple` subclass) and the renderer
+  and `@baked` dispatch on that type, so a four-column database row passed
+  as one child raises `StarioError` instead of writing its text to the
+  page unescaped. `h.Li(*row)` keeps escaping each cell.
+- `h.Script` and `h.Style` are raw-text elements: `str` children are sent
+  as they are, because the browser never decodes entities inside them, so
+  `h.Script("if (a < b) go()")` now works. Text that would end the element
+  early (`</script`, `<!--` in a script, `</style`) raises `StarioError`.
+  `Tag(name, raw_text=True)` marks a custom raw-text tag.
+- `data.on("myEvent", …)` emits `data-on:my-event__case.camel`, and
+  `data.class_("myClass", …)` emits `data-class:my-class__case.camel`
+  (`__case.pascal` for PascalCase), so the browser's lowercasing of the
+  attribute name no longer changes the event or class name. `data.attr`
+  and `data.style` raise for a key with uppercase letters (HTML lowercases
+  it; use `data.attrs` / `data.styles`), as do `data.bind(prop=…)` and
+  `data.bind(event=…)` for modifier values with uppercase letters.
+- An HTTP/2 request body that grows past the read limit while the handler
+  is reading it is answered once, by the handler's `RequestBodyError` path
+  (413 with a text body, as on HTTP/1). The protocol no longer sends its
+  own empty 413 first, which left the request span marked as a failure.
+- HTTP/2 writes queued behind a slow reader are compacted only once half
+  of the buffer has been sent. Before, every DATA frame sent moved the
+  whole unsent backlog, so a handler that did not `drain()` paid for the
+  backlog size on each frame.
+- A span that fails with an exception whose message is empty (`KeyError()`,
+  `asyncio.CancelledError()`) is exported with status `error`, and the
+  error text is the exception type name. Before, the JSON, SQLite, and
+  test tracers exported it as `ok` with no error.
+- `JsonTracer` and `SqliteTracer` keep spans that end while the tracer
+  exits: the writer thread drains them before it stops. Before, a span that
+  ended between the stop request and the join was dropped and logged as
+  ended "while stopped".
+- `TTYTracer` exit no longer waits forever on a terminal write that is
+  stuck. The final render and the stdout/stderr drain give up after one
+  second, like the render thread join.
+
+- `set_cookie(expires="Wed, 21 Oct 2015 07:28:00 GMT")` works. The `str`
+  form rejected a comma, which every HTTP-date contains. `;` is still
+  rejected.
+- A `Range` header with several ranges (`bytes=0-1,3-4`) is answered 200
+  with the full body, as RFC 9110 14.2 allows. Before it was 416.
+- `Files` no longer raises `KeyError` when two event-loop threads
+  (`STARIO_THREADS` above 1) evict the same changed file from the cache.
+
+### Changed
+
+- One clock per event loop. `Connections` (one per loop) now owns the
+  timeout tick: a single `loop.call_later` handle, scheduled only while a
+  connection with timeouts exists, reads `loop.time()` once and walks the
+  live connections in C. The `Server` no longer runs a `Date` coroutine per
+  loop, and an idle loop makes no timer wakeups. The `Date` header comes
+  from a per-second cache on the same object: one coarse wall-clock read
+  per response, reformatted in C only when the second changed, so a busy
+  loop can no longer serve a stale `Date`. The lingering-close wait and
+  the HTTP/2 GOAWAY grace are deadlines on that tick instead of timers,
+  so the protocol holds no `TimerHandle`. With timeouts off
+  (`timeout_cleanup="off"`, the test client) a lingering close closes
+  at once.
+- `HttpProtocol(loop, app, tracer, compression, connections, ...)` no
+  longer takes a `date_box` list; `Connections(date=...)` or
+  `Connections.pin_date()` fixes the `Date` line for tests, and
+  `Connections.date_line` reads it. `Connections(server_driven=...)` is
+  gone: a registry always ticks itself.
+- `SSE.patch_elements` documents that `bytes` and `str` are trusted HTML
+  sent as they are (like `w.html`); build user text with `h.*`.
+- `at.get` / `post` / `put` / `patch` / `delete` / `query` share one
+  `FetchOptions` typed dictionary (`**options: Unpack[FetchOptions]`)
+  instead of six copies of the option list. Calls are unchanged.
+- Building an element is cheaper: `Tag.__call__` tests child types before
+  the `Mapping` check, inlines the `str` attribute path, and builds its
+  `repr` only for errors; `classes()` checks `str` tokens first and caches
+  the fragment for repeated all-`str` argument tuples; `styles()` scans
+  names and values with one regex each. `escape_attribute_value` is no
+  longer cached. Output is byte-identical. The 50-row page in
+  `benchmarks/server/inproc.py` goes from 219 µs to 173 µs per request.
+- An SSE payload with no line breaks (rendered markup, compact JSON) is
+  written without being copied through the line splitter, and signal
+  patches with no dotted key skip the path check.
+- A full span queue in `JsonTracer` / `SqliteTracer` writes at most one
+  message per second to stderr. The message carries the number of spans
+  dropped since the previous one; `stats().dropped_spans` still counts
+  every drop.
+- A span keeps at most 1000 events. Later events are dropped and counted,
+  and the span ends with the attribute `span.dropped_events` when the
+  count is above zero.
+- A recorded span costs less: on the in-process benchmark a traced
+  plaintext request went from about 27 µs to about 9 µs on one machine.
+  Span ids come from a per-thread uuid7 state with pooled `os.urandom`
+  bytes instead of a process-wide lock and one syscall per id, so ids are
+  monotonic within one thread only. The span lock is taken directly
+  instead of through a generator, and the JSON serializer formats ids
+  without `str()`.
+- Internal: `RecordingSpan.mutex` is always a context manager (a no-op one
+  by default) instead of `None`. `RecordingSpan.duration_ns` and the
+  unused `stario._terminal.style_text` / `styled` are removed.
+
+- `Assets.load()` reads each file once. It holds the bytes while they fit
+  `max_bytes` and only fingerprints the files after that. Before, every
+  file under `max_file_size` was read into memory before the budget
+  applied, and every file was hashed from disk a second time. A file
+  pinned by `href()` before `load()` is still verified against the disk.
+- `read_form` opens a file spool only when a file part has a filename or
+  carries bytes. A file input left empty (`filename=""`) counts toward
+  `max_fields` like an empty field, not toward `max_files`, so a form with
+  many optional file inputs still posts. Before, each empty part allocated
+  and closed a spool and never counted, so an unlimited number of them was
+  accepted.
+- Building and rendering markup runs in C. `Tag.__call__`, the render
+  walk, `escape_text`, and `escape_attribute_value` live in
+  `stario_cython.markup`; `stario.markup.tag`, `.render`, and `.escape`
+  re-export them. Elements, the `@baked` plan, `SafeString`, `Attrs`, and
+  every error message are unchanged, and the output is byte-identical.
+  On the in-process benchmark the 50-row page goes from 219 µs to 57 µs
+  per request; one `h.Div("text")` goes from 0.45 µs to 0.09 µs, and the
+  naive tree-per-call page now renders in the same time as a compiled
+  Jinja2 template (`benchmarks/html/compare.py`: 127 µs against 121 µs).
+  `Tag.empty_mode` is the name of the `empty=` setting on a tag.
+- `Files.href()` builds the URL without reading the disk. Before, it
+  resolved the path and checked for a regular file: about ten syscalls on
+  the event loop for each call, so a page that listed 200 uploads blocked
+  the loop for 2000 of them. A missing file, a directory, or an uncontained
+  symlink is a 404 on GET, as before. A hidden segment still raises unless
+  `include_hidden=True`.
+- `Files` and `Assets` resolve the real path of the directory once, on the
+  first request, not on every request. It is resolved again only when a
+  served file no longer lies under it, as after a re-pointed directory
+  symlink.
+- `Relay` keeps the subscribers of a pattern in an insertion-ordered dict,
+  so leaving is O(1) instead of a rebuild of the bucket under the registry
+  lock. 2000 subscribers of one pattern leaving at shutdown no longer costs
+  O(N²). Delivery order is unchanged.
+- `read_form` gathers the chunks of an upload that moved to disk and writes
+  them in one thread hop per 1 MiB, or at the end of the part, not one hop
+  per body chunk. A 1 GB upload is about a thousand executor jobs instead
+  of thousands. The `max_file_size` check runs per chunk, and a cancelled
+  request still waits for the thread, as before.
+
+### Added
+
+- `stario.testing.VirtualTimeLoop`: an asyncio loop whose clock advances
+  only when the loop would otherwise block on a timer. `asyncio.sleep`,
+  `loop.call_later`, `loop.time()` deadlines and the connection timeout
+  tick all run in virtual time, with real sockets and the real protocol,
+  so a 30 s timeout costs milliseconds of wall time. `tests/cython` runs on
+  it through a `pytest_asyncio_loop_factories` hook.
+
+### Removed
+
+- `stario.http.wire`. `parse_accept_encoding` lives in
+  `stario.http.compression`. `decode_path` was
+  `stario_cython.exchange.decode_request_path`; `decode_method` had no
+  caller.
+- From `stario.http.compression`: `Compressor`,
+  `CompressionConfig.make_compressor()`, `select()`, `may_compress()`,
+  `merge_vary`, `brotli_decompress`, and `zstd_decompress`. The Cython
+  writer encodes responses itself. `compress_bytes(config, encoding, data)`
+  encodes one body for precompressed files, `Headers.unsafe_merge_vary(token)`
+  replaces `merge_vary`, and the decoders are in `stario_cython.codecs`.
+
 ## 5.4.0 - 2026-11-05
 
 ### Changed

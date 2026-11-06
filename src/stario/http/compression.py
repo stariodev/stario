@@ -1,20 +1,14 @@
-"""HTTP content-coding negotiation and compressor implementations."""
-
-from __future__ import annotations
+"""HTTP content-coding negotiation and one-shot encoding for precompressed files."""
 
 import zlib
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, ClassVar
+from functools import lru_cache
 
 from stario._env import env_int, env_optional_int, env_optional_str
 from stario.exceptions import StarioError
+from stario_cython.codecs import brotli_compress, zstd_compress
 
-from .wire import parse_accept_encoding
-
-if TYPE_CHECKING:
-    from .headers import Headers
-
-# `CompressionConfig.select` honors `Accept-Encoding` q-values, then prefers
+# `negotiate_content_encoding` honors `Accept-Encoding` q-values, then prefers
 # zstd -> br -> gzip when the client weights supported encodings equally.
 # Dynamic and streamed responses pay encode CPU per call, so zstd leads: it is
 # within ~8% of brotli on wire size at a fraction of the cost, and on a long
@@ -32,6 +26,7 @@ _GZIP_WINDOW_BITS_MAX = 15
 _STREAM_WINDOW_LOG_MIN = 10
 _STREAM_WINDOW_LOG_MAX = 24
 _ENCODING_PREFERENCE = (b"zstd", b"br", b"gzip")
+_ACCEPT_ENCODING_CACHE_MAX_BYTES = 512
 
 
 def _normalize_preference(
@@ -60,16 +55,49 @@ def _normalize_preference(
     return ordered[0], ordered[1], ordered[2]
 
 
-def brotli_decompress(data: bytes) -> bytes:
-    from stario_cython.codecs import brotli_decompress as decode
+def _parse_accept_encoding_uncached(accept_encoding: bytes) -> dict[bytes, float]:
+    parsed: dict[bytes, float] = {}
 
-    return decode(data)
+    if b";" not in accept_encoding:
+        for raw_part in accept_encoding.split(b","):
+            token = raw_part.strip().lower()
+            if token:
+                parsed[token] = 1.0
+        return parsed
+
+    for raw_part in accept_encoding.split(b","):
+        token, sep, params = raw_part.partition(b";")
+        token = token.strip().lower()
+        if not token:
+            continue
+
+        q = 1.0
+        while sep:
+            param, sep, params = params.partition(b";")
+            key, eq, value = param.partition(b"=")
+            if eq and key.strip().lower() == b"q":
+                try:
+                    q = float(value)
+                except ValueError:
+                    q = 0.0
+                break
+
+        parsed[token] = max(0.0, min(1.0, q))
+    return parsed
 
 
-def zstd_decompress(data: bytes) -> bytes:
-    from stario_cython.codecs import zstd_decompress as decode
+@lru_cache(maxsize=64)
+def _parse_accept_encoding_cached(accept_encoding: bytes) -> dict[bytes, float]:
+    return _parse_accept_encoding_uncached(accept_encoding)
 
-    return decode(data)
+
+def parse_accept_encoding(accept_encoding: str | bytes) -> dict[bytes, float]:
+    """Parse `Accept-Encoding` into lowercased token bytes -> q-value."""
+    if isinstance(accept_encoding, str):
+        accept_encoding = accept_encoding.encode("latin-1")
+    if len(accept_encoding) > _ACCEPT_ENCODING_CACHE_MAX_BYTES:
+        return _parse_accept_encoding_uncached(accept_encoding)
+    return _parse_accept_encoding_cached(accept_encoding)
 
 
 def negotiate_content_encoding(
@@ -109,36 +137,6 @@ def negotiate_content_encoding(
     return best_encoding
 
 
-def merge_vary(headers: Headers, token: bytes) -> None:
-    """Append `token` to `Vary` without dropping existing field names."""
-    existing = headers.unsafe_get(b"vary")
-    if existing is None:
-        headers.unsafe_set(b"vary", token)
-        return
-
-    stripped = existing.strip()
-    if not stripped:
-        headers.unsafe_set(b"vary", token)
-        return
-    if stripped == b"*":
-        return
-
-    token_lower = token.lower()
-    has_value = False
-    for raw_part in existing.split(b","):
-        part = raw_part.strip()
-        if not part:
-            continue
-        has_value = True
-        if part == b"*" or part.lower() == token_lower:
-            return
-
-    if has_value:
-        headers.unsafe_set(b"vary", existing.rstrip() + b", " + token)
-    else:
-        headers.unsafe_set(b"vary", token)
-
-
 _NONCOMPRESSIBLE_CONTENT_TYPE_PREFIXES = (
     b"image/",
     b"audio/",
@@ -175,118 +173,6 @@ def content_type_is_compressible(content_type: bytes) -> bool:
         return True
 
     return not media_type.startswith(_NONCOMPRESSIBLE_CONTENT_TYPE_PREFIXES)
-
-
-class Compressor:
-    """
-    Base compressor with shared logic.
-
-    Subclasses implement frame() for one-shot and block() for streaming.
-    """
-
-    __slots__ = ("_level", "_stream", "_window")
-    encoding: ClassVar[bytes] = b""
-
-    def __init__(
-        self,
-        level: int,
-        *,
-        window: int | None = None,
-    ) -> None:
-        self._level = level
-        self._window = window
-        self._stream: Any = None
-
-    def frame(self, data: bytes) -> bytes:
-        """Compress entire body at once (one-shot)."""
-        raise NotImplementedError
-
-    def block(self, data: bytes) -> bytes:
-        """Compress a chunk/block for streaming (e.g., SSE)."""
-        raise NotImplementedError
-
-    def finish(self) -> bytes:
-        """Finish a streaming encoder and return any buffered trailer bytes."""
-        return b""
-
-
-class _Zstd(Compressor):
-    """Zstandard (libzstd via `stario_cython.codecs`)."""
-
-    encoding = b"zstd"
-
-    def frame(self, data: bytes) -> bytes:
-        from stario_cython.codecs import zstd_compress
-
-        return zstd_compress(data, self._level, self._window or 0)
-
-    def block(self, data: bytes) -> bytes:
-        from stario_cython.codecs import ZstdEncoder
-
-        if self._stream is None:
-            self._stream = ZstdEncoder(self._level, self._window or 0)
-        return self._stream.block(data)
-
-    def finish(self) -> bytes:
-        if self._stream is None:
-            return b""
-        out = self._stream.finish()
-        self._stream = None
-        return out
-
-
-class _Brotli(Compressor):
-    """Brotli (libbrotli via `stario_cython.codecs`)."""
-
-    encoding = b"br"
-
-    def frame(self, data: bytes) -> bytes:
-        from stario_cython.codecs import brotli_compress
-
-        return brotli_compress(data, self._level, self._window or 0)
-
-    def block(self, data: bytes) -> bytes:
-        from stario_cython.codecs import BrotliEncoder
-
-        if self._stream is None:
-            self._stream = BrotliEncoder(self._level, self._window or 0)
-        return self._stream.block(data)
-
-    def finish(self) -> bytes:
-        if self._stream is None:
-            return b""
-        out = self._stream.finish()
-        self._stream = None
-        return out
-
-
-class _Gzip(Compressor):
-    """Gzip - universal fallback, always available."""
-
-    encoding = b"gzip"
-
-    def frame(self, data: bytes) -> bytes:
-        c = zlib.compressobj(
-            self._level,
-            zlib.DEFLATED,
-            16 + (self._window if self._window is not None else _GZIP_WINDOW_BITS_MAX),
-        )
-        return c.compress(data) + c.flush()
-
-    def block(self, data: bytes) -> bytes:
-        if self._stream is None:
-            self._stream = zlib.compressobj(
-                self._level,
-                zlib.DEFLATED,
-                16
-                + (self._window if self._window is not None else _GZIP_WINDOW_BITS_MAX),
-            )
-        return self._stream.compress(data) + self._stream.flush(zlib.Z_SYNC_FLUSH)
-
-    def finish(self) -> bytes:
-        if self._stream is None:
-            return b""
-        return self._stream.flush(zlib.Z_FINISH)
 
 
 DEFAULT_MIN_SIZE = 512
@@ -431,60 +317,29 @@ class CompressionConfig:
         }
         return tuple(name for name in self.preference if enabled[name])
 
-    def make_compressor(self, encoding: bytes) -> Compressor:
-        """Build a compressor for an encoding already selected by negotiation."""
-        if encoding == b"br" and self.brotli_level >= 0:
-            return _Brotli(self.brotli_level, window=self.brotli_window_log)
-        if encoding == b"zstd" and self.zstd_level >= 0:
-            return _Zstd(self.zstd_level, window=self.zstd_window_log)
-        if encoding == b"gzip" and self.gzip_level >= 0:
-            return _Gzip(self.gzip_level, window=self.gzip_window_bits)
-        raise StarioError(
-            f"Unsupported or disabled content encoding: {encoding!r}",
-            help_text="Pick an encoding enabled by CompressionConfig levels.",
+
+def compress_bytes(config: CompressionConfig, encoding: bytes, data: bytes) -> bytes:
+    """Encode `data` as one frame with the level and window `config` sets for `encoding`.
+
+    The Cython writer encodes responses itself; `stario.filesystem` uses this
+    to precompress files at load.
+    """
+    if encoding == b"br" and config.brotli_level >= 0:
+        return brotli_compress(data, config.brotli_level, config.brotli_window_log or 0)
+    if encoding == b"zstd" and config.zstd_level >= 0:
+        return zstd_compress(data, config.zstd_level, config.zstd_window_log or 0)
+    if encoding == b"gzip" and config.gzip_level >= 0:
+        window = config.gzip_window_bits
+        compressor = zlib.compressobj(
+            config.gzip_level,
+            zlib.DEFLATED,
+            16 + (_GZIP_WINDOW_BITS_MAX if window is None else window),
         )
-
-    def may_compress(
-        self,
-        accept_encoding: str | bytes | None,
-        *,
-        data: bytes | None = None,
-        content_type: bytes | None = None,
-        streaming: bool = False,
-    ) -> bool:
-        """Return True when negotiation could pick a compressor (shared by `select` and Writer fast paths)."""
-        if not self.enabled_encodings():
-            return False
-        if accept_encoding is None:
-            return False
-        if content_type is not None and not content_type_is_compressible(content_type):
-            return False
-        return not (not streaming and (data is None or len(data) < self.min_size))
-
-    def select(
-        self,
-        accept_encoding: str | bytes | None,
-        *,
-        data: bytes | None = None,
-        content_type: bytes | None = None,
-        streaming: bool = False,
-    ) -> Compressor | None:
-        """Choose one compressor from the client header and this config, or return `None` (identity)."""
-        if not self.may_compress(
-            accept_encoding,
-            data=data,
-            content_type=content_type,
-            streaming=streaming,
-        ):
-            return None
-
-        best_encoding = negotiate_content_encoding(
-            accept_encoding, self.enabled_encodings(), self.preference
-        )
-        if best_encoding is None:
-            return None
-
-        return self.make_compressor(best_encoding)
+        return compressor.compress(data) + compressor.flush()
+    raise StarioError(
+        f"Unsupported or disabled content encoding: {encoding!r}",
+        help_text="Pick an encoding enabled by CompressionConfig levels.",
+    )
 
 
 def compression_config_from_env() -> CompressionConfig:

@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+import stario.filesystem as filesystem
 from stario import App, Assets, Files
 from stario.exceptions import StarioError
 from stario.http.compression import CompressionConfig
@@ -35,17 +36,19 @@ class TestFiles:
 
         assert files.href("new file.txt") == "/media/new%20file.txt"
 
-    def test_href_tracks_live_state(self, tmp_path: Path) -> None:
-        target = tmp_path / "file.txt"
+    def test_href_does_not_touch_the_filesystem(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         files = Files(tmp_path)
 
-        with pytest.raises(StarioError, match="not found"):
-            files.href("file.txt")
-        target.write_text("ready")
-        assert files.href("file.txt") == "/data/file.txt"
-        target.unlink()
-        with pytest.raises(StarioError, match="not found"):
-            files.href("file.txt")
+        def no_stat(*args: object, **kwargs: object) -> object:
+            raise AssertionError("href() must not stat")
+
+        with monkeypatch.context() as patched:
+            patched.setattr(os, "stat", no_stat)
+            patched.setattr(os, "lstat", no_stat)
+            assert files.href("missing.txt") == "/data/missing.txt"
+            assert files.href("a/b/missing.txt") == "/data/a/b/missing.txt"
 
     def test_href_appends_query_and_fragment(self, tmp_path: Path) -> None:
         (tmp_path / "file.txt").write_text("ready")
@@ -65,48 +68,20 @@ class TestFiles:
         with pytest.raises(StarioError):
             files.href(path)
 
-    def test_rejects_directory_hidden_and_symlink(self, tmp_path: Path) -> None:
-        (tmp_path / "folder").mkdir()
-        (tmp_path / ".secret").write_text("secret")
-        (tmp_path / "target.txt").write_text("target")
-        (tmp_path / "link.txt").symlink_to(tmp_path / "target.txt")
+    def test_rejects_hidden_segments(self, tmp_path: Path) -> None:
         files = Files(tmp_path)
+        hidden = Files(tmp_path, include_hidden=True)
 
-        for path in ("folder", ".secret", "link.txt"):
-            with pytest.raises(StarioError, match="not found"):
+        for path in (".secret", "a/.b/c.txt"):
+            with pytest.raises(StarioError, match="Hidden"):
                 files.href(path)
-
-    def test_symlinks_must_remain_contained(self, tmp_path: Path) -> None:
-        root = tmp_path / "root"
-        root.mkdir()
-        (root / "target.txt").write_text("target")
-        (root / "inside.txt").symlink_to(root / "target.txt")
-        outside = tmp_path / "outside.txt"
-        outside.write_text("secret")
-        (root / "outside.txt").symlink_to(outside)
-        files = Files(root, follow_symlinks=True)
-
-        assert files.href("inside.txt") == "/data/inside.txt"
-        with pytest.raises(StarioError, match="not found"):
-            files.href("outside.txt")
+        assert hidden.href(".secret") == "/data/.secret"
 
     def test_host_prefix_can_generate_urls(self, tmp_path: Path) -> None:
         (tmp_path / "file.txt").write_text("ready")
         files = Files(tmp_path, "//cdn.example.com/media")
 
         assert files.href("file.txt") == "//cdn.example.com/media/file.txt"
-
-    def test_directory_symlink_cannot_escape(self, tmp_path: Path) -> None:
-        root = tmp_path / "root"
-        root.mkdir()
-        outside = tmp_path / "outside"
-        outside.mkdir()
-        (outside / "secret.txt").write_text("leak")
-        (root / "via").symlink_to(outside)
-        files = Files(root, follow_symlinks=True)
-
-        with pytest.raises(StarioError, match="not found"):
-            files.href("via/secret.txt")
 
 
 @pytest.mark.asyncio
@@ -169,6 +144,81 @@ class TestServing:
         assert {missing.status_code, folder.status_code, hidden.status_code} == {404}
         assert traversal.status_code == 404
         assert missing.headers.get("x-content-type-options") == "nosniff"
+
+    async def test_symlinks_must_remain_contained(self, tmp_path: Path) -> None:
+        root = tmp_path / "root"
+        root.mkdir()
+        (root / "target.txt").write_text("target")
+        (root / "inside.txt").symlink_to(root / "target.txt")
+        outside = tmp_path / "outside.txt"
+        outside.write_text("secret")
+        (root / "outside.txt").symlink_to(outside)
+        followed = Files(root, follow_symlinks=True)
+
+        assert followed.href("outside.txt") == "/data/outside.txt"
+        async with TestClient(_app(Files(root))) as client:
+            unfollowed = await client.get("/data/inside.txt")
+        async with TestClient(_app(followed)) as client:
+            inside = await client.get("/data/inside.txt")
+            escaped = await client.get("/data/outside.txt")
+
+        assert unfollowed.status_code == 404
+        assert (inside.status_code, inside.content) == (200, b"target")
+        assert escaped.status_code == 404
+
+    async def test_directory_symlink_cannot_escape(self, tmp_path: Path) -> None:
+        root = tmp_path / "root"
+        root.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.txt").write_text("leak")
+        (root / "via").symlink_to(outside)
+        files = Files(root, follow_symlinks=True)
+
+        async with TestClient(_app(files)) as client:
+            response = await client.get("/data/via/secret.txt")
+
+        assert response.status_code == 404
+
+    async def test_root_is_resolved_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "a.txt").write_text("a")
+        files = Files(tmp_path)
+        original = Path.resolve
+        root_resolves = 0
+
+        def counting(path: Path, strict: bool = False) -> Path:
+            nonlocal root_resolves
+            if path == files.directory:
+                root_resolves += 1
+            return original(path, strict=strict)
+
+        monkeypatch.setattr(Path, "resolve", counting)
+        async with TestClient(_app(files)) as client:
+            for _ in range(3):
+                assert (await client.get("/data/a.txt")).status_code == 200
+
+        assert root_resolves == 1
+
+    async def test_repointed_directory_symlink_serves_the_new_target(
+        self, tmp_path: Path
+    ) -> None:
+        for release in ("one", "two"):
+            (tmp_path / release).mkdir()
+            (tmp_path / release / "x.txt").write_text(release)
+        current = tmp_path / "current"
+        current.symlink_to(tmp_path / "one")
+        files = Files(current)
+
+        async with TestClient(_app(files)) as client:
+            first = await client.get("/data/x.txt")
+            current.unlink()
+            current.symlink_to(tmp_path / "two")
+            second = await client.get("/data/x.txt")
+
+        assert first.content == b"one"
+        assert second.content == b"two"
 
     async def test_content_type_override(self, tmp_path: Path) -> None:
         (tmp_path / "site.custom").write_text("data")
@@ -415,6 +465,23 @@ class TestServing:
         assert invalid.status_code == 416
         assert invalid.content == b""
         assert invalid.headers.get("content-range") == "bytes */10"
+
+    async def test_multi_range_is_served_in_full(self, tmp_path: Path) -> None:
+        # RFC 9110 14.2: a server may ignore a Range with several ranges.
+        (tmp_path / "file.bin").write_bytes(b"0123456789")
+        live = Files(tmp_path)
+        loaded = Files(tmp_path)
+        headers = {"Range": "bytes=0-1,3-4"}
+
+        async with TestClient(_app(live)) as client:
+            streamed = await client.get("/data/file.bin", headers=headers)
+        async with TestClient(await _loaded(loaded)) as client:
+            cached = await client.get("/data/file.bin", headers=headers)
+
+        for response in (streamed, cached):
+            assert response.status_code == 200
+            assert response.content == b"0123456789"
+            assert response.headers.get("content-range") is None
 
     async def test_if_range_uses_strong_etag_and_date(self, tmp_path: Path) -> None:
         (tmp_path / "file.bin").write_bytes(b"0123456789")
@@ -682,6 +749,30 @@ class TestServing:
         assert response.status_code == 200
         assert response.headers.get("content-encoding") is None
 
+    async def test_concurrent_eviction_of_a_changed_entry(self, tmp_path: Path) -> None:
+        target = tmp_path / "app.css"
+        target.write_text("a" * 1000)
+        files = Files(tmp_path)
+        app = await _loaded(files, precompress=())
+        target.write_text("b" * 1000)
+        os.utime(target, ns=(target.stat().st_atime_ns, target.stat().st_mtime_ns + 1))
+
+        class Evicted(dict[str, Any]):
+            """Another event-loop thread drops the stale entry right after `get`."""
+
+            def get(self, key: str, default: Any = None) -> Any:
+                entry = super().get(key, default)
+                self.pop(key, None)
+                return entry
+
+        files._cache = Evicted(files._cache)
+
+        async with TestClient(app) as client:
+            response = await client.get("/data/app.css")
+
+        assert response.status_code == 200
+        assert response.content == b"b" * 1000
+
 
 @pytest.mark.asyncio
 class TestConfiguration:
@@ -905,6 +996,70 @@ class TestAssets:
         assert files.stats["streamed_files"] == 1
         assert files.stats["budget_skipped_files"] == 1
         assert files.stats["retained_bytes"] <= 500
+
+    @pytest.mark.asyncio
+    async def test_load_reads_only_what_the_budget_holds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for name in "abcdef":
+            (tmp_path / f"{name}.css").write_bytes(name.encode() * 100)
+        files = Assets(tmp_path, "/static")
+        files.register(App())
+        files.href("d.css")
+
+        reads: list[str] = []
+        hashed: list[str] = []
+        read_bytes = Path.read_bytes
+        fingerprint = filesystem._fingerprint
+
+        def tracked_read_bytes(path: Path) -> bytes:
+            reads.append(path.name)
+            return read_bytes(path)
+
+        def tracked_fingerprint(path: Path) -> str:
+            hashed.append(path.name)
+            return fingerprint(path)
+
+        monkeypatch.setattr(Path, "read_bytes", tracked_read_bytes)
+        monkeypatch.setattr(filesystem, "_fingerprint", tracked_fingerprint)
+        await files.load(max_bytes=250, precompress=())
+
+        # The entry href() pinned is verified and held first, then one more
+        # fits the budget. The rest are hashed from disk, not read into memory.
+        assert reads == ["d.css", "a.css"]
+        assert hashed == ["b.css", "c.css", "e.css", "f.css"]
+        assert {key.split(".")[0] for key in files._cache} == {"a", "d"}
+        assert files.stats == {
+            "files": 6,
+            "cached_files": 2,
+            "streamed_files": 4,
+            "budget_skipped_files": 4,
+            "retained_bytes": 200,
+            "compressed_files": 0,
+        }
+
+    @pytest.mark.asyncio
+    async def test_precompressed_bytes_round_trip_each_codec(
+        self, tmp_path: Path
+    ) -> None:
+        payload = ("body { color: red; }\n" * 100).encode()
+        (tmp_path / "app.css").write_bytes(payload)
+        files = Assets(tmp_path)
+        app = App()
+        await files.attach(app)
+        href = files.href("app.css")
+        assert files.stats["compressed_files"] == 1
+        assert set(next(iter(files._cache.values())).encodings) == {
+            b"br",
+            b"zstd",
+            b"gzip",
+        }
+
+        async with TestClient(app) as client:
+            for codec in ("br", "zstd", "gzip"):
+                response = await client.get(href, headers={"Accept-Encoding": codec})
+                assert response.headers.get("content-encoding") == codec
+                assert response.content == payload
 
     @pytest.mark.asyncio
     async def test_changed_file_after_href_raises(self, tmp_path: Path) -> None:

@@ -1,42 +1,24 @@
-"""HTML escaping for text nodes and attribute names/values."""
+"""HTML escaping for text nodes and attribute names/values.
+
+`escape_text` and `escape_attribute_value` run in C (`stario_cython.markup`):
+one pass, and the same object back when nothing needs escaping.
+"""
 
 import re
 from functools import lru_cache
 
 from stario.exceptions import StarioError
+from stario_cython.markup import escape_attribute_value, escape_text
+
+__all__ = [
+    "escape_attribute_value",
+    "escape_sq_attribute_value",
+    "escape_text",
+    "validate_attribute_key",
+]
 
 
-def escape_text(s: str) -> str:
-    """Escape `&`, `<`, `>` for text nodes (quotes stay literal).
-
-    Not LRU-cached: text nodes are usually high-cardinality user copy, so cache
-    misses and eviction would dominate versus short-circuit + replace work.
-    """
-    if "&" not in s and "<" not in s and ">" not in s:
-        return s
-
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-@lru_cache(maxsize=512)
-def escape_attribute_value(s: str) -> str:
-    """Escape for double-quoted attribute values.
-
-    Single quotes stay literal: stario always emits attribute values inside
-    double quotes, so only `&`, `<`, `>`, and `"` need escaping. This
-    keeps Datastar/JS expressions with string literals readable on the wire.
-
-    Memoized for repeated values (classes, `type`, `role`, Datastar paths, etc.).
-    """
-    if "&" not in s and "<" not in s and ">" not in s and '"' not in s:
-        return s
-
-    return (
-        s.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
+# object back when nothing needs escaping). The names stay public here.
 
 
 @lru_cache(maxsize=256)

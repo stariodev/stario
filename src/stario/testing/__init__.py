@@ -6,7 +6,8 @@
 code. The client only builds requests and parses responses.
 
 Public surface: `TestClient`, `TestResponse`, `TestStreamResponse`,
-`TestTracer`, and `aload_app` (bootstrap loading for integration tests).
+`TestTracer`, `aload_app` (bootstrap loading for integration tests), and
+`VirtualTimeLoop` (an event loop whose clock jumps over timer waits).
 Tests need an async runner (for example pytest-asyncio).
 """
 
@@ -14,11 +15,13 @@ from stario.testing.client import TestClient
 from stario.testing.load import aload_app
 from stario.testing.response import TestResponse, TestStreamResponse
 from stario.testing.tracer import TestTracer
+from stario.testing.vtime import VirtualTimeLoop
 
 __all__ = [
     "TestClient",
     "TestResponse",
     "TestStreamResponse",
     "TestTracer",
+    "VirtualTimeLoop",
     "aload_app",
 ]

@@ -45,6 +45,25 @@ cd projects/stario
 uv run benchmarks/html/micro.py
 ```
 
+## In-process protocol (`server/inproc.py`)
+
+Feeds keep-alive HTTP/1.1 requests straight into `HttpProtocol` with a
+transport that discards writes and prints the best-of-N microseconds per
+request: plaintext, JSON, a path parameter, a browser's full header set, a
+small POST, a 50-row HTML page with each content coding, a traced request,
+and SSE `patch_elements` / `patch_signals` per event. No sockets, no load
+generator, no extra packages, about a minute:
+
+```bash
+cd projects/stario
+uv run benchmarks/server/inproc.py            # all cases
+uv run benchmarks/server/inproc.py plaintext  # one case
+```
+
+Use it to compare two checkouts on the same machine; a change of a few
+hundred nanoseconds on the plaintext case is visible. Record both numbers
+in a change that touches the request path or the markup builder.
+
 ## HTTP server (`server/`)
 
 Compares the current Stario checkout with a few Python web framework/server

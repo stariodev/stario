@@ -19,9 +19,9 @@ DATE = b"date: Tue, 18 Aug 2026 00:00:00 GMT\r\n"
 SWEEP_INTERVAL = 0.05
 
 
-def connection_set() -> Connections:
-    """A test registry: no Server, so it runs its own 50ms sweep."""
-    return Connections(sweep_interval=SWEEP_INTERVAL)
+def connection_set(date: bytes = DATE) -> Connections:
+    """A test registry: ticks every 50 ms while a connection is open; fixed Date."""
+    return Connections(sweep_interval=SWEEP_INTERVAL, date=date)
 
 
 class RecordingTransport(asyncio.Transport):
@@ -87,12 +87,13 @@ def make_protocol(
     write_timeout: float = 30.0,
 ) -> HttpProtocol:
     if connections is None:
-        connections = connection_set()
+        connections = connection_set(date)
+    elif date != DATE:
+        connections.pin_date(date)
     return HttpProtocol(
         loop,
         app,
         NoOpTracer() if tracer is None else tracer,
-        [date],
         CompressionConfig() if compression is None else compression,
         connections,
         max_header_bytes=max_header_bytes,
@@ -121,7 +122,7 @@ async def running_server(
     tracer=None,
 ) -> AsyncIterator[int]:
     loop = asyncio.get_running_loop()
-    connections = connection_set()
+    connections = connection_set(date)
     server = await loop.create_server(
         lambda: make_protocol(
             loop,

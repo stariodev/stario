@@ -259,6 +259,21 @@ class TestSseWireFormat:
         finally:
             loop.close()
 
+    def test_crlf_in_patch_elements_splits_once(self):
+        w, _sink, loop = _make_writer()
+        try:
+            SSE(w).patch_elements("<div>\r\n<p>a</p>\r\n</div>")
+            result = _sse_body(w)
+
+            assert (
+                b"data: elements <div>\n"
+                b"data: elements <p>a</p>\n"
+                b"data: elements </div>\n\n"
+            ) in result
+            assert b"\r" not in result
+        finally:
+            loop.close()
+
     def test_bare_cr_in_patch_elements_becomes_data_line(self):
         w, _sink, loop = _make_writer()
         try:
@@ -458,6 +473,50 @@ class TestDatastarAttributeValidation:
     def test_attr_rejects_quote_breakout_key(self):
         with pytest.raises(StarioError, match="Invalid attribute name"):
             data.attr('x" onfocus="alert(1)', "$x")
+
+    def test_on_camel_case_event_gets_case_modifier(self):
+        # HTML lowercases the attribute name and Datastar's default for
+        # data-on is kebab, so `myEvent` must travel as `my-event__case.camel`.
+        assert data.on("myEvent", "go()") == Attrs(
+            ' data-on:my-event__case.camel="go()"'
+        )
+        assert data.on("DOMContentLoaded", "go()", target="window") == Attrs(
+            ' data-on:d-o-m-content-loaded__window__case.pascal="go()"'
+        )
+        # An explicit case wins over inference.
+        assert data.on("myEvent", "go()", case="snake") == Attrs(
+            ' data-on:my-event__case.snake="go()"'
+        )
+
+    def test_on_rejects_name_no_case_modifier_can_restore(self):
+        # `my-event-x` camel-cases to `myEventX`, so no modifier restores it.
+        with pytest.raises(StarioError, match="cannot be spelled"):
+            data.on("myEvent-x", "go()")
+
+    def test_class_camel_case_name_gets_case_modifier(self):
+        assert data.class_("myClass", "$x") == Attrs(
+            ' data-class:my-class__case.camel="$x"'
+        )
+        assert data.class_("text-red-500", "$x") == Attrs(
+            ' data-class:text-red-500="$x"'
+        )
+        assert data.class_("my_class", "$x") == Attrs(' data-class:my_class="$x"')
+
+    def test_attr_and_style_reject_uppercase_keys(self):
+        with pytest.raises(StarioError, match="uppercase"):
+            data.attr("viewBox", "$box")
+        with pytest.raises(StarioError, match="uppercase"):
+            data.style("--myVar", "$v")
+        # The value form keeps the case as a JavaScript object key.
+        assert data.attrs({"viewBox": "$box"}) == Attrs(
+            " data-attr=\"{'viewBox':$box}\""
+        )
+
+    def test_bind_rejects_uppercase_modifier_values(self):
+        with pytest.raises(StarioError, match="uppercase"):
+            data.bind("html", prop="innerHTML")
+        with pytest.raises(StarioError, match="uppercase"):
+            data.bind("x", event="myChange")
 
     def test_on_rejects_breakout_event_name(self):
         with pytest.raises(StarioError, match="Invalid attribute name"):

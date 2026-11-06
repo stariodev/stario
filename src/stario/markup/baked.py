@@ -18,7 +18,7 @@ from .escape import escape_text
 from .render import render_nodes_to_string
 from .slots import AttrSlot, BakeSlot, slot_name
 from .tag import Tag
-from .types import HtmlElement, SafeString
+from .types import Element, HtmlElement, SafeString
 from .wire import wire_scalar_attr_fragment
 
 type BakedNode = HtmlElement | BakeSlot | Tag
@@ -126,22 +126,9 @@ def _flatten_node_into_segments(
                 example=("@baked\ndef card(body):\n    return h.Div(body)"),
             )
 
-        case tuple() as element_tuple:
-            # Tuple walk must stay in sync with render._render.
-            if len(element_tuple) != 4:
-                raise StarioError(
-                    f"@baked {builder_qualname}: invalid HTML element tuple shape",
-                    context={
-                        "function": builder_qualname,
-                        "tuple_length": len(element_tuple),
-                    },
-                    help_text=(
-                        "HTML element tuples must have exactly four items: tag start, "
-                        "attributes, children, and tail."
-                    ),
-                    example='h.Div({"class": "container"}, h.P("Hello"))',
-                )
-            tag_start, attrs, children, tail = element_tuple
+        case Element() as element:
+            # Element walk must stay in sync with render._render.
+            tag_start, attrs, children, tail = element
             pending.append(tag_start)
             if attrs is not None:
                 if type(attrs) is str:
@@ -187,8 +174,8 @@ def _flatten_node_into_segments(
                     "node_value": str(node)[:100],
                 },
                 help_text=(
-                    "Only str, int, float, SafeString, lists, element tuples, "
-                    "and parameters may appear in a @baked builder."
+                    "Only str, int, float, SafeString, lists, elements built by "
+                    "h.*, and parameters may appear in a @baked builder."
                 ),
                 example=("@baked\ndef row(label):\n    return h.Li(label)"),
             )

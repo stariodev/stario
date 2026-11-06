@@ -148,7 +148,7 @@ That cannot be shared as-is.
 | Compiled trie (read-only after bootstrap) | `shutdown` Future |
 | Registered handlers / middleware | `tasks` set (per thread via `threading.local`; each protocol binds its loop's set once) |
 | `host_routing` | `connections` set |
-| | Date-header box + `Connections` registry (1s C sweep) |
+| | `Connections` registry: the loop's clock, `Date` cache, and 1s C sweep |
 | | `HttpProtocol.loop` |
 
 Concrete shutdown:
@@ -285,8 +285,8 @@ not add locks.
 | `vendor/compression_buf.c` `brotli_pool[]` / `zstd_pool[]` / `gzip_pool[]` | Done. `_Thread_local` arrays (`STARIO_CODEC_POOL_MAX=32`). No process-global free-list. |
 | `protocol.pyx` URL cache `_UC_*` | Gone. The compiled `CRouter` trie is the lookup path; no C URL table. |
 | `_bind_settings()` / `_SETTINGS` | Done. Init once under `threading.Lock`, then immutable. |
-| `HttpProtocol.connections` | Per-loop set (Date-tick sweeper walks that loop's set only). |
-| `date_box` | Per-loop box. |
+| `HttpProtocol.connections` | Per-loop registry; its tick walks that loop's connections only. |
+| `Date` header | Per-loop cache on `Connections`; one coarse clock read per response, no lock. |
 | `llhttp` / `nghttp2` session | Per-`HttpProtocol` — OK **if** the protocol never runs on two threads. Affinity is the invariant. |
 | Brotli/zstd/gzip state on `RequestExchange` | Per-exchange — OK with affinity. Do not share an encoder. |
 
@@ -311,7 +311,7 @@ packages cannot re-enable the GIL. Asset fingerprints use
 | `App.shutdown: Future` | Created on the bootstrap loop. Workers cannot `await` it. `signal_shutdown` / `set_result` from the wrong thread is undefined. |
 | `c.alive()` | Waits on that Future. SSE would either never see shutdown or raise. |
 | `App.tasks` | `set.add` + `discard` from N loops. Builtin set ops are individually safe; drain’s `list(self.tasks)` + `asyncio.wait` is not a consistent snapshot, and those Task objects are loop-affine. Per-loop sets, or trust `asyncio.all_tasks()`. |
-| `Server._date_tick` | One task, one `date_box`, walks `_live_connections`. Must exist **once per loop**. |
+| `Connections` tick | One `call_later` handle per registry, so **once per loop**; it walks that loop's list only. |
 | `Server._create_listener` | Captures `asyncio.get_running_loop()` into every protocol. Each worker must `create_server` on **its** loop. |
 | `_signal_handlers` | Must remain on the main thread; fan out with `call_soon_threadsafe`. |
 | Keep-alive + `app.shutdown.done()` in `response_completed` | Must read the process-wide flag. |
@@ -325,8 +325,8 @@ shares it safely.
 Unsafe: `app.add` / `use` concurrent with lookups. Register routes in
 bootstrap.
 
-`stario.http.wire` path/accept-encoding LRUs and `markup.escape` caches
-are the same story — OK.
+The `stario.http.compression` accept-encoding LRU and `markup.escape`
+caches are the same story — OK.
 
 The compiled trie is C structs plus read-only dicts; concurrent reads
 need no lock.

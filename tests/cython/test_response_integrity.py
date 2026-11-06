@@ -10,11 +10,8 @@ import zlib
 import pytest
 
 from stario import App, Route
-from stario.http.compression import (
-    CompressionConfig,
-    brotli_decompress,
-    zstd_decompress,
-)
+from stario.http.compression import CompressionConfig
+from stario_cython.codecs import brotli_decompress, zstd_decompress
 from tests.cython import h2wire as h2
 from tests.cython.http import read_response, running_server
 

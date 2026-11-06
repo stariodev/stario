@@ -38,7 +38,7 @@ def _telemetry_from_recording(span: RecordingSpan) -> TelemetrySpan:
         parent_id=span.parent_id,
         start_ns=span.start_ns,
         end_ns=span.end_ns,
-        status="error" if span.error else "ok",
+        status="error" if span.error is not None else "ok",
         error=span.error,
         attributes=dict(span.attributes or {}),
         events=events,

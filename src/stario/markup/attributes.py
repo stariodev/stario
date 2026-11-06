@@ -4,15 +4,23 @@ The hot path is deliberately small: `Tag` renders plain mappings as
 `key=value` pairs and accepts pre-rendered `Attrs` fragments.
 """
 
+import re
 from collections.abc import Mapping
 from typing import Any, cast
 
 from stario.exceptions import StarioError
 
 from .escape import escape_attribute_value, validate_attribute_key
-from .slots import bake_slot_if_present, slot_name
+from .slots import BakeSlot, bake_slot_if_present, slot_name
 from .types import AttributeValue, Attrs, ClassInput, StyleDeclarations
 from .wire import wire_scalar_attr_fragment
+
+# A property name or value that could start another declaration or block.
+_STYLE_KEY_BAD = re.compile(r"[:;{}\\]")
+_STYLE_VALUE_BAD = re.compile(r"[;{}\\]")
+# Rendered `class="..."` fragments for all-str token tuples (Tailwind lists repeat).
+_CLASSES_CACHE: dict[tuple[Any, ...], Attrs] = {}
+_CLASSES_CACHE_MAX = 1024
 
 
 def styles(declarations: StyleDeclarations) -> Attrs:
@@ -39,7 +47,7 @@ def styles(declarations: StyleDeclarations) -> Attrs:
                 example='h.Div(styles({"color": "red"}))',
             )
 
-        if any(ch in key for ch in ":;{}\\"):
+        if _STYLE_KEY_BAD.search(key) is not None:
             raise StarioError(
                 f"Invalid CSS property name: {key!r}",
                 context={"property": key},
@@ -51,11 +59,10 @@ def styles(declarations: StyleDeclarations) -> Attrs:
 
         rendered_key = escape_attribute_value(key)
 
-        bake_slot = bake_slot_if_present(value)
-        if bake_slot is not None:
+        if type(value) is BakeSlot:
             raise StarioError(
                 f"@baked: parameters are not supported inside styles() values (property '{rendered_key}')",
-                context={"property": rendered_key, "parameter": slot_name(bake_slot)},
+                context={"property": rendered_key, "parameter": slot_name(value)},
                 help_text=(
                     "Build the style string before calling the baked template and pass "
                     "it as one whole attribute value."
@@ -65,7 +72,7 @@ def styles(declarations: StyleDeclarations) -> Attrs:
         value_type = type(value)
         if value_type is str:
             rendered_value = escape_attribute_value(cast(str, value))
-            if any(ch in rendered_value for ch in ";{}\\"):
+            if _STYLE_VALUE_BAD.search(rendered_value) is not None:
                 raise StarioError(
                     f"Invalid CSS value for property '{rendered_key}'",
                     context={"property": rendered_key, "value": rendered_value[:100]},
@@ -100,9 +107,22 @@ def classes(*tokens: ClassInput) -> Attrs:
     Mapping values are truthy-tested (not strictly bool): any truthy value
     includes the class name.
     """
+    cached = None
+    for token in tokens:
+        if type(token) is not str:
+            break
+    else:
+        cached = _CLASSES_CACHE.get(tokens)
+        if cached is not None:
+            return cached
+
     rendered: list[str] = []
 
     for token in tokens:
+        if type(token) is str:
+            rendered.append(escape_attribute_value(token))
+            continue
+
         if token is None or token is False:
             continue
 
@@ -130,17 +150,19 @@ def classes(*tokens: ClassInput) -> Attrs:
                     rendered.append(escape_attribute_value(name))
             continue
 
-        if type(token) is not str:
-            raise StarioError(
-                f"Invalid class token type: {type(token).__name__}",
-                context={"token_type": type(token).__name__},
-                help_text="Class tokens must be strings. Use None or False to omit a token.",
-                example='h.Div(classes("btn", "primary"))',
-            )
+        raise StarioError(
+            f"Invalid class token type: {type(token).__name__}",
+            context={"token_type": type(token).__name__},
+            help_text="Class tokens must be strings. Use None or False to omit a token.",
+            example='h.Div(classes("btn", "primary"))',
+        )
 
-        rendered.append(escape_attribute_value(token))
-
-    return Attrs(f' class="{" ".join(rendered)}"')
+    result = Attrs(f' class="{" ".join(rendered)}"')
+    if cached is None and all(type(token) is str for token in tokens):
+        if len(_CLASSES_CACHE) >= _CLASSES_CACHE_MAX:
+            _CLASSES_CACHE.clear()
+        _CLASSES_CACHE[tokens] = result
+    return result
 
 
 def prefixed(prefix: str, attrs: Mapping[str, AttributeValue]) -> Attrs:

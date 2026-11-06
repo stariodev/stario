@@ -56,7 +56,13 @@ def _sse_field_value(name: str, value: str) -> bytes:
 
 
 def _sse_payload_lines(data: bytes) -> list[bytes]:
-    """Split an SSE payload on CR, LF, or CRLF (HTML event-stream line endings)."""
+    """Split an SSE payload on CR, LF, or CRLF (HTML event-stream line endings).
+
+    Rendered markup and compact JSON carry no line breaks, so the common
+    case is one `data:` line and no copies of the payload.
+    """
+    if b"\n" not in data and b"\r" not in data:
+        return [data]
     return data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n")
 
 
@@ -116,7 +122,12 @@ class SSE:
         event_id: str | None = None,
         retry: int | None = None,
     ) -> None:
-        """Patch DOM elements with bytes, text, or Stario markup."""
+        """Patch DOM elements with Stario markup, or trusted `bytes` / `str` HTML.
+
+        Markup built with `h.*` is rendered with escaping. `bytes` and `str`
+        are sent as they are, like `w.html(str)`: they are trusted HTML, so
+        never pass user text this way — wrap it in an element instead.
+        """
         if mode is not None and mode not in _PATCH_MODES:
             raise StarioError(
                 "Unknown Datastar patch mode",

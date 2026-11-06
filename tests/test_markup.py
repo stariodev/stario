@@ -410,9 +410,28 @@ class TestRender:
         with pytest.raises(StarioError, match="Cannot render a Tag object directly"):
             render(h.Div(cast(Any, h.Div)))
 
-    def test_render_rejects_invalid_tuple_shape(self):
-        with pytest.raises(StarioError, match="Invalid tuple shape for HTML element"):
+    def test_render_rejects_plain_tuple(self):
+        with pytest.raises(StarioError, match="Cannot render a tuple as HTML content"):
             render(cast(Any, ("<div>", [])))
+
+    def test_four_tuple_child_is_not_an_element(self):
+        # A database row with four columns is a tuple, not markup. Before the
+        # Element type, this rendered the row's text as raw tag/attribute bytes.
+        row = ("<img src=x onerror=alert(1)>", " onclick=evil", "abc", "")
+        with pytest.raises(StarioError, match="Cannot render a tuple as HTML content"):
+            render(h.Li(cast(Any, row)))
+        assert render(h.Li(*row)) == (
+            "<li>&lt;img src=x onerror=alert(1)&gt; onclick=evilabc</li>"
+        )
+
+    def test_elements_are_tuples_built_only_by_tags(self):
+        from stario.markup.types import Element
+
+        element = h.P({"id": "x"}, "hi")
+        assert type(element) is Element
+        assert isinstance(element, tuple)
+        assert len(element) == 4
+        assert render(element) == '<p id="x">hi</p>'
 
 
 class TestHtmlTags:
@@ -942,12 +961,33 @@ class TestTrustBoundaries:
         with pytest.raises(StarioError, match="bool"):
             Comment(True)
 
-    def test_script_str_children_are_escaped(self):
-        # Plain str inside <script> goes through text escaping, so a
-        # `</script>` sequence cannot terminate the element. Real inline
-        # JS must be passed as SafeString (trusted).
-        result = render(h.Script('if (a<b) { x("</script>"); }'))
-        assert result == ('<script>if (a&lt;b) { x("&lt;/script&gt;"); }</script>')
+    def test_script_str_children_are_raw_text(self):
+        # <script> is a raw-text element: the browser never decodes entities
+        # inside it, so escaping would silently break the JavaScript.
+        result = render(h.Script("if (a < b && c) { go(); }"))
+        assert result == "<script>if (a < b && c) { go(); }</script>"
+
+    def test_script_rejects_text_that_closes_the_element(self):
+        with pytest.raises(StarioError, match="would end the element early"):
+            h.Script('x("</script>")')
+        with pytest.raises(StarioError, match="would end the element early"):
+            h.Script('x("</SCRIPT >")')
+        with pytest.raises(StarioError, match="would end the element early"):
+            h.Script("<!-- x -->")
+
+    def test_script_list_children_are_raw_text(self):
+        result = render(h.Script(["a < b;", "c > d;"]))
+        assert result == "<script>a < b;c > d;</script>"
+
+    def test_style_str_children_are_raw_text(self):
+        result = render(h.Style("a > b { color: red; }"))
+        assert result == "<style>a > b { color: red; }</style>"
+        with pytest.raises(StarioError, match="would end the element early"):
+            h.Style("</style><script>x()</script>")
+
+    def test_raw_text_tags_still_escape_attributes(self):
+        result = render(h.Script({"src": '/a.js?x="1"&y=2'}))
+        assert result == '<script src="/a.js?x=&quot;1&quot;&amp;y=2"></script>'
 
     def test_script_safestring_children_are_verbatim(self):
         result = render(h.Script(SafeString("if (a < b) { go(); }")))

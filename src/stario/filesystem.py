@@ -32,8 +32,8 @@ from stario.exceptions import StarioError, StarioRuntime
 from stario.http.app import App
 from stario.http.compression import (
     CompressionConfig,
+    compress_bytes,
     content_type_is_compressible,
-    merge_vary,
     negotiate_content_encoding,
 )
 from stario.http.context import Context
@@ -144,12 +144,25 @@ def _is_relative(path: object) -> TypeGuard[str]:
     )
 
 
+def _is_hidden(path: str) -> bool:
+    return any(part.startswith(".") for part in path.split("/"))
+
+
 def _bad_path(path: object) -> StarioError:
     return StarioError(
         "File path must be a non-empty relative POSIX path",
         context={"path": path},
         help_text="Use a path like 'css/app.css'. Do not use '..', a leading slash, or backslashes.",
         example='files.href("css/app.css")',
+    )
+
+
+def _hidden(path: str) -> StarioError:
+    return StarioError(
+        "Hidden path segments are not served",
+        context={"path": path},
+        help_text="Pass include_hidden=True to serve names that start with a dot.",
+        example="Files(directory, include_hidden=True)",
     )
 
 
@@ -243,7 +256,10 @@ def _parse_range(header: bytes, size: int) -> _Range | object | None:
     spec = spec.strip()
     if sep != b"=" or unit.strip().lower() != b"bytes":
         return None
-    if b"," in spec or b"-" not in spec or size <= 0:
+    if b"," in spec:
+        # Several ranges: ignore the header and send the full body (RFC 9110 14.2).
+        return None
+    if b"-" not in spec or size <= 0:
         return UNSAT
     start_text, _, end_text = spec.partition(b"-")
     try:
@@ -377,10 +393,11 @@ class _Mount:
     __slots__ = (
         "_cache",
         "_cache_control",
-        "_compressors",
+        "_codecs",
+        "_compression",
         "_content_types",
         "_loaded",
-        "_min_size",
+        "_root",
         "_route",
         "directory",
         "follow_symlinks",
@@ -446,6 +463,8 @@ class _Mount:
         self._content_types = types
         self._cache: dict[str, _Cached] = {}
         self._loaded = False
+        # The real path of `directory`, resolved on first use (see resolve()).
+        self._root: Path | None = None
 
     def register(
         self,
@@ -547,12 +566,8 @@ class _Mount:
             )
         self.max_bytes = max_bytes
         self.max_file_size = max_file_size
-        self._min_size = compression.min_size
-        self._compressors = tuple(
-            (token, compression.make_compressor(token))
-            for token in CODECS
-            if token in wanted
-        )
+        self._compression = compression
+        self._codecs = tuple(token for token in CODECS if token in wanted)
         await asyncio.to_thread(self._load)
         self._loaded = True
         return self.stats
@@ -584,13 +599,10 @@ class _Mount:
     def resolve(self, path: str) -> tuple[Path, stat_result] | None:
         if not _is_relative(path):
             return None
-        parts = Path(*path.split("/"))
-        if not self.include_hidden and any(
-            part.startswith(".") for part in parts.parts
-        ):
+        if not self.include_hidden and _is_hidden(path):
             return None
+        parts = Path(*path.split("/"))
         try:
-            root = self.directory.resolve(strict=True)
             if not self.follow_symlinks:
                 current = self.directory
                 for part in parts.parts:
@@ -598,8 +610,13 @@ class _Mount:
                     if stat_module.S_ISLNK(current.lstat().st_mode):
                         return None
             resolved = self.directory.joinpath(parts).resolve(strict=True)
-            if not resolved.is_relative_to(root):
-                return None
+            root = self._root
+            if root is None or not resolved.is_relative_to(root):
+                # First use, or `directory` now points elsewhere (a re-pointed
+                # symlink): resolve the root again, once, not on every request.
+                root = self._root = self.directory.resolve(strict=True)
+                if not resolved.is_relative_to(root):
+                    return None
             file_stat = resolved.stat()
         except FileNotFoundError:
             return None
@@ -661,22 +678,29 @@ class _Mount:
         size: int,
         budget: int,
         identity: tuple[int, int, int, int] | None = None,
-        content: bytes | None = None,
     ) -> _Cached | None:
-        content_type = self._content_types.get(path.suffix.lower(), DEFAULT_TYPE)
         if size > self.max_file_size or size > budget:
             return None
-        if content is None:
-            content = path.read_bytes()
+        return self._hold(path, path.read_bytes(), budget, identity)
+
+    def _hold(
+        self,
+        path: Path,
+        content: bytes,
+        budget: int,
+        identity: tuple[int, int, int, int] | None = None,
+    ) -> _Cached:
+        """Entry for `content` plus the precompressed variants that fit `budget`."""
+        content_type = self._content_types.get(path.suffix.lower(), DEFAULT_TYPE)
         encodings: dict[bytes, bytes] = {}
         retained = len(content)
         if (
-            self._compressors
-            and retained >= self._min_size
+            self._codecs
+            and retained >= self._compression.min_size
             and content_type_is_compressible(content_type)
         ):
-            for codec, compressor in self._compressors:
-                compressed = compressor.frame(content)
+            for codec in self._codecs:
+                compressed = compress_bytes(self._compression, codec, content)
                 if len(compressed) >= len(content):
                     continue
                 if retained + len(compressed) > budget:
@@ -718,7 +742,7 @@ class _Mount:
         headers.unsafe_set(b"last-modified", _last_modified(modified))
         headers.unsafe_set(b"accept-ranges", b"bytes")
         if encodings:
-            merge_vary(headers, b"accept-encoding")
+            headers.unsafe_merge_vary(b"accept-encoding")
 
     async def _emit_file(
         self, context: Context, writer: Writer, fd: int, size: int
@@ -845,48 +869,42 @@ class Assets(_Mount):
         return entry
 
     def _load(self) -> None:
-        bodies: dict[str, bytes] = {}
-        for relative, path, file_stat in self._walk():
-            if relative in self._catalog:
-                continue
+        stats = _empty_stats()
+        # Entries `href()` pinned before load come first (budget priority)
+        # and are verified against the disk. Each file is read once: held
+        # while it fits `max_bytes`, only fingerprinted after that.
+        pending: list[tuple[str, Path, int, int, _Hashed | None]] = [
+            (logical, entry.source, entry.size, entry.modified_ns, entry)
+            for logical, entry in self._catalog.items()
+        ]
+        pending += [
+            (relative, path, file_stat.st_size, file_stat.st_mtime_ns, None)
+            for relative, path, file_stat in self._walk()
+            if relative not in self._catalog
+        ]
+        for logical, path, size, modified_ns, entry in pending:
+            budget = self.max_bytes - stats["retained_bytes"]
             try:
-                if file_stat.st_size <= self.max_file_size:
+                if size <= self.max_file_size and size <= budget:
                     content = path.read_bytes()
                     digest = xxh64(content).hexdigest()
-                    bodies[relative] = content
                 else:
+                    content = None
                     digest = _fingerprint(path)
                 after = path.stat()
             except FileNotFoundError as exc:
-                raise _changed(relative) from exc
-            if (after.st_size, after.st_mtime_ns) != (
-                file_stat.st_size,
-                file_stat.st_mtime_ns,
+                raise _changed(logical) from exc
+            if (after.st_size, after.st_mtime_ns) != (size, modified_ns) or (
+                entry is not None and digest != entry.digest
             ):
-                raise _changed(relative)
-            self._pin(relative, path, digest, after.st_size, after.st_mtime_ns)
-        stats = _empty_stats()
-        for logical, entry in self._catalog.items():
-            try:
-                digest = _fingerprint(entry.source)
-                file_stat = entry.source.stat()
-            except FileNotFoundError as exc:
-                raise _changed(entry.source) from exc
-            if digest != entry.digest or (file_stat.st_size, file_stat.st_mtime_ns) != (
-                entry.size,
-                entry.modified_ns,
-            ):
-                raise _changed(entry.source)
-            loaded = self._read(
-                entry.source,
-                size=entry.size,
-                content=bodies.get(logical),
-                budget=self.max_bytes - stats["retained_bytes"],
-            )
-            if loaded is None:
-                if entry.size <= self.max_file_size:
+                raise _changed(logical)
+            if entry is None:
+                entry = self._pin(logical, path, digest, size, modified_ns)
+            if content is None:
+                if size <= self.max_file_size:
                     stats["budget_skipped_files"] += 1
                 continue
+            loaded = self._hold(path, content, budget)
             self._cache[entry.hashed_path] = loaded
             _tally(stats, loaded)
         stats["files"] = len(self._catalog)
@@ -998,7 +1016,11 @@ _ACTIVE_TYPES: Final = frozenset(
 
 
 class Files(_Mount):
-    """Live files. `href()` checks the path exists. GET uses ETag and Range.
+    """Live files. `href()` builds the URL. GET uses ETag and Range.
+
+    `href()` does not read the disk: it checks the path shape and builds the
+    URL, like `Route.href`. A path that is missing, a directory, or an
+    uncontained symlink is a 404 on GET.
 
     Pass `untrusted=True` for directories holding user uploads or other
     untrusted bytes: every served response then carries
@@ -1044,8 +1066,8 @@ class Files(_Mount):
     ) -> str:
         if not _is_relative(path):
             raise _bad_path(path)
-        if self.resolve(path) is None:
-            raise _missing(path)
+        if not self.include_hidden and _is_hidden(path):
+            raise _hidden(path)
         return self._route.href(path, query=query, fragment=fragment)
 
     def _load(self) -> None:
@@ -1097,7 +1119,8 @@ class Files(_Mount):
         try:
             entry = self._cache.get(path)
             if entry is not None and entry.identity != _identity(file_stat):
-                del self._cache[path]
+                # Another event-loop thread may have evicted it already.
+                self._cache.pop(path, None)
                 entry = None
             size = file_stat.st_size
             modified = file_stat.st_mtime
