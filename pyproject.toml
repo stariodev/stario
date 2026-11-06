@@ -67,7 +67,9 @@ environment = { PKG_CONFIG_PATH = "/usr/local/lib/pkgconfig", LD_LIBRARY_PATH = 
 
 [tool.cibuildwheel.macos]
 before-all = "bash scripts/build-native-deps.sh /tmp/stario-deps"
-environment = { PKG_CONFIG_PATH = "/tmp/stario-deps/lib/pkgconfig", DYLD_LIBRARY_PATH = "/tmp/stario-deps/lib" }
+# delocate rewrites each dylib path to a longer @loader_path one. The Xcode 16
+# linker on macos-15 leaves no room for that without the header padding.
+environment = { PKG_CONFIG_PATH = "/tmp/stario-deps/lib/pkgconfig", DYLD_LIBRARY_PATH = "/tmp/stario-deps/lib", LDFLAGS = "-Wl,-headerpad_max_install_names" }
 
 [dependency-groups]
 test = [
