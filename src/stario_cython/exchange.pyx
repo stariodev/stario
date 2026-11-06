@@ -1816,6 +1816,11 @@ cdef class RequestExchange:
         self._cancel_stall_timer()
         self._clear_body_storage()
         self._body_active = False
+        # reset_body() / mark_nobody() run before any read, but an idle
+        # exchange must not carry the last upload's abort or consumer state
+        # into the window before headers-complete (c_abort reads it).
+        self._abort_reason = ABORT_NONE
+        self._consumed_as = CONSUMED_NONE
         self._read_max_size = -1
         self._clear_hot_request_headers()
         self._stream_max_chunk = DEFAULT_STREAM_CHUNK

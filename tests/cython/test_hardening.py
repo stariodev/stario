@@ -2214,3 +2214,62 @@ async def test_head_on_sse_frees_the_connection_for_the_next_request() -> None:
         if not transport.is_closing():
             transport.close()
         await _drain(app)
+
+
+class _StuckPeerTransport(RecordingTransport):
+    """close() never completes: the peer stopped reading the buffered response."""
+
+    def __init__(self, protocol) -> None:
+        super().__init__(protocol)
+        self.aborted = False
+
+    def close(self) -> None:
+        self._closing = True
+
+    def abort(self) -> None:
+        self.aborted = True
+        self._closing = True
+        self._protocol.connection_lost(None)
+
+    def get_write_buffer_size(self) -> int:
+        return 0 if self.aborted else 1
+
+
+@pytest.mark.asyncio
+async def test_lingering_close_aborts_a_peer_that_stops_reading() -> None:
+    """RFC 9112 9.6: after the linger window the socket closes; if close()
+    is still waiting for the peer to read the response, the connection is
+    aborted one more window later instead of pinned forever."""
+    app = App()
+
+    async def ignore_body(_c, w) -> None:
+        w.text("ok")
+
+    app.add(Route("POST /"), ignore_body)
+    loop = asyncio.get_running_loop()
+    proto = make_protocol(loop, app, connections=connection_set(), max_body_bytes=1000)
+    transport = _StuckPeerTransport(proto)
+    proto.connection_made(transport)
+    try:
+        proto.data_received(
+            b"POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 262145\r\n\r\n"
+        )
+        await _drain(app)
+        assert response_status(transport.writes) == 200
+        proto.data_received(b"y" * 1100)
+        await _drain(app)
+        _assert_lingering(proto, transport)
+
+        proto.check_timeouts(100.0)  # arms the linger deadline
+        proto.check_timeouts(101.0)
+        assert not transport.is_closing()
+        proto.check_timeouts(102.1)  # linger window over: close()
+        assert transport.is_closing()
+        assert not transport.aborted
+        proto.check_timeouts(102.2)  # re-armed while close() waits
+        proto.check_timeouts(103.0)
+        assert not transport.aborted
+        proto.check_timeouts(104.3)
+        assert transport.aborted
+    finally:
+        await _drain(app)

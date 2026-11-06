@@ -19,6 +19,9 @@ Cases:
 - ``traced_json`` — plaintext with ``JsonTracer`` writing to ``/dev/null``.
 - ``sse_patch`` — one SSE stream; cost of ``patch_elements`` and
   ``patch_signals`` per event, identity and zstd.
+- ``h2_*`` — the same handlers over cleartext HTTP/2 (one HEADERS frame per
+  request, one stream per request); also prints transport writes per
+  request, since a response is one HEADERS plus one or more DATA frames.
 
 Numbers are for comparing two checkouts on the same machine, not for
 comparing machines.
@@ -135,6 +138,14 @@ async def awaits_once(c, w):
     w.text("Hello, World!")
 
 
+BIG_BODY = b"x" * (64 * 1024)
+
+
+async def big_body(c, w):
+    # Four 16 KiB DATA frames on HTTP/2.
+    w.respond(BIG_BODY, b"application/octet-stream", 200)
+
+
 async def build_app() -> App:
     app = App()
     app.add(Route("GET /plaintext"), plaintext)
@@ -143,6 +154,7 @@ async def build_app() -> App:
     app.add(Route("GET /page"), html_page)
     app.add(Route("GET /await"), awaits_once)
     app.add(Route("POST /validate"), validate)
+    app.add(Route("GET /big"), big_body)
     app.compiled()
     app.freeze()
     return app
@@ -287,6 +299,104 @@ async def bench_sse(accept_encoding: str | None) -> tuple[float, float]:
     return await asyncio.wait_for(done, 60)
 
 
+# --- HTTP/2: minimal frames and HPACK (literal fields, no dynamic table) ---
+
+H2_PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+
+
+def _frame(ftype: int, flags: int, stream_id: int, payload: bytes = b"") -> bytes:
+    return (
+        len(payload).to_bytes(3, "big")
+        + bytes((ftype, flags))
+        + stream_id.to_bytes(4, "big")
+        + payload
+    )
+
+
+def _hpack_int(value: int, prefix_bits: int, tag: int) -> bytes:
+    limit = (1 << prefix_bits) - 1
+    if value < limit:
+        return bytes((tag | value,))
+    out = bytearray((tag | limit,))
+    value -= limit
+    while value >= 128:
+        out.append((value & 0x7F) | 0x80)
+        value >>= 7
+    out.append(value)
+    return bytes(out)
+
+
+def _literal(index: int, value: bytes) -> bytes:
+    """Literal field without indexing, static-table name."""
+    return _hpack_int(index, 4, 0x00) + _hpack_int(len(value), 7, 0x00) + value
+
+
+def h2_request(path: str, *, accept_encoding: str | None = None) -> bytes:
+    """HPACK block: :method GET, :scheme http, :path, :authority, accept."""
+    block = (
+        bytes((0x82, 0x86))  # indexed :method GET, :scheme http
+        + _literal(4, path.encode())  # :path
+        + _literal(1, b"localhost")  # :authority
+        + _literal(19, b"*/*")  # accept
+    )
+    if accept_encoding:
+        block += _literal(16, accept_encoding.encode())  # accept-encoding
+    return block
+
+
+H2_CASES = {
+    "h2_plaintext": h2_request("/plaintext"),
+    "h2_json": h2_request("/json"),
+    "h2_page_html_identity": h2_request("/page"),
+    "h2_page_html_zstd": h2_request("/page", accept_encoding="zstd"),
+    "h2_big_64k": h2_request("/big"),
+}
+
+
+async def bench_h2(app, block: bytes) -> tuple[float, float]:
+    """Best ns per request, and transport write calls per request."""
+    loop = asyncio.get_running_loop()
+    proto, transport = make_protocol(loop, app)
+    feed = proto.data_received
+    # Client SETTINGS: a 2 GiB stream window, so no response body waits on
+    # stream credit; the connection window starts at 64 MiB and is topped up
+    # by what the responses used every 500 requests (frame headers counted
+    # too, so the credit only creeps up, never runs dry).
+    feed(
+        H2_PREFACE
+        + _frame(0x4, 0, 0, (4).to_bytes(2, "big") + (0x7FFFFFFF).to_bytes(4, "big"))
+        + _frame(0x8, 0, 0, (64 * 1024 * 1024 - 65535).to_bytes(4, "big"))
+    )
+    feed(_frame(0x4, 0x1, 0))  # ACK the server's SETTINGS
+    stream_id = 1
+    credited = transport.nbytes
+
+    def one() -> None:
+        nonlocal stream_id, credited
+        feed(_frame(0x1, 0x4 | 0x1, stream_id, block))  # END_HEADERS|END_STREAM
+        stream_id += 2
+        if stream_id % 1000 == 1:
+            used = transport.nbytes - credited
+            credited = transport.nbytes
+            feed(_frame(0x8, 0, 0, used.to_bytes(4, "big")))
+
+    for _ in range(200):
+        one()
+    await asyncio.sleep(0)
+    best = float("inf")
+    writes = 0.0
+    for _ in range(REPEAT):
+        w0 = transport.nwrites
+        t0 = time.perf_counter_ns()
+        for _ in range(N):
+            one()
+        await asyncio.sleep(0)
+        best = min(best, (time.perf_counter_ns() - t0) / N)
+        writes = (transport.nwrites - w0) / N
+    assert not transport.closing, "connection closed during the benchmark"
+    return best, writes
+
+
 async def main(only: str | None) -> None:
     app = await build_app()
     print(f"{'case':<28}{'µs/req':>10}")
@@ -312,6 +422,10 @@ async def main(only: str | None) -> None:
             label = "identity" if ae is None else ae
             show(f"sse_patch_elements_{label}", elements)
             show(f"sse_patch_signals_{label}", signals)
+    for name, block in H2_CASES.items():
+        if only is None or name.startswith(only):
+            ns, writes = await bench_h2(app, block)
+            print(f"{name:<28}{ns / 1000:>10.2f}   ({writes:.1f} writes/req)")
 
 
 if __name__ == "__main__":

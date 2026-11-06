@@ -34,6 +34,15 @@ Direct TLS: `STARIO_SSL_CERTFILE` / `STARIO_SSL_KEYFILE` (or
 `ServerConfig(ssl=…)`). ALPN advertises `h2` then `http/1.1`.
 `STARIO_HOST` and `STARIO_PORT` set the bind address.
 
+On glibc, the first `HttpProtocol` sets `M_MMAP_THRESHOLD` and
+`M_TRIM_THRESHOLD` to 64 MiB for the whole process: request bodies,
+compressor scratch, and compressed output between 128 KiB and 64 MiB stay on
+the heap instead of costing an `mmap` / `munmap` each, and the heap is not
+trimmed after every large response. The trim threshold is per malloc arena
+(one per thread that allocates), so a process with N worker threads can
+retain up to about N × 64 MiB of freed memory. `STARIO_MALLOC_TUNE=0` leaves
+the allocator alone.
+
 ## Files
 
 | File | Holds |
@@ -187,3 +196,11 @@ compiled from them. Do not revive:
 
 picohttpparser is not the H1 parser: parser-only it is ~2.5–3.3× llhttp,
 but end-to-end GET was even and a tiny JSON POST was slower.
+
+nghttp2's `nghttp2_ssize` API (`nghttp2_session_mem_send2`, `mem_recv2`,
+`nghttp2_data_provider2`, 1.60+) is not used on purpose. It only swaps
+`ssize_t` for `ptrdiff_t` (a C-standard type whose range covers nghttp2's
+error codes): no security or performance change, and the `ssize_t` API is
+deprecated but kept. Migrating would break `STARIO_ALLOW_OLD_NGHTTP2=1`
+source builds on distros that ship 1.59 (Ubuntu 24.04). Revisit when
+nghttp2 announces removal, or for a Windows port.
