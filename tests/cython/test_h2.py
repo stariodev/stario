@@ -2148,3 +2148,107 @@ async def test_h2_backlog_written_under_a_small_window_arrives_in_order() -> Non
         server.close()
         await server.wait_closed()
         await app.drain_tasks()
+
+
+async def _h2_server(app: App):
+    loop = asyncio.get_running_loop()
+    port = free_port()
+    server = await loop.create_server(
+        lambda: make_protocol(loop, app, connections=connection_set()),
+        "127.0.0.1",
+        port,
+    )
+    return server, port
+
+
+@pytest.mark.asyncio
+async def test_h2_respond_after_client_reset_releases_exchange() -> None:
+    """A handler that answers after the client reset its stream must not
+    keep the exchange out of the pool. The response has nowhere to go; the
+    exchange is detached (``c`` keeps describing the request) and reused."""
+    app = App()
+    held: list[Any] = []
+    started = asyncio.Event()
+    gate = asyncio.get_running_loop().create_future()
+
+    async def slow(c, w) -> None:
+        held.append(c)
+        started.set()
+        try:
+            await gate
+        except asyncio.CancelledError:
+            w.text("late")
+
+    app.add(Route("GET /slow"), slow)
+    server, port = await _h2_server(app)
+    try:
+        reader, writer, buf = await h2_handshake("127.0.0.1", port)
+        try:
+            writer.write(
+                pack_frame(
+                    TYPE_HEADERS,
+                    FLAG_END_HEADERS | FLAG_END_STREAM,
+                    1,
+                    encode_request(method="GET", path="/slow"),
+                )
+            )
+            await writer.drain()
+            await asyncio.wait_for(started.wait(), 2)
+            writer.write(
+                pack_frame(TYPE_RST_STREAM, 0, 1, NGHTTP2_CANCEL.to_bytes(4, "big"))
+            )
+            await writer.drain()
+            await asyncio.sleep(0.05)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+    finally:
+        server.close()
+        await server.wait_closed()
+        await app.drain_tasks()
+    assert held[0]._exchange_id is None, "exchange was not released"
+    assert held[0].completed
+
+
+@pytest.mark.asyncio
+async def test_h2_disconnect_mid_stream_releases_exchange() -> None:
+    """A streaming response cut off by the client leaving (an SSE tab
+    closed) returns its exchange to the pool once the handler finishes."""
+    app = App()
+    held: list[Any] = []
+    started = asyncio.Event()
+    gate = asyncio.get_running_loop().create_future()
+
+    async def stream(c, w) -> None:
+        held.append(c)
+        w.write_headers(200)
+        w.write(b"x" * 100)
+        started.set()
+        await gate
+        w.write(b"y")
+
+    app.add(Route("GET /stream"), stream)
+    server, port = await _h2_server(app)
+    try:
+        reader, writer, buf = await h2_handshake("127.0.0.1", port)
+        writer.write(
+            pack_frame(
+                TYPE_HEADERS,
+                FLAG_END_HEADERS | FLAG_END_STREAM,
+                1,
+                encode_request(method="GET", path="/stream"),
+            )
+        )
+        await writer.drain()
+        await asyncio.wait_for(started.wait(), 2)
+        writer.close()
+        await writer.wait_closed()
+        await asyncio.sleep(0.05)
+        assert held[0]._exchange_id is not None, "handler still running"
+        gate.set_result(None)
+        await asyncio.sleep(0.05)
+    finally:
+        server.close()
+        await server.wait_closed()
+        await app.drain_tasks()
+    assert held[0]._exchange_id is None, "exchange was not released"

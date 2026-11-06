@@ -8,6 +8,24 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ### Fixed
 
+- An HTTP/2 exchange whose response was cut off by the client is returned
+  to the pool again. Two cases skipped it: a handler answering a stream the
+  client had already reset (the 500 for a `ClientDisconnected` raised from
+  a body read, or a handler catching its cancel and still responding), and
+  any response in flight when the connection was lost, which is every SSE
+  stream whose browser tab closes on HTTP/2. The exchange was still freed by
+  the cyclic garbage collector, but held its buffers until then and cost a
+  fresh allocation on the next request. Writes for a stream that no longer
+  exists are now dropped.
+- A lingering close (the FIN after a 413 while the client is still
+  uploading) no longer waits forever on a peer that stops reading: the
+  socket is closed after the linger window, and aborted one window later
+  if `close()` is still waiting for the peer to take the buffered response.
+- One connection raising inside the timeout sweep no longer leaves the
+  other connections unchecked or stops the sweep until the next connection
+  opens.
+- `stario_cython.xxh64.update` refuses a non-contiguous memoryview instead
+  of hashing the underlying buffer as if it were contiguous.
 - A plain tuple in child position is no longer rendered as markup. Elements
   built by `h.*` are now an `Element` (a `tuple` subclass) and the renderer
   and `@baked` dispatch on that type, so a four-column database row passed
@@ -55,6 +73,21 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ### Changed
 
+- HTTP/2 writes one buffer per send pass: every HEADERS and DATA frame
+  nghttp2 produced for all streams, in order, goes to the transport in one
+  `writelines`. Before, each DATA frame was its own transport call behind a
+  flush of the frames before it, so a response with a body cost two writes
+  (two TLS records) and a 64 KiB body cost five. Nothing is written from
+  inside an nghttp2 callback any more. `benchmarks/server/inproc.py` gained
+  `h2_*` cases that also print writes per request.
+- Text and attribute escaping for strings with characters above U+00FF
+  (CJK, emoji) runs in one C pass like Latin-1 text: a 60-character CJK
+  string with `&`, `<`, `>` escapes in 0.14 µs instead of 0.42 µs; clean
+  strings still return the same object.
+- `STARIO_MALLOC_TUNE=0` leaves glibc's malloc thresholds alone. The
+  64 MiB mmap and trim thresholds Stario sets on first use are now
+  documented in `CYTHON.md`, including that the trim threshold applies per
+  malloc arena (per allocating thread).
 - One clock per event loop. `Connections` (one per loop) now owns the
   timeout tick: a single `loop.call_later` handle, scheduled only while a
   connection with timeouts exists, reads `loop.time()` once and walks the

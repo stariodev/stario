@@ -40,7 +40,7 @@ cdef class xxh64:
         if data is not None:
             self.update(data)
 
-    def update(self, const unsigned char[:] data):
+    def update(self, const unsigned char[::1] data):
         cdef Py_ssize_t n = data.shape[0], i = 0
         cdef const unsigned char *p
         if n == 0:

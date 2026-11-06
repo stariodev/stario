@@ -17,7 +17,7 @@ from typing import Any, cast
 
 from stario.markup import baked, classes, data, render, styles
 from stario import h
-from stario.markup.escape import escape_attribute_value
+from stario.markup.escape import escape_attribute_value, escape_text
 from stario.markup.types import Attrs
 
 
@@ -141,6 +141,20 @@ def main() -> None:
 
     print("\nrender walk:")
     bench("small prebuilt tree", lambda: render(_STATIC_TREE))
+
+    print("\nescape_text (text node escaping, 60 chars):")
+    _ASCII = "Lorem ipsum dolor sit amet, consectetur adipiscing elit sed"
+    _ASCII_DIRTY = "Lorem <b>ipsum</b> & dolor sit amet, consectetur elit sed"
+    _LATIN1 = "Lörem ipsum dolör sit ämet, consectetür adipiscing élit sed"
+    _CJK = "ロレム イプサム ドロール シット アメット コンセクテトゥール アディピシング"
+    _EMOJI = "Lorem ipsum 🎉 dolor sit amet, consectetur 🚀 adipiscing elit"
+    _CJK_DIRTY = "ロレム <b>イプサム</b> & ドロール シット アメット コンセクテトゥール"
+    bench("ascii clean", lambda: escape_text(_ASCII), n=200000)
+    bench("ascii with & < >", lambda: escape_text(_ASCII_DIRTY), n=200000)
+    bench("latin-1 clean", lambda: escape_text(_LATIN1), n=200000)
+    bench("cjk (2-byte kind) clean", lambda: escape_text(_CJK), n=200000)
+    bench("emoji (4-byte kind) clean", lambda: escape_text(_EMOJI), n=200000)
+    bench("cjk with & < >", lambda: escape_text(_CJK_DIRTY), n=200000)
 
     print("\ntuple allocation (pure construction, no Tag):")
     _CHILDREN = ["hello"]

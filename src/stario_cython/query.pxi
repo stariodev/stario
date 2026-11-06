@@ -450,8 +450,6 @@ cdef class ParsedQuery:
         if self._pcount == 0:
             return default
         kbuf = PyUnicode_AsUTF8AndSize(key, &klen)
-        if kbuf == NULL:
-            raise
         for i in range(self._pcount):
             if self._name_eq(i, kbuf, klen, key):
                 return self._decode_value_at(i)
@@ -466,8 +464,6 @@ cdef class ParsedQuery:
         if self._pcount == 0:
             return out
         kbuf = PyUnicode_AsUTF8AndSize(key, &klen)
-        if kbuf == NULL:
-            raise
         for i in range(self._pcount):
             if self._name_eq(i, kbuf, klen, key):
                 out.append(self._decode_value_at(i))
@@ -481,8 +477,6 @@ cdef class ParsedQuery:
         if self._pcount == 0:
             return False
         kbuf = PyUnicode_AsUTF8AndSize(key, &klen)
-        if kbuf == NULL:
-            raise
         for i in range(self._pcount):
             if self._name_eq(i, kbuf, klen, key):
                 return True

@@ -42,3 +42,14 @@ def test_xxh64_accepts_buffer_types() -> None:
     want = xxh64(b"abcd").hexdigest()
     assert xxh64(bytearray(b"abcd")).hexdigest() == want
     assert xxh64(memoryview(b"abcd")).hexdigest() == want
+
+
+def test_xxh64_update_needs_contiguous_bytes() -> None:
+    """A strided view is refused rather than hashed as if it were contiguous."""
+    data = bytes(range(64))
+    assert xxh64(memoryview(data)).hexdigest() == xxh64(data).hexdigest()
+    assert xxh64(bytearray(data)).hexdigest() == xxh64(data).hexdigest()
+    with pytest.raises((ValueError, BufferError)):
+        xxh64(memoryview(data)[::2])
+    with pytest.raises((ValueError, BufferError)):
+        xxh64(memoryview(data)[::-1])

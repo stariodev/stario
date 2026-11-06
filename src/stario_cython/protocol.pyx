@@ -36,6 +36,7 @@ from cpython.exc cimport PyErr_Clear
 from cpython.object cimport PyObject_Call
 from cpython.unicode cimport PyUnicode_DecodeLatin1
 
+from stario._env import env_bool
 from stario.http.config import (
     DEFAULT_HEADER_TIMEOUT,
     DEFAULT_KEEP_ALIVE_TIMEOUT,
@@ -108,6 +109,11 @@ cdef extern from *:
         );
     }
 
+    /* glibc only. Keeps 128 KiB - 64 MiB buffers (bodies, compressor
+       scratch, compressed output) on the heap instead of mmap/munmap per
+       allocation, and stops the heap top being trimmed back after each
+       large response. Process-wide, and per malloc arena (one per thread
+       that allocates): STARIO_MALLOC_TUNE=0 turns it off. */
     #if defined(__linux__)
     #include <malloc.h>
     static void stario_malloc_tune(void) {
@@ -446,7 +452,8 @@ cdef void _bind_settings():
         settings.on_body = _cb_body
         settings.on_message_complete = _cb_message_complete
         _SETTINGS = settings
-        stario_malloc_tune()
+        if env_bool("STARIO_MALLOC_TUNE", True):
+            stario_malloc_tune()
     finally:
         _settings_lock.release()
 
@@ -773,15 +780,22 @@ cdef class Connections:
         # entry into this slot: only advance when the slot is unchanged.
         while i < len(live):
             proto = <CHttpProtocol>live[i]
-            proto._check_timeouts(now)
+            try:
+                proto._check_timeouts(now)
+            except Exception:
+                # One connection's failure must not leave the rest unchecked.
+                _log.exception("Timeout sweep failed for a connection")
             if i < len(live) and live[i] is proto:
                 i += 1
 
     def _tick(self):
         self._tick_handle = None
-        self.sweep(self._loop.time())
-        if self._timed > 0:
-            self._schedule()
+        try:
+            self.sweep(self._loop.time())
+        finally:
+            # A failing sweep must not stop every later timeout on this loop.
+            if self._timed > 0:
+                self._schedule()
 
     cdef void _schedule(self):
         self._tick_handle = self._loop.call_later(self._interval, self._tick)
@@ -872,6 +886,9 @@ cdef class CHttpProtocol(HttpConnection):
     cdef dict h2_streams
     cdef object h2_out
     cdef Py_ssize_t h2_out_used
+    # Output of one ``_h2_send`` pass: ``h2_out`` slices and zero-copy DATA
+    # payloads, in frame order, written with one ``writelines`` at the end.
+    cdef list h2_batch
     cdef bint h2_in_recv
     # nghttp2 forbids mem_send from its own callbacks; the outer loop drains.
     cdef bint h2_in_send
@@ -925,6 +942,7 @@ cdef class CHttpProtocol(HttpConnection):
         self.h2 = NULL
         self.h2_streams = {}
         self.h2_out = bytearray()
+        self.h2_batch = []
         self.h2_paused_streams = 0
         self.h2_out_used = 0
         self.h2_in_recv = False
@@ -1111,6 +1129,10 @@ cdef class CHttpProtocol(HttpConnection):
             nghttp2_session_del(self.h2)
             self.h2 = NULL
         for exchange in list(self.h2_streams.values()):
+            # The session is gone, so no response bytes of this stream can
+            # still be in flight: the exchange may recycle once its handler
+            # and response are done.
+            exchange._h2_outbound = False
             exchange.c_abort()
             if not exchange.handler_started:
                 exchange.cancel_before_start()
@@ -1147,6 +1169,7 @@ cdef class CHttpProtocol(HttpConnection):
         self._in_view = None
         self._in_buf = None
         self.h2_out = bytearray()
+        self.h2_batch = []
         self.preface_hold = bytearray()
         self.last_task = None
 
@@ -1317,13 +1340,20 @@ cdef class CHttpProtocol(HttpConnection):
         cdef int kind
         if self.lingering:
             # Input is being dropped after the response; hang up once the
-            # client had LINGER_TIME to read it (RFC 9112 9.6).
+            # client had LINGER_TIME to read it (RFC 9112 9.6). close()
+            # still waits for the peer to take the buffered response, so a
+            # peer that stopped reading is aborted one more LINGER_TIME
+            # later; the write-stall check does not run while lingering.
+            transport = self.transport
+            if transport is None:
+                return
             if self.linger_deadline <= 0.0:
                 self.linger_deadline = now + LINGER_TIME
             elif now >= self.linger_deadline:
                 self.linger_deadline = 0.0
-                transport = self.transport
-                if transport is not None and not transport.is_closing():
+                if transport.is_closing():
+                    transport.abort()
+                else:
                     transport.close()
             return
         if self._check_write_stall(now) or self.rejected:
@@ -2857,17 +2887,34 @@ cdef class CHttpProtocol(HttpConnection):
         return 0
 
     cdef void _h2_flush_out(self) noexcept:
-        cdef object buf
-        cdef Py_ssize_t used
-        used = self.h2_out_used
-        if used <= 0 or self.transport is None:
-            self.h2_out_used = 0
+        """Move what nghttp2 wrote into ``h2_out`` onto the batch."""
+        cdef Py_ssize_t used = self.h2_out_used
+        if used <= 0:
             return
-        buf = self.h2_out
         self.h2_out_used = 0
-        self.transport.write(
-            PyBytes_FromStringAndSize(PyByteArray_AS_STRING(buf), used)
+        self.h2_batch.append(
+            PyBytes_FromStringAndSize(PyByteArray_AS_STRING(self.h2_out), used)
         )
+
+    cdef void _h2_write_batch(self) noexcept:
+        """One transport call per send pass: every frame nghttp2 produced,
+        HEADERS and DATA of all streams, in order."""
+        cdef list batch = self.h2_batch
+        cdef object transport = self.transport
+        if not batch:
+            return
+        self.h2_batch = []
+        if transport is None:
+            return
+        try:
+            if len(batch) == 1:
+                transport.write(batch[0])
+            else:
+                transport.writelines(batch)
+        except Exception:
+            _log.exception("HTTP/2 write failed; closing the connection")
+            if not transport.is_closing():
+                transport.close()
 
     cdef void _h2_send(self) noexcept:
         cdef const uint8_t* data = NULL
@@ -2891,6 +2938,7 @@ cdef class CHttpProtocol(HttpConnection):
         finally:
             self.h2_in_send = False
         self._h2_flush_out()
+        self._h2_write_batch()
 
         if (
             self.h2 != NULL
@@ -3314,6 +3362,7 @@ cdef class CHttpProtocol(HttpConnection):
     ) noexcept:
         cdef RequestExchange ex
         cdef object pending
+        cdef list batch
         cdef Py_ssize_t off
         cdef Py_ssize_t n
         cdef const char* src
@@ -3328,12 +3377,17 @@ cdef class CHttpProtocol(HttpConnection):
         ):
             return NGHTTP2_ERR_CALLBACK_FAILURE
 
+        # Frames nghttp2 wrote before this DATA go first; the payload is
+        # queued behind its 9-byte header and written with the rest of
+        # the pass by ``_h2_write_batch``. No transport call runs inside
+        # this nghttp2 callback.
         self._h2_flush_out()
+        batch = self.h2_batch
         pending = PyBytes_FromStringAndSize(<const char*>framehd, 9)
         if self.transport is None:
             return NGHTTP2_ERR_CALLBACK_FAILURE
         if length == 0:
-            self.transport.write(pending)
+            batch.append(pending)
             return 0
 
         off = ex._h2_pending_off
@@ -3342,16 +3396,12 @@ cdef class CHttpProtocol(HttpConnection):
         if off < 0 or off + <Py_ssize_t>length > n:
             return NGHTTP2_ERR_CALLBACK_FAILURE
 
+        batch.append(pending)
         if PyBytes_Check(ex._h2_pending):
-            self.transport.writelines((
-                pending,
-                memoryview(ex._h2_pending)[off:off + <Py_ssize_t>length],
-            ))
+            batch.append(memoryview(ex._h2_pending)[off:off + <Py_ssize_t>length])
         else:
-            self.transport.writelines((
-                pending,
-                PyBytes_FromStringAndSize(src + off, <Py_ssize_t>length),
-            ))
+            # A bytearray is extended in place by later writes: copy the slice.
+            batch.append(PyBytes_FromStringAndSize(src + off, <Py_ssize_t>length))
 
         ex._h2_pending_off = off + <Py_ssize_t>length
         ex._h2_sent_total += <Py_ssize_t>length
@@ -3447,6 +3497,87 @@ cdef class CHttpProtocol(HttpConnection):
             filled += 1
         return filled
 
+    cdef inline bint _h2_stream_live(self, RequestExchange ex) noexcept:
+        """The stream is still mapped: a reset or released stream must not
+        be written to, and must not mark the exchange outbound (it would
+        never return to the pool)."""
+        return self.h2_streams.get(ex._h2_stream_id) is ex
+
+    cdef int _h2_submit(
+        self,
+        RequestExchange ex,
+        object nva,
+        bint with_user,
+        bint skip_ce,
+        bint skip_cl,
+        bint skip_ct,
+        bint interim,
+        bint with_provider,
+    ) except? -1:
+        """Encode ``nva`` plus ``w.headers`` and submit them on the stream.
+
+        ``interim`` sends a non-final HEADERS (100 Continue); otherwise this
+        is the response, with the exchange as DATA provider when
+        ``with_provider``. Returns nghttp2's result (0 on success).
+        """
+        cdef nghttp2_nv nvs_stack[64]
+        cdef nghttp2_nv* nvs
+        cdef int nvlen
+        cdef int cap
+        cdef int heap = 0
+        cdef int rv
+        cdef nghttp2_data_provider prd
+        # Up to 64 header fields stay on the stack; a bigger set mallocs once.
+        cap = <int>len(nva)
+        if with_user and ex.headers is not None:
+            cap += <int>ex.headers._n
+        if cap < 8:
+            cap = 8
+        if cap <= 64:
+            nvs = nvs_stack
+        else:
+            nvs = <nghttp2_nv*>malloc(sizeof(nghttp2_nv) * <size_t>cap)
+            if nvs == NULL:
+                raise MemoryError()
+            heap = 1
+        try:
+            nvlen = self._h2_fill_nva(nva, nvs, <size_t>cap)
+            if with_user:
+                nvlen += self._h2_fill_user_nvs(
+                    ex.headers, nvs + nvlen, cap - nvlen, skip_ce, skip_cl, skip_ct
+                )
+            if interim:
+                rv = nghttp2_submit_headers(
+                    self.h2,
+                    NGHTTP2_FLAG_NONE,
+                    ex._h2_stream_id,
+                    NULL,
+                    nvs,
+                    <size_t>nvlen,
+                    NULL,
+                )
+            elif with_provider:
+                prd.source.ptr = <void*>ex
+                prd.read_callback = _h2_data_source_read
+                rv = nghttp2_submit_response(
+                    self.h2, ex._h2_stream_id, nvs, <size_t>nvlen, &prd
+                )
+            else:
+                rv = nghttp2_submit_response(
+                    self.h2, ex._h2_stream_id, nvs, <size_t>nvlen, NULL
+                )
+        finally:
+            if heap:
+                free(nvs)
+        return rv
+
+    cdef void _h2_submit_failed(self, RequestExchange ex, int rv):
+        _log.error(
+            "nghttp2 rejected response headers: %s",
+            nghttp2_strerror(rv).decode(),
+        )
+        self._h2_fail_stream(ex._h2_stream_id)
+
     cdef void h2_respond(
         self,
         RequestExchange ex,
@@ -3456,78 +3587,32 @@ cdef class CHttpProtocol(HttpConnection):
         bint skip_cl=True,
         bint skip_ct=True,
     ):
-        cdef nghttp2_nv nvs_stack[64]
-        cdef nghttp2_nv* nvs
-        cdef int nvlen
-        cdef int cap
-        cdef int heap
-        cdef nghttp2_data_provider prd
         cdef object payload
         cdef int rv
-        if self.h2 == NULL or ex is None:
+        if self.h2 == NULL or ex is None or not self._h2_stream_live(ex):
             return
-
-        # Up to 64 header fields stay on the stack; a bigger set mallocs once.
-        cap = <int>len(nva)
-        if ex.headers is not None:
-            cap += <int>ex.headers._n
-        if cap < 8:
-            cap = 8
-        heap = 0
-        if cap <= 64:
-            nvs = nvs_stack
+        if body is None:
+            payload = b""
+        elif PyBytes_Check(body):
+            payload = body
         else:
-            nvs = <nghttp2_nv*>malloc(sizeof(nghttp2_nv) * <size_t>cap)
-            if nvs == NULL:
-                self._h2_fail_stream(ex._h2_stream_id)
-                return
-            heap = 1
-
-        try:
-            nvlen = self._h2_fill_nva(nva, nvs, <size_t>cap)
-            nvlen += self._h2_fill_user_nvs(
-                ex.headers, nvs + nvlen, cap - nvlen, skip_ce, skip_cl, skip_ct
-            )
-
-            if body is None:
-                payload = b""
-            elif PyBytes_Check(body):
-                payload = body
-            else:
-                # Sent after respond() returns: never alias a mutable buffer.
-                payload = bytes(body)
-            if ex._head_request:
-                payload = b""
-
-            ex._h2_outbound = True
-            ex._h2_headers_sent = True
-            if payload:
-                ex._h2_pending = payload
-                ex._h2_pending_off = 0
-                ex._h2_body_done = True
-                prd.source.ptr = <void*>ex
-                prd.read_callback = _h2_data_source_read
-                rv = nghttp2_submit_response(
-                    self.h2, ex._h2_stream_id, nvs, <size_t>nvlen, &prd
-                )
-            else:
-                ex._h2_body_done = True
-                rv = nghttp2_submit_response(
-                    self.h2, ex._h2_stream_id, nvs, <size_t>nvlen, NULL
-                )
-
-            if rv != 0:
-                ex._h2_outbound = False
-                _log.error(
-                    "nghttp2 rejected response headers: %s",
-                    nghttp2_strerror(rv).decode(),
-                )
-                self._h2_fail_stream(ex._h2_stream_id)
-                return
-            self._h2_send()
-        finally:
-            if heap:
-                free(nvs)
+            # Sent after respond() returns: never alias a mutable buffer.
+            payload = bytes(body)
+        if ex._head_request:
+            payload = b""
+        ex._h2_body_done = True
+        if payload:
+            ex._h2_pending = payload
+            ex._h2_pending_off = 0
+        rv = self._h2_submit(
+            ex, nva, True, skip_ce, skip_cl, skip_ct, False, len(payload) > 0
+        )
+        if rv != 0:
+            self._h2_submit_failed(ex, rv)
+            return
+        ex._h2_outbound = True
+        ex._h2_headers_sent = True
+        self._h2_send()
 
     cdef void h2_write_headers(
         self,
@@ -3538,75 +3623,36 @@ cdef class CHttpProtocol(HttpConnection):
         bint skip_ct=False,
         bint skip_user=False,
     ):
-        cdef nghttp2_nv nvs_stack[64]
-        cdef nghttp2_nv* nvs
-        cdef int nvlen
-        cdef int cap
-        cdef int heap
-        cdef nghttp2_data_provider prd
         cdef int rv
-        if self.h2 == NULL or ex is None:
+        if self.h2 == NULL or ex is None or not self._h2_stream_live(ex):
             return
-
-        # Up to 64 header fields stay on the stack; a bigger set mallocs once.
-        cap = <int>len(nva)
-        if not skip_user and ex.headers is not None:
-            cap += <int>ex.headers._n
-        if cap < 8:
-            cap = 8
-        heap = 0
-        if cap <= 64:
-            nvs = nvs_stack
-        else:
-            nvs = <nghttp2_nv*>malloc(sizeof(nghttp2_nv) * <size_t>cap)
-            if nvs == NULL:
-                self._h2_fail_stream(ex._h2_stream_id)
-                return
-            heap = 1
-
-        try:
-            nvlen = self._h2_fill_nva(nva, nvs, <size_t>cap)
-            if not skip_user:
-                nvlen += self._h2_fill_user_nvs(
-                    ex.headers, nvs + nvlen, cap - nvlen, skip_ce, skip_cl, skip_ct
-                )
-
+        if nva and nva[0][0] == b":status" and nva[0][1] == b"100":
             # Interim 100-continue: non-final HEADERS; the real response follows.
-            if nva and nva[0][0] == b":status" and nva[0][1] == b"100":
-                nghttp2_submit_headers(
-                    self.h2, NGHTTP2_FLAG_NONE, ex._h2_stream_id, NULL, nvs, <size_t>nvlen, NULL
-                )
-                self._h2_send()
-                return
-
-            if ex._h2_headers_sent:
-                return
-            ex._h2_headers_sent = True
-            ex._h2_outbound = True
-            if ex._head_request:
-                ex._h2_body_done = True
-                rv = nghttp2_submit_response(
-                    self.h2, ex._h2_stream_id, nvs, <size_t>nvlen, NULL
-                )
-            else:
-                prd.source.ptr = <void*>ex
-                prd.read_callback = _h2_data_source_read
-                rv = nghttp2_submit_response(
-                    self.h2, ex._h2_stream_id, nvs, <size_t>nvlen, &prd
-                )
-
-            if rv != 0:
-                ex._h2_outbound = False
-                _log.error(
-                    "nghttp2 rejected response headers: %s",
-                    nghttp2_strerror(rv).decode(),
-                )
-                self._h2_fail_stream(ex._h2_stream_id)
-                return
+            self._h2_submit(
+                ex, nva, not skip_user, skip_ce, skip_cl, skip_ct, True, False
+            )
             self._h2_send()
-        finally:
-            if heap:
-                free(nvs)
+            return
+        if ex._h2_headers_sent:
+            return
+        if ex._head_request:
+            ex._h2_body_done = True
+        rv = self._h2_submit(
+            ex,
+            nva,
+            not skip_user,
+            skip_ce,
+            skip_cl,
+            skip_ct,
+            False,
+            not ex._head_request,
+        )
+        if rv != 0:
+            self._h2_submit_failed(ex, rv)
+            return
+        ex._h2_headers_sent = True
+        ex._h2_outbound = True
+        self._h2_send()
 
     cdef void _h2_pending_extend(self, RequestExchange ex, object data) noexcept:
         cdef object pending = ex._h2_pending
@@ -3669,6 +3715,8 @@ cdef class CHttpProtocol(HttpConnection):
     cdef void h2_write_data(self, RequestExchange ex, object data, bint end):
         if self.h2 == NULL or ex is None or ex.in_pool:
             return
+        if not self._h2_stream_live(ex):
+            return
         if data:
             self._h2_pending_extend(ex, data)
         if end:
@@ -3680,9 +3728,7 @@ cdef class CHttpProtocol(HttpConnection):
         self.h2_write_data(ex, None, True)
 
     cdef void h2_abort(self, RequestExchange ex):
-        if self.h2 == NULL or ex is None:
-            return
-        if self.h2_streams.get(ex._h2_stream_id) is not ex:
+        if self.h2 == NULL or ex is None or not self._h2_stream_live(ex):
             return
         nghttp2_submit_rst_stream(
             self.h2, NGHTTP2_FLAG_NONE, ex._h2_stream_id, NGHTTP2_INTERNAL_ERROR
@@ -3696,20 +3742,10 @@ cdef class CHttpProtocol(HttpConnection):
         bytearray so a keep-alive GET does not allocate a view every read.
         """
         cdef Py_ssize_t want = sizehint
-        cdef RequestExchange ex
-        cdef Py_ssize_t remaining
         if want < 64 * 1024:
             want = 64 * 1024
         if want > 256 * 1024:
             want = 256 * 1024
-        ex = self.reading_exchange
-        if ex is not None and ex._expected_size >= 0:
-            # Read at most what the declared body still owes.
-            remaining = ex._expected_size - ex._total_read
-            if 0 < remaining <= 256 * 1024:
-                want = remaining
-        if want < 1:
-            want = 1
         if self._in_buf is None or PyByteArray_GET_SIZE(self._in_buf) < want:
             # Skip zero-fill: only pages the kernel writes become resident,
             # so an idle keep-alive connection costs ~a page, not 64 KiB.

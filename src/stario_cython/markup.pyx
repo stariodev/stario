@@ -33,6 +33,8 @@ cdef extern from "Python.h":
     unsigned int PyUnicode_MAX_CHAR_VALUE(object o)
     object PyUnicode_New(Py_ssize_t size, unsigned int maxchar)
     int PyUnicode_1BYTE_KIND
+    Py_UCS4 PyUnicode_READ(int kind, const void* data, Py_ssize_t index)
+    void PyUnicode_WRITE(int kind, void* data, Py_ssize_t index, Py_UCS4 value)
     PyObject* PyDict_GetItemWithError(object d, object key) except? NULL
     int PyDict_Next(object d, Py_ssize_t* pos, PyObject** key, PyObject** value)
 
@@ -148,25 +150,65 @@ cdef object _escape_1byte(object s, bint quotes):
     return out
 
 
+cdef object _escape_wide(object s, bint quotes):
+    """Escape a 2-byte or 4-byte kind ``str`` in one C pass; same object if clean."""
+    cdef int kind = PyUnicode_KIND(s)
+    cdef const void* src = PyUnicode_DATA(s)
+    cdef Py_ssize_t n = PyUnicode_GET_LENGTH(s)
+    cdef Py_ssize_t i
+    cdef Py_ssize_t extra = 0
+    cdef Py_ssize_t w = 0
+    cdef Py_UCS4 c
+    cdef void* dst
+    cdef object out
+    for i in range(n):
+        c = PyUnicode_READ(kind, src, i)
+        if c == 38:
+            extra += 4
+        elif c == 60 or c == 62:
+            extra += 3
+        elif quotes and c == 34:
+            extra += 5
+    if extra == 0:
+        return s
+    out = PyUnicode_New(n + extra, PyUnicode_MAX_CHAR_VALUE(s))
+    dst = PyUnicode_DATA(out)
+    for i in range(n):
+        c = PyUnicode_READ(kind, src, i)
+        if c == 38:
+            PyUnicode_WRITE(kind, dst, w, 38); PyUnicode_WRITE(kind, dst, w + 1, 97)
+            PyUnicode_WRITE(kind, dst, w + 2, 109); PyUnicode_WRITE(kind, dst, w + 3, 112)
+            PyUnicode_WRITE(kind, dst, w + 4, 59)
+            w += 5
+        elif c == 60:
+            PyUnicode_WRITE(kind, dst, w, 38); PyUnicode_WRITE(kind, dst, w + 1, 108)
+            PyUnicode_WRITE(kind, dst, w + 2, 116); PyUnicode_WRITE(kind, dst, w + 3, 59)
+            w += 4
+        elif c == 62:
+            PyUnicode_WRITE(kind, dst, w, 38); PyUnicode_WRITE(kind, dst, w + 1, 103)
+            PyUnicode_WRITE(kind, dst, w + 2, 116); PyUnicode_WRITE(kind, dst, w + 3, 59)
+            w += 4
+        elif quotes and c == 34:
+            PyUnicode_WRITE(kind, dst, w, 38); PyUnicode_WRITE(kind, dst, w + 1, 113)
+            PyUnicode_WRITE(kind, dst, w + 2, 117); PyUnicode_WRITE(kind, dst, w + 3, 111)
+            PyUnicode_WRITE(kind, dst, w + 4, 116); PyUnicode_WRITE(kind, dst, w + 5, 59)
+            w += 6
+        else:
+            PyUnicode_WRITE(kind, dst, w, c)
+            w += 1
+    return out
+
+
 cdef inline object c_escape_text(object s):
     if PyUnicode_KIND(s) == PyUnicode_1BYTE_KIND:
         return _escape_1byte(s, False)
-    if "&" not in s and "<" not in s and ">" not in s:
-        return s
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return _escape_wide(s, False)
 
 
 cdef inline object c_escape_attr(object s):
     if PyUnicode_KIND(s) == PyUnicode_1BYTE_KIND:
         return _escape_1byte(s, True)
-    if "&" not in s and "<" not in s and ">" not in s and '"' not in s:
-        return s
-    return (
-        s.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
+    return _escape_wide(s, True)
 
 
 def escape_text(str s not None):
