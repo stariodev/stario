@@ -126,11 +126,11 @@ def set_cookie(
             context={"samesite": samesite},
             help_text="SameSite must be 'lax', 'strict', 'none', or None.",
         )
-    if isinstance(expires, str) and (";" in expires or "," in expires):
+    if isinstance(expires, str) and ";" in expires:
         raise StarioError(
             "Invalid cookie expires",
             context={"expires": expires},
-            help_text="Cookie Expires must not contain ';' or ','.",
+            help_text="Cookie Expires must not contain ';'.",
         )
 
     cookie: http.cookies.BaseCookie[str] = http.cookies.SimpleCookie()

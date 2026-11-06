@@ -6,6 +6,40 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ## Unreleased
 
+### Changed
+
+- `Assets.load()` reads each file once. It holds the bytes while they fit
+  `max_bytes` and only fingerprints the files after that. Before, every
+  file under `max_file_size` was read into memory before the budget
+  applied, and every file was hashed from disk a second time. A file
+  pinned by `href()` before `load()` is still verified against the disk.
+- `read_form`'s `max_files` counts every file part of a multipart body,
+  an empty file input included. Before, an empty part did not count, so a
+  body could carry any number of them, each opening a temporary file.
+
+### Fixed
+
+- `set_cookie(expires="Wed, 21 Oct 2015 07:28:00 GMT")` works. The `str`
+  form rejected a comma, which every HTTP-date contains. `;` is still
+  rejected.
+- A `Range` header with several ranges (`bytes=0-1,3-4`) is answered 200
+  with the full body, as RFC 9110 14.2 allows. Before it was 416.
+- `Files` no longer raises `KeyError` when two event-loop threads
+  (`STARIO_THREADS` above 1) evict the same changed file from the cache.
+
+### Removed
+
+- `stario.http.wire`. `parse_accept_encoding` lives in
+  `stario.http.compression`. `decode_path` was
+  `stario_cython.exchange.decode_request_path`; `decode_method` had no
+  caller.
+- From `stario.http.compression`: `Compressor`,
+  `CompressionConfig.make_compressor()`, `select()`, `may_compress()`,
+  `merge_vary`, `brotli_decompress`, and `zstd_decompress`. The Cython
+  writer encodes responses itself. `compress_bytes(config, encoding, data)`
+  encodes one body for precompressed files, `Headers.unsafe_merge_vary(token)`
+  replaces `merge_vary`, and the decoders are in `stario_cython.codecs`.
+
 ## 5.4.0 - 2026-11-05
 
 ### Changed

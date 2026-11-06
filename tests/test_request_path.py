@@ -1,36 +1,25 @@
-"""Tests for wire-level path/method decoding and request-path canonicalization."""
+"""Tests for request-path decoding and canonicalization."""
 
 import pytest
 
-from stario.http.wire import decode_method, decode_path
-from stario_cython.exchange import canonical_request_path
+from stario_cython.exchange import canonical_request_path, decode_request_path
 
 
-class TestDecodeMethod:
-    def test_known_verbs(self) -> None:
-        assert decode_method(b"GET") == "GET"
-        assert decode_method(b"POST") == "POST"
-
-    def test_invalid_bytes(self) -> None:
-        with pytest.raises(UnicodeDecodeError):
-            decode_method(b"\xff")
-
-
-class TestDecodePath:
+class TestDecodeRequestPath:
     def test_plain_path(self) -> None:
-        assert decode_path(b"/users") == "/users"
-        assert decode_path(b"/") == "/"
+        assert decode_request_path(b"/users") == "/users"
+        assert decode_request_path(b"/") == "/"
 
     def test_percent_encoded_space(self) -> None:
-        assert decode_path(b"/hello%20world") == "/hello world"
+        assert decode_request_path(b"/hello%20world") == "/hello world"
 
     def test_encoded_slash_is_fully_decoded(self) -> None:
-        assert decode_path(b"/files/a%2Fb") == "/files/a/b"
-        assert decode_path(b"/files/a%252Fb") == "/files/a%2Fb"
+        assert decode_request_path(b"/files/a%2Fb") == "/files/a/b"
+        assert decode_request_path(b"/files/a%252Fb") == "/files/a%2Fb"
 
     def test_utf8(self) -> None:
-        assert decode_path(b"/caf%C3%A9") == "/café"
-        assert decode_path("/café".encode()) == "/café"
+        assert decode_request_path(b"/caf%C3%A9") == "/café"
+        assert decode_request_path("/café".encode()) == "/café"
 
     @pytest.mark.parametrize(
         "raw",
@@ -53,7 +42,7 @@ class TestDecodePath:
     )
     def test_invalid_paths_raise(self, raw: bytes) -> None:
         with pytest.raises(ValueError, match="invalid request path"):
-            decode_path(raw)
+            decode_request_path(raw)
 
 
 class TestCanonicalRequestPath:

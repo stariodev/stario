@@ -54,8 +54,9 @@ async def read_form(
     - `max_fields` / `max_field_size`: count of text fields in a body, and
       bytes of one multipart text field. GET reads the query, which the
       header limit of the server already bounds.
-    - `max_files` / `max_file_size`: count of files, and bytes of one file
-      (default: no limit below `max_size`).
+    - `max_files` / `max_file_size`: count of file parts in a body (an empty
+      file input counts), and bytes of one file (default: no limit below
+      `max_size`).
     - `spool_size`: bytes of one file kept in memory before it moves to disk.
 
     Raise `RequestBodyError`: 400 for a malformed body, 413 past a limit, 415
@@ -129,6 +130,7 @@ async def _read_multipart(
     parser = MultipartParser(boundary, max_header_bytes=max_part_header_bytes)
     fields: list[tuple[str, str]] = []
     files: list[tuple[str, UploadFile]] = []
+    file_parts = 0
     part: PartStart | None = None
     text = bytearray()
     spool: SpooledTemporaryFile[bytes] | None = None
@@ -144,7 +146,9 @@ async def _read_multipart(
                             raise RequestBodyError(413, "Too many form fields")
                         text.clear()
                     else:
-                        if len(files) >= max_files:
+                        # Count parts as they start: an empty part is never kept.
+                        file_parts += 1
+                        if file_parts > max_files:
                             raise RequestBodyError(413, "Too many files")
                         # Owned by the UploadFile (or closed by _discard), not a block.
                         spool = SpooledTemporaryFile(  # noqa: SIM115
