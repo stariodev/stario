@@ -18,7 +18,6 @@ def escape_text(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-@lru_cache(maxsize=512)
 def escape_attribute_value(s: str) -> str:
     """Escape for double-quoted attribute values.
 
@@ -26,7 +25,8 @@ def escape_attribute_value(s: str) -> str:
     double quotes, so only `&`, `<`, `>`, and `"` need escaping. This
     keeps Datastar/JS expressions with string literals readable on the wire.
 
-    Memoized for repeated values (classes, `type`, `role`, Datastar paths, etc.).
+    Not cached: a cache hit costs more than the four `in` checks on a clean
+    value, and per-row values (`href`, `title`) only churn the cache.
     """
     if "&" not in s and "<" not in s and ">" not in s and '"' not in s:
         return s

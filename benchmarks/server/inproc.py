@@ -6,7 +6,7 @@ This isolates framework cost (parse, route, dispatch, handler, writer) from
 syscalls and the client, so a change of a few hundred nanoseconds is visible.
 
     uv run benchmarks/server/inproc.py            # all cases
-    uv run benchmarks/server/inproc.py plaintext  # one case
+    uv run benchmarks/server/inproc.py plaintext  # one case (prefix match)
 
 Cases:
 
@@ -293,7 +293,7 @@ async def main(only: str | None) -> None:
     print(f"{'case':<28}{'µs/req':>10}")
 
     def show(name: str, ns: float) -> None:
-        if only is None or only == name:
+        if only is None or name.startswith(only):
             print(f"{name:<28}{ns / 1000:>10.2f}")
 
     for name, raw in EAGER.items():

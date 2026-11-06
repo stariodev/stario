@@ -16,7 +16,7 @@ pick `at.get` / `at.post` / … at the call site.
 """
 
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict, Unpack
 from urllib.parse import urlencode
 
 from stario.exceptions import StarioError
@@ -29,6 +29,28 @@ Retry = Literal["auto", "error", "always", "never"]
 IntlType = Literal[
     "datetime", "number", "pluralRules", "relativeTime", "list", "displayNames"
 ]
+
+
+class FetchOptions(TypedDict, total=False):
+    """Keyword options shared by `get`, `post`, `put`, `patch`, `delete`, and `query`.
+
+    Each key maps to one option of Datastar's backend fetch actions. `None`
+    omits the option, like leaving it out.
+    """
+
+    content_type: ContentType | str | None
+    include: FilterValue | None
+    exclude: FilterValue | None
+    selector: str | None
+    headers: dict[str, str] | None
+    open_when_hidden: bool | None
+    payload: dict[str, Any] | None
+    retry: Retry | str | None
+    retry_interval_ms: int | None
+    retry_scaler: float | None
+    retry_max_wait_ms: int | None
+    retry_max_count: int | None
+    request_cancellation: RequestCancellation | str | None
 
 
 class DatastarActions:
@@ -68,20 +90,7 @@ class DatastarActions:
         method: str,
         url: str,
         queries: Mapping[str, Any] | None = None,
-        *,
-        content_type: ContentType | str | None = None,
-        include: FilterValue | None = None,
-        exclude: FilterValue | None = None,
-        selector: str | None = None,
-        headers: dict[str, str] | None = None,
-        open_when_hidden: bool | None = None,
-        payload: dict[str, Any] | None = None,
-        retry: Retry | str | None = None,
-        retry_interval_ms: int | None = None,
-        retry_scaler: float | None = None,
-        retry_max_wait_ms: int | None = None,
-        retry_max_count: int | None = None,
-        request_cancellation: RequestCancellation | str | None = None,
+        **options: Unpack[FetchOptions],
     ) -> str:
         """Build a Datastar backend fetch action.
 
@@ -90,6 +99,19 @@ class DatastarActions:
         literal text with `string_literal()` or send it as a signal. Values in
         `headers` are already string literals and are safe for literal text.
         """
+        content_type = options.get("content_type")
+        include = options.get("include")
+        exclude = options.get("exclude")
+        selector = options.get("selector")
+        headers = options.get("headers")
+        open_when_hidden = options.get("open_when_hidden")
+        payload = options.get("payload")
+        retry = options.get("retry")
+        retry_interval_ms = options.get("retry_interval_ms")
+        retry_scaler = options.get("retry_scaler")
+        retry_max_wait_ms = options.get("retry_max_wait_ms")
+        retry_max_count = options.get("retry_max_count")
+        request_cancellation = options.get("request_cancellation")
         if selector is not None and content_type != "form":
             raise StarioError(
                 "selector is only used with content_type='form'",
@@ -100,45 +122,45 @@ class DatastarActions:
                 ),
             )
 
-        options: list[str] = []
+        parts: list[str] = []
 
         if content_type is not None:
-            options.append(f"contentType: {string_literal(str(content_type))}")
+            parts.append(f"contentType: {string_literal(str(content_type))}")
 
         filters = filter_js(include, exclude)
         if filters is not None:
-            options.append(f"filterSignals: {filters}")
+            parts.append(f"filterSignals: {filters}")
 
         if selector is not None:
-            options.append(f"selector: {string_literal(selector)}")
+            parts.append(f"selector: {string_literal(selector)}")
 
         if headers is not None:
             headers_dict = {k: string_literal(v) for k, v in headers.items()}
-            options.append(f"headers: {js_object(headers_dict)}")
+            parts.append(f"headers: {js_object(headers_dict)}")
 
         if open_when_hidden is not None:
-            options.append(f"openWhenHidden: {str(open_when_hidden).lower()}")
+            parts.append(f"openWhenHidden: {str(open_when_hidden).lower()}")
 
         if payload is not None:
-            options.append(f"payload: {js_object(payload)}")
+            parts.append(f"payload: {js_object(payload)}")
 
         if retry is not None:
-            options.append(f"retry: {string_literal(str(retry))}")
+            parts.append(f"retry: {string_literal(str(retry))}")
 
         if retry_interval_ms is not None:
-            options.append(f"retryInterval: {retry_interval_ms}")
+            parts.append(f"retryInterval: {retry_interval_ms}")
 
         if retry_scaler is not None:
-            options.append(f"retryScaler: {retry_scaler}")
+            parts.append(f"retryScaler: {retry_scaler}")
 
         if retry_max_wait_ms is not None:
-            options.append(f"retryMaxWait: {retry_max_wait_ms}")
+            parts.append(f"retryMaxWait: {retry_max_wait_ms}")
 
         if retry_max_count is not None:
-            options.append(f"retryMaxCount: {retry_max_count}")
+            parts.append(f"retryMaxCount: {retry_max_count}")
 
         if request_cancellation is not None:
-            options.append(
+            parts.append(
                 f"requestCancellation: {string_literal(str(request_cancellation))}"
             )
 
@@ -150,28 +172,15 @@ class DatastarActions:
                     "" if url.endswith(("?", "&")) else "&" if "?" in url else "?"
                 )
                 full_url = url + separator + query_string
-        if options:
-            return f"@{method}({string_literal(full_url)}, {{{', '.join(options)}}})"
+        if parts:
+            return f"@{method}({string_literal(full_url)}, {{{', '.join(parts)}}})"
         return f"@{method}({string_literal(full_url)})"
 
     def get(
         self,
         url: str,
         queries: Mapping[str, Any] | None = None,
-        *,
-        content_type: ContentType | str | None = None,
-        include: FilterValue | None = None,
-        exclude: FilterValue | None = None,
-        selector: str | None = None,
-        headers: dict[str, str] | None = None,
-        open_when_hidden: bool | None = None,
-        payload: dict[str, Any] | None = None,
-        retry: Retry | str | None = None,
-        retry_interval_ms: int | None = None,
-        retry_scaler: float | None = None,
-        retry_max_wait_ms: int | None = None,
-        retry_max_count: int | None = None,
-        request_cancellation: RequestCancellation | str | None = None,
+        **options: Unpack[FetchOptions],
     ) -> str:
         """Build `@get(...)`.
 
@@ -183,43 +192,13 @@ class DatastarActions:
         h.Button(data.on("click", at.get("/items", {"q": "$query"})), "Search")
         ```
         """
-        return self._fetch(
-            "get",
-            url,
-            queries,
-            content_type=content_type,
-            include=include,
-            exclude=exclude,
-            selector=selector,
-            headers=headers,
-            open_when_hidden=open_when_hidden,
-            payload=payload,
-            retry=retry,
-            retry_interval_ms=retry_interval_ms,
-            retry_scaler=retry_scaler,
-            retry_max_wait_ms=retry_max_wait_ms,
-            retry_max_count=retry_max_count,
-            request_cancellation=request_cancellation,
-        )
+        return self._fetch("get", url, queries, **options)
 
     def post(
         self,
         url: str,
         queries: Mapping[str, Any] | None = None,
-        *,
-        content_type: ContentType | str | None = None,
-        include: FilterValue | None = None,
-        exclude: FilterValue | None = None,
-        selector: str | None = None,
-        headers: dict[str, str] | None = None,
-        open_when_hidden: bool | None = None,
-        payload: dict[str, Any] | None = None,
-        retry: Retry | str | None = None,
-        retry_interval_ms: int | None = None,
-        retry_scaler: float | None = None,
-        retry_max_wait_ms: int | None = None,
-        retry_max_count: int | None = None,
-        request_cancellation: RequestCancellation | str | None = None,
+        **options: Unpack[FetchOptions],
     ) -> str:
         """Build `@post(...)` with the same option surface as `get`.
 
@@ -227,43 +206,13 @@ class DatastarActions:
         in the browser — never pass user-supplied text there; wrap it with
         `string_literal()` or send it as a signal.
         """
-        return self._fetch(
-            "post",
-            url,
-            queries,
-            content_type=content_type,
-            include=include,
-            exclude=exclude,
-            selector=selector,
-            headers=headers,
-            open_when_hidden=open_when_hidden,
-            payload=payload,
-            retry=retry,
-            retry_interval_ms=retry_interval_ms,
-            retry_scaler=retry_scaler,
-            retry_max_wait_ms=retry_max_wait_ms,
-            retry_max_count=retry_max_count,
-            request_cancellation=request_cancellation,
-        )
+        return self._fetch("post", url, queries, **options)
 
     def put(
         self,
         url: str,
         queries: Mapping[str, Any] | None = None,
-        *,
-        content_type: ContentType | str | None = None,
-        include: FilterValue | None = None,
-        exclude: FilterValue | None = None,
-        selector: str | None = None,
-        headers: dict[str, str] | None = None,
-        open_when_hidden: bool | None = None,
-        payload: dict[str, Any] | None = None,
-        retry: Retry | str | None = None,
-        retry_interval_ms: int | None = None,
-        retry_scaler: float | None = None,
-        retry_max_wait_ms: int | None = None,
-        retry_max_count: int | None = None,
-        request_cancellation: RequestCancellation | str | None = None,
+        **options: Unpack[FetchOptions],
     ) -> str:
         """Build `@put(...)` with the same option surface as `get`.
 
@@ -271,43 +220,13 @@ class DatastarActions:
         in the browser — never pass user-supplied text there; wrap it with
         `string_literal()` or send it as a signal.
         """
-        return self._fetch(
-            "put",
-            url,
-            queries,
-            content_type=content_type,
-            include=include,
-            exclude=exclude,
-            selector=selector,
-            headers=headers,
-            open_when_hidden=open_when_hidden,
-            payload=payload,
-            retry=retry,
-            retry_interval_ms=retry_interval_ms,
-            retry_scaler=retry_scaler,
-            retry_max_wait_ms=retry_max_wait_ms,
-            retry_max_count=retry_max_count,
-            request_cancellation=request_cancellation,
-        )
+        return self._fetch("put", url, queries, **options)
 
     def patch(
         self,
         url: str,
         queries: Mapping[str, Any] | None = None,
-        *,
-        content_type: ContentType | str | None = None,
-        include: FilterValue | None = None,
-        exclude: FilterValue | None = None,
-        selector: str | None = None,
-        headers: dict[str, str] | None = None,
-        open_when_hidden: bool | None = None,
-        payload: dict[str, Any] | None = None,
-        retry: Retry | str | None = None,
-        retry_interval_ms: int | None = None,
-        retry_scaler: float | None = None,
-        retry_max_wait_ms: int | None = None,
-        retry_max_count: int | None = None,
-        request_cancellation: RequestCancellation | str | None = None,
+        **options: Unpack[FetchOptions],
     ) -> str:
         """Build `@patch(...)` with the same option surface as `get`.
 
@@ -315,43 +234,13 @@ class DatastarActions:
         in the browser — never pass user-supplied text there; wrap it with
         `string_literal()` or send it as a signal.
         """
-        return self._fetch(
-            "patch",
-            url,
-            queries,
-            content_type=content_type,
-            include=include,
-            exclude=exclude,
-            selector=selector,
-            headers=headers,
-            open_when_hidden=open_when_hidden,
-            payload=payload,
-            retry=retry,
-            retry_interval_ms=retry_interval_ms,
-            retry_scaler=retry_scaler,
-            retry_max_wait_ms=retry_max_wait_ms,
-            retry_max_count=retry_max_count,
-            request_cancellation=request_cancellation,
-        )
+        return self._fetch("patch", url, queries, **options)
 
     def delete(
         self,
         url: str,
         queries: Mapping[str, Any] | None = None,
-        *,
-        content_type: ContentType | str | None = None,
-        include: FilterValue | None = None,
-        exclude: FilterValue | None = None,
-        selector: str | None = None,
-        headers: dict[str, str] | None = None,
-        open_when_hidden: bool | None = None,
-        payload: dict[str, Any] | None = None,
-        retry: Retry | str | None = None,
-        retry_interval_ms: int | None = None,
-        retry_scaler: float | None = None,
-        retry_max_wait_ms: int | None = None,
-        retry_max_count: int | None = None,
-        request_cancellation: RequestCancellation | str | None = None,
+        **options: Unpack[FetchOptions],
     ) -> str:
         """Build `@delete(...)` with the same option surface as `get`.
 
@@ -359,43 +248,13 @@ class DatastarActions:
         in the browser — never pass user-supplied text there; wrap it with
         `string_literal()` or send it as a signal.
         """
-        return self._fetch(
-            "delete",
-            url,
-            queries,
-            content_type=content_type,
-            include=include,
-            exclude=exclude,
-            selector=selector,
-            headers=headers,
-            open_when_hidden=open_when_hidden,
-            payload=payload,
-            retry=retry,
-            retry_interval_ms=retry_interval_ms,
-            retry_scaler=retry_scaler,
-            retry_max_wait_ms=retry_max_wait_ms,
-            retry_max_count=retry_max_count,
-            request_cancellation=request_cancellation,
-        )
+        return self._fetch("delete", url, queries, **options)
 
     def query(
         self,
         url: str,
         queries: Mapping[str, Any] | None = None,
-        *,
-        content_type: ContentType | str | None = None,
-        include: FilterValue | None = None,
-        exclude: FilterValue | None = None,
-        selector: str | None = None,
-        headers: dict[str, str] | None = None,
-        open_when_hidden: bool | None = None,
-        payload: dict[str, Any] | None = None,
-        retry: Retry | str | None = None,
-        retry_interval_ms: int | None = None,
-        retry_scaler: float | None = None,
-        retry_max_wait_ms: int | None = None,
-        retry_max_count: int | None = None,
-        request_cancellation: RequestCancellation | str | None = None,
+        **options: Unpack[FetchOptions],
     ) -> str:
         """Build `@query(...)` with the same option surface as `get`.
 
@@ -404,24 +263,7 @@ class DatastarActions:
         in the browser — never pass user-supplied text there; wrap it with
         `string_literal()` or send it as a signal.
         """
-        return self._fetch(
-            "query",
-            url,
-            queries,
-            content_type=content_type,
-            include=include,
-            exclude=exclude,
-            selector=selector,
-            headers=headers,
-            open_when_hidden=open_when_hidden,
-            payload=payload,
-            retry=retry,
-            retry_interval_ms=retry_interval_ms,
-            retry_scaler=retry_scaler,
-            retry_max_wait_ms=retry_max_wait_ms,
-            retry_max_count=retry_max_count,
-            request_cancellation=request_cancellation,
-        )
+        return self._fetch("query", url, queries, **options)
 
     def clipboard(self, text: str, is_base64: bool = False) -> str:
         """Build `@clipboard(...)`. **Datastar Pro only.**"""

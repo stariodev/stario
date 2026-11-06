@@ -6,6 +6,52 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ## Unreleased
 
+### Fixed
+
+- A plain tuple in child position is no longer rendered as markup. Elements
+  built by `h.*` are now an `Element` (a `tuple` subclass) and the renderer
+  and `@baked` dispatch on that type, so a four-column database row passed
+  as one child raises `StarioError` instead of writing its text to the
+  page unescaped. `h.Li(*row)` keeps escaping each cell.
+- `h.Script` and `h.Style` are raw-text elements: `str` children are sent
+  as they are, because the browser never decodes entities inside them, so
+  `h.Script("if (a < b) go()")` now works. Text that would end the element
+  early (`</script`, `<!--` in a script, `</style`) raises `StarioError`.
+  `Tag(name, raw_text=True)` marks a custom raw-text tag.
+- `data.on("myEvent", …)` emits `data-on:my-event__case.camel`, and
+  `data.class_("myClass", …)` emits `data-class:my-class__case.camel`
+  (`__case.pascal` for PascalCase), so the browser's lowercasing of the
+  attribute name no longer changes the event or class name. `data.attr`
+  and `data.style` raise for a key with uppercase letters (HTML lowercases
+  it; use `data.attrs` / `data.styles`), as do `data.bind(prop=…)` and
+  `data.bind(event=…)` for modifier values with uppercase letters.
+- An HTTP/2 request body that grows past the read limit while the handler
+  is reading it is answered once, by the handler's `RequestBodyError` path
+  (413 with a text body, as on HTTP/1). The protocol no longer sends its
+  own empty 413 first, which left the request span marked as a failure.
+- HTTP/2 writes queued behind a slow reader are compacted only once half
+  of the buffer has been sent. Before, every DATA frame sent moved the
+  whole unsent backlog, so a handler that did not `drain()` paid for the
+  backlog size on each frame.
+
+### Changed
+
+- `SSE.patch_elements` documents that `bytes` and `str` are trusted HTML
+  sent as they are (like `w.html`); build user text with `h.*`.
+- `at.get` / `post` / `put` / `patch` / `delete` / `query` share one
+  `FetchOptions` typed dictionary (`**options: Unpack[FetchOptions]`)
+  instead of six copies of the option list. Calls are unchanged.
+- Building an element is cheaper: `Tag.__call__` tests child types before
+  the `Mapping` check, inlines the `str` attribute path, and builds its
+  `repr` only for errors; `classes()` checks `str` tokens first and caches
+  the fragment for repeated all-`str` argument tuples; `styles()` scans
+  names and values with one regex each. `escape_attribute_value` is no
+  longer cached. Output is byte-identical. The 50-row page in
+  `benchmarks/server/inproc.py` goes from 219 µs to 173 µs per request.
+- An SSE payload with no line breaks (rendered markup, compact JSON) is
+  written without being copied through the line splitter, and signal
+  patches with no dotted key skip the path check.
+
 ## 5.4.0 - 2026-11-05
 
 ### Changed

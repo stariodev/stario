@@ -29,6 +29,23 @@ class Attrs:
         return f"Attrs({self.rendered!r})"
 
 
+class Element(tuple[str, "str | list[Any] | None", "list[Any] | None", str]):
+    """One built element: `(tag_start, attrs, children, tail)`.
+
+    Only `Tag.__call__` makes these. The render walk and the `@baked`
+    flattener dispatch on this exact type, so a plain tuple in child position
+    (a database row, say) is never mistaken for markup and never emitted
+    unescaped.
+
+    - `tag_start`: `"<name"` without `>`, or `"<name>"` when `attrs` is None
+    - `attrs`: None, a joined str, or `list[str | AttrSlot]` at bake time
+    - `children`: list of child nodes, or None when `tail` closes an empty element
+    - `tail`: `"</name>"` with children, else `"/>"` or `"></name>"`
+    """
+
+    __slots__ = ()
+
+
 # Attribute values
 type AttributeValue = str | SafeString | bool | int | float | None
 
@@ -42,28 +59,12 @@ type StyleDeclarations = Mapping[str, StyleValue | Omitted]
 # Class tokens are wire names (escaped); conditionals use truthy mapping values.
 type ClassInput = str | Omitted | Mapping[str, Any]
 
-# Plain attribute dictionaries map wire keys to scalar values.
-# Prefer TagAttributes for tag positional args; AttributeDict is an alias kept
-# for older icon modules.
-type AttributeDict = Mapping[str, AttributeValue]
-
 # Tag call arguments
 type TagAttributes = Mapping[str, AttributeValue] | Attrs
 
-# Render tree: (tag_start, attrs, children, tail)
-# - tag_start: "<name" without ">"
-# - attrs: None, joined str (no slots), or list[str | AttrSlot] at bake time
-# - children: list of child nodes, or None when tail carries the empty close
-# - tail: "</name>" with children, or no_children_close ("/>", "></name>") when empty
-type HtmlElementTuple = tuple[
-    str,
-    str | list[Any] | None,
-    list[HtmlElement] | None,
-    str,
-]
-type HtmlElement = (
-    str | int | float | SafeString | list[HtmlElement] | HtmlElementTuple | None
-)
+# Render tree node built by a Tag call (kept under its older alias too).
+type HtmlElementTuple = Element
+type HtmlElement = str | int | float | SafeString | list[HtmlElement] | Element | None
 
 
 def Comment(

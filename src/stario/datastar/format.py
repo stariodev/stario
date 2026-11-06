@@ -349,10 +349,14 @@ def expand_signal_paths(payload: Mapping[str, Any]) -> dict[str, Any]:
     def check_keys(mapping: Mapping[str, Any]) -> bool:
         dotted = False
         for key, value in mapping.items():
-            check_signal_name(key)
-            if "." in key:
+            # The full check only matters for a dotted path (every segment
+            # non-empty); a plain name just has to be a non-empty str.
+            if type(key) is not str or not key:
+                check_signal_name(key)
+            elif "." in key:
+                check_signal_name(key)
                 dotted = True
-            if isinstance(value, Mapping) and check_keys(
+            if (type(value) is dict or isinstance(value, Mapping)) and check_keys(
                 cast(Mapping[str, Any], value)
             ):
                 dotted = True
@@ -452,6 +456,42 @@ def signal_attr_key(name: str) -> str:
         help_text=(
             "Use a name Datastar can spell in an attribute key, for example "
             "camelCase, snake_case, or kebab-case."
+        ),
+    )
+
+
+def key_case(name: str) -> tuple[str, Case | None]:
+    """Attribute-key spelling and `__case` modifier that yield `name` on the client.
+
+    HTML lowercases attribute names, so a camelCase or PascalCase name has to
+    be kebab-spelled in the key and converted back by Datastar's `__case`
+    modifier. Names without uppercase letters are returned unchanged with no
+    modifier.
+
+    ```python
+    key_case("click")
+    # → ("click", None)
+    key_case("myEvent")
+    # → ("my-event", "camel")
+    key_case("DOMContentLoaded")
+    # → ("d-o-m-content-loaded", "pascal")
+    ```
+    """
+    if not any(c.isupper() for c in name):
+        return name, None
+    kebabed = re.sub(r"[A-Z]", lambda m: "-" + m[0].lower(), name)
+    if name[0].isupper():
+        candidate = kebabed.lstrip("-")
+        if _ds_pascal(candidate) == name:
+            return candidate, "pascal"
+    elif _ds_camel(kebabed) == name:
+        return kebabed, "camel"
+    raise StarioError(
+        f"Name cannot be spelled as a Datastar attribute key: {name!r}",
+        context={"name": name},
+        help_text=(
+            "HTML lowercases attribute names, and Datastar can only restore "
+            "camelCase or PascalCase. Use one of those, or kebab-case."
         ),
     )
 

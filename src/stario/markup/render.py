@@ -8,9 +8,7 @@ from stario.exceptions import StarioError
 from .escape import escape_text
 from .slots import AttrSlot, BakeSlot, slot_name
 from .tag import Tag
-from .types import HtmlElement, SafeString
-
-# Used by baked._splice_child for nested slot values.
+from .types import Element, HtmlElement, SafeString
 
 
 def _render(nodes: Iterable[Any], results: list[str]) -> None:
@@ -26,15 +24,8 @@ def _render(nodes: Iterable[Any], results: list[str]) -> None:
             results.append(escape_text(node))
             continue
 
-        if node_type is tuple:
-            # Tuple walk must stay in sync with baked._flatten_node_into_segments.
-            if len(node) != 4:
-                raise StarioError(
-                    "Invalid tuple shape for HTML element",
-                    context={"tuple_length": len(node)},
-                    help_text="HTML element tuples must have exactly four items: tag start, attributes, children, and tail.",
-                    example='render(h.Div({"class": "container"}, h.P("Hello")))',
-                )
+        if node_type is Element:
+            # Element walk must stay in sync with baked._flatten_node_into_segments.
             tag_start, attrs, children, tail = node
             results.append(tag_start)
             if attrs is not None:
@@ -110,13 +101,25 @@ def _render(nodes: Iterable[Any], results: list[str]) -> None:
                 example='h.P("enabled" if is_enabled else "disabled")',
             )
 
+        if node_type is tuple:
+            raise StarioError(
+                "Cannot render a tuple as HTML content",
+                context={"node_value": str(node)[:100]},
+                help_text=(
+                    "A tuple is not markup. Unpack it into children (h.Li(*row)) "
+                    "or convert each item to text; only elements built by h.* "
+                    "render as tags."
+                ),
+                example="h.Ul(*[h.Li(str(cell)) for cell in row])",
+            )
+
         raise StarioError(
             f"Cannot render element of type {type(node).__name__}",
             context={
                 "node_type": type(node).__name__,
                 "node_value": str(node)[:100],
             },
-            help_text="Only str, int, float, SafeString, lists, and element tuples can be rendered.",
+            help_text="Only str, int, float, SafeString, lists, and elements built by h.* can be rendered.",
             example="h.Div(str(my_object))",
         )
 

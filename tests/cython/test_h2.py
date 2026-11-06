@@ -2033,3 +2033,114 @@ async def test_h2_multipart_upload_streams(tmp_path) -> None:
         server.close()
         await server.wait_closed()
         await app.drain_tasks()
+
+
+@pytest.mark.asyncio
+async def test_h2_body_overflow_during_read_is_the_handler_413() -> None:
+    """A running handler answers its own 413 (via RequestBodyError), so the
+    protocol must not pre-empt it: that made the handler path a "response
+    already started" failure on the span while the client still got 413."""
+    from stario.testing.tracer import TestTracer
+
+    app = App()
+
+    async def read_body(c, w) -> None:
+        await c.req.body()
+        w.text("should not run")
+
+    app.add(Route("POST /"), read_body)
+    loop = asyncio.get_running_loop()
+    port = free_port()
+    with TestTracer() as tracer:
+        server = await loop.create_server(
+            lambda: make_protocol(loop, app, max_body_bytes=20, tracer=tracer),
+            "127.0.0.1",
+            port,
+        )
+        try:
+            reader, writer, buf = await h2_handshake("127.0.0.1", port)
+            try:
+                writer.write(
+                    pack_frame(
+                        TYPE_HEADERS,
+                        FLAG_END_HEADERS,
+                        1,
+                        encode_request(method="POST", path="/"),
+                    )
+                    + pack_frame(TYPE_DATA, 0, 1, b"y" * 100)
+                )
+                await writer.drain()
+                frames, buf = await read_stream(reader, buf, 1)
+                assert not has_goaway(frames)
+                assert b"413" in stream_headers_blob(frames, 1)
+                assert stream_data(frames, 1) == b"Request body too large"
+            finally:
+                writer.close()
+                await writer.wait_closed()
+        finally:
+            server.close()
+            await server.wait_closed()
+            await app.drain_tasks()
+        spans = [s for s in tracer.finished_spans() if s.name == "POST /"]
+        assert len(spans) == 1
+        assert spans[0].status == "ok", spans[0].error
+        assert spans[0].attributes["response.status_code"] == 413
+
+
+@pytest.mark.asyncio
+async def test_h2_backlog_written_under_a_small_window_arrives_in_order() -> None:
+    """Writes queued while the stream window is shut are kept in order once
+    the client opens the window: the unsent tail is compacted lazily."""
+    app = App()
+    chunks = [bytes([i % 251]) * 4096 for i in range(48)]
+
+    async def stream(_c, w) -> None:
+        w.write_headers(200)
+        for chunk in chunks:
+            w.write(chunk)
+        w.end()
+
+    app.add(Route("GET /stream"), stream)
+    loop = asyncio.get_running_loop()
+    port = free_port()
+    server = await loop.create_server(
+        lambda: make_protocol(loop, app, write_timeout=30.0), "127.0.0.1", port
+    )
+    try:
+        reader, writer, buf = await _h2_handshake_window("127.0.0.1", port, 16384)
+        try:
+            writer.write(
+                pack_frame(
+                    TYPE_HEADERS,
+                    FLAG_END_HEADERS | FLAG_END_STREAM,
+                    1,
+                    encode_request(method="GET", path="/stream"),
+                )
+            )
+            await writer.drain()
+            frames, buf, _eof = await _collect(reader, buf, 0.3)
+            first = stream_data(frames, 1)
+            assert 0 < len(first) <= 16384
+            # Open the window in two steps so the server sends from a buffer
+            # whose sent prefix is first below, then above, the compaction mark.
+            received = first
+            for increment in (16384, 1 << 20):
+                writer.write(
+                    pack_frame(TYPE_WINDOW_UPDATE, 0, 1, increment.to_bytes(4, "big"))
+                    + pack_frame(TYPE_WINDOW_UPDATE, 0, 0, increment.to_bytes(4, "big"))
+                )
+                await writer.drain()
+                frames, buf, _eof = await _collect(reader, buf, 0.3)
+                received += stream_data(frames, 1)
+            assert received == b"".join(chunks)
+            assert any(
+                f.type == TYPE_DATA and f.stream_id == 1 and (f.flags & FLAG_END_STREAM)
+                for f in frames
+            )
+        finally:
+            writer.close()
+            await writer.wait_closed()
+    finally:
+        server.close()
+        await server.wait_closed()
+        await app.drain_tasks()

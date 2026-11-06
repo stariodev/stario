@@ -2958,13 +2958,11 @@ cdef class CHttpProtocol(HttpConnection):
 
         if ex._abort_reason == ABORT_TOO_LARGE and ex._status_code < 0:
             # Stream 413; never close the multiplexed connection from c_feed.
+            # A running handler is reading: its read raises RequestBodyError
+            # and the handler path answers 413, as on HTTP/1. Answering here
+            # too would make that path a "response already started" failure.
             if not ex.handler_started:
                 self._h2_protocol_status(ex, 413)
-            else:
-                try:
-                    ex.respond(b"", b"text/plain; charset=utf-8", 413)
-                except Exception:
-                    pass
             return
 
         if (
@@ -3525,8 +3523,13 @@ cdef class CHttpProtocol(HttpConnection):
             return
 
         if off:
-            # Compact the sent prefix out of the bytearray, then append.
+            # Compact the sent prefix out of the bytearray only once it is at
+            # least half of it, so a slow reader costs one move per two bytes
+            # sent instead of one move of the whole backlog per DATA frame.
             n = PyByteArray_GET_SIZE(pending)
+            if off * 2 < n:
+                pending.extend(data)
+                return
             keep = n - off if n > off else 0
             if keep:
                 memmove(

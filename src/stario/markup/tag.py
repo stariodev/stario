@@ -2,17 +2,17 @@
 
 import re
 from collections.abc import Mapping
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from stario.exceptions import StarioError
 
-from .escape import validate_attribute_key
-from .slots import AttrSlot, bake_slot_if_present, slot_name
+from .escape import escape_attribute_value, validate_attribute_key
+from .slots import AttrSlot, BakeSlot, slot_name
 from .types import (
     AttributeValue,
     Attrs,
+    Element,
     HtmlElement,
-    HtmlElementTuple,
     SafeString,
     TagAttributes,
 )
@@ -50,12 +50,18 @@ class Tag:
     `empty="self_closing_when_empty"` — no children renders `<tag/>`; children
     allowed when present (SVG leaves like `circle`, `path`, filter primitives).
 
+    `raw_text=True` marks a raw-text element (`script`, `style`): the browser
+    does not decode entities inside it, so `str` children go on the wire
+    verbatim instead of text-escaped. Text that could end the element early
+    (`</script`, `<!--`) is an error.
+
     Calling the instance (`h.Div(...)`, `h.P("hi")`, etc.) builds a tree node;
     see `Tag.__call__`.
     """
 
     __slots__ = (
         "_empty",
+        "_raw_text",
         "closing_tag",
         "empty",
         "name",
@@ -70,6 +76,7 @@ class Tag:
         *,
         empty: EmptyMode = "normal",
         prefix: str = "",
+        raw_text: bool = False,
     ) -> None:
         """Create a tag factory.
 
@@ -77,7 +84,8 @@ class Tag:
         Use `empty="void"` for HTML void elements (children are an error), or
         `empty="self_closing_when_empty"` for SVG-style leaves that self-close
         only when called with no children. Optional `prefix` is prepended to the
-        opening tag (e.g. `<!doctype html>` on `HtmlDocument`).
+        opening tag (e.g. `<!doctype html>` on `HtmlDocument`). `raw_text=True`
+        is for `script` and `style`, whose text is not entity-decoded.
         """
         if not _TAG_NAME_RE.fullmatch(name):
             raise StarioError(
@@ -101,6 +109,7 @@ class Tag:
 
         self.name = name
         self._empty = empty
+        self._raw_text = raw_text
         self.tag_start = prefix + "<" + name
         self.tag_start_no_attrs = self.tag_start + ">"
         self.closing_tag = f"</{name}>"
@@ -110,9 +119,34 @@ class Tag:
     def _repr(self) -> str:
         return f"Tag(name='{self.name}', empty='{self._empty}')"
 
+    def _raw_text_child(self, child: Any) -> Any:
+        """`str` inside a raw-text element: verbatim, unless it could close the element."""
+        child_type = type(child)
+        if child_type is str:
+            lowered = cast(str, child).lower()
+            if f"</{self.name}" in lowered or (
+                self.name == "script" and "<!--" in lowered
+            ):
+                raise StarioError(
+                    f"Text inside <{self.name}> would end the element early",
+                    context={"tag": self.name, "text": cast(str, child)[:100]},
+                    help_text=(
+                        f"Raw text in <{self.name}> is sent verbatim, so it must "
+                        f"not contain '</{self.name}'"
+                        + (" or '<!--'" if self.name == "script" else "")
+                        + ". Build it differently, or pass a SafeString if you "
+                        "control the bytes."
+                    ),
+                    example="h.Script(\"const tag = '<\\/script>';\")",
+                )
+            return SafeString(cast(str, child))
+        if child_type is list:
+            return [self._raw_text_child(item) for item in cast(list[Any], child)]
+        return child
+
     def __call__(
         self, *children: TagAttributes | HtmlElement | None
-    ) -> HtmlElementTuple | SafeString:
+    ) -> Element | SafeString:
         """Build one element from positional arguments.
 
         Children are processed in order:
@@ -124,54 +158,67 @@ class Tag:
         - The first non-mapping starts child content. After that, mappings must
           not appear (attributes must come first).
 
-        Return value: a `(open, attrs, children, tail)` four-tuple, or a cached
-        `SafeString` when there are no arguments. With no attributes, `open` is
-        the tag start including `>` (`tag_start_no_attrs`); otherwise `open` is
-        `"<name"` and `attrs` is a joined string or slot list. `children` is
-        `None` for empty elements; `tail` is `no_children_close` or `closing_tag`.
+        Return value: an `Element` (a `(open, attrs, children, tail)` tuple
+        subclass), or a cached `SafeString` when there are no arguments. With
+        no attributes, `open` is the tag start including `>`
+        (`tag_start_no_attrs`); otherwise `open` is `"<name"` and `attrs` is a
+        joined string or slot list. `children` is `None` for empty elements;
+        `tail` is `no_children_close` or `closing_tag`.
         """
         # Attribute rendering is a dynamic boundary: public call types stay typed,
         # while raw mapping contents are validated here with exact type checks.
         if not children:
             return self.empty
 
-        child_elements: list[HtmlElement] | None = None
+        child_elements: list[Any] | None = None
         attribute_parts: list[_AttributePart] | None = None
         has_slots = False
-        tag_repr = self._repr()
 
         for child in children:
+            child_type = type(child)
+
+            # Child content first: it is what most calls carry.
+            if (
+                child_type is str
+                or child_type is Element
+                or child_type is SafeString
+                or child_type is list
+                or child_type is int
+                or child_type is float
+            ):
+                if child_elements is None:
+                    child_elements = [child]
+                else:
+                    child_elements.append(child)
+                continue
+
             if child is None:
                 continue
 
-            child_type = type(child)
-
             # `Attrs` fragments are pre-rendered attribute strings.
             if child_type is Attrs:
-                # `type(child) is Attrs` is intentional; cast tells pyright the branch.
-                attrs_fragment = cast(Attrs, child)
                 if child_elements is not None:
-                    raise _attrs_before_children_error(tag_repr)
+                    raise _attrs_before_children_error(self._repr())
+                rendered = cast(Attrs, child).rendered
                 if attribute_parts is None:
-                    attribute_parts = [attrs_fragment.rendered]
+                    attribute_parts = [rendered]
                 else:
-                    attribute_parts.append(attrs_fragment.rendered)
+                    attribute_parts.append(rendered)
                 continue
 
             # {key: value} attribute mappings are merged into the opening tag.
             if child_type is dict or isinstance(child, Mapping):
                 if child_elements is not None:
-                    raise _attrs_before_children_error(tag_repr)
+                    raise _attrs_before_children_error(self._repr())
                 if attribute_parts is None:
                     attribute_parts = []
 
                 attr_mapping = cast(Mapping[str, object], child)
                 for raw_key, raw_value in attr_mapping.items():
-                    bake_key_slot = bake_slot_if_present(raw_key)
-                    if bake_key_slot is not None:
+                    if type(raw_key) is BakeSlot:
                         raise StarioError(
                             "@baked: parameters cannot be used as attribute names",
-                            context={"tag": tag_repr},
+                            context={"tag": self._repr()},
                             help_text=(
                                 "Parameters may hold attribute values or children, "
                                 "never attribute names."
@@ -179,33 +226,37 @@ class Tag:
                         )
 
                     key = validate_attribute_key(raw_key)
-
-                    bake_value_slot = bake_slot_if_present(raw_value)
-                    if bake_value_slot is not None:
+                    value_type = type(raw_value)
+                    if value_type is str:
                         attribute_parts.append(
-                            AttrSlot(key, slot_name(bake_value_slot))
+                            f' {key}="{escape_attribute_value(cast(str, raw_value))}"'
+                        )
+                    elif value_type is BakeSlot:
+                        attribute_parts.append(
+                            AttrSlot(key, slot_name(cast(BakeSlot, raw_value)))
                         )
                         has_slots = True
-                        continue
-
-                    fragment = wire_scalar_attr_fragment(
-                        key, cast(AttributeValue, raw_value)
-                    )
-                    if fragment is not None:
-                        attribute_parts.append(fragment)
+                    else:
+                        fragment = wire_scalar_attr_fragment(
+                            key, cast(AttributeValue, raw_value)
+                        )
+                        if fragment is not None:
+                            attribute_parts.append(fragment)
 
                 continue
 
-            # Child content starts here (Attrs and mappings handled above).
+            # Anything else (a @baked slot, or a type render will reject) is
+            # child content.
             if child_elements is None:
-                child_elements = []
-            child_elements.append(cast(HtmlElement, child))
+                child_elements = [child]
+            else:
+                child_elements.append(child)
 
         # Void elements cannot have children.
-        if self._empty == "void" and child_elements is not None:
+        if child_elements is not None and self._empty == "void":
             raise StarioError(
                 f"<{self.name}> is a void element and cannot have children",
-                context={"tag": tag_repr},
+                context={"tag": self._repr()},
                 help_text=(
                     "Void elements (br, img, input, ...) always render as a single "
                     "self-closing tag. Put the content in a sibling or parent element."
@@ -213,7 +264,10 @@ class Tag:
                 example='h.Div(h.Img({"src": "x.png", "alt": "X"}), "caption")',
             )
 
-        # Build the final leaf or branch node (always a 4-tuple except cached empty).
+        if child_elements is not None and self._raw_text:
+            child_elements = [self._raw_text_child(c) for c in child_elements]
+
+        # Build the final leaf or branch node (always an Element except cached empty).
         if not attribute_parts and child_elements is None:
             return self.empty
 
@@ -233,10 +287,10 @@ class Tag:
 
         if child_elements is None:
             # Empty element: <name/> or <name></name>.
-            return (open_tag, attrs, None, self.no_children_close)
+            return Element((open_tag, attrs, None, self.no_children_close))
 
         # Element with children: <name attr1="value1" attr2="value2">...</name>.
-        return (open_tag, attrs, child_elements, self.closing_tag)
+        return Element((open_tag, attrs, child_elements, self.closing_tag))
 
     def __repr__(self) -> str:
         return self._repr()
