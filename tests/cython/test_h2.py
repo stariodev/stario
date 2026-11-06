@@ -16,6 +16,7 @@ import pytest
 from stario import App, Route
 from stario.datastar import SSE
 from stario.http.tls import load_tls_context
+from stario.testing import VirtualTimeLoop
 from tests.cython.h2wire import (
     FLAG_ACK,
     FLAG_END_HEADERS,
@@ -56,20 +57,33 @@ from tests.cython.http import (
 )
 
 
+async def _run_client(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run an external client in a thread; the server lives on this loop.
+
+    These tests run on ``VirtualTimeLoop`` (``conftest.py``). With its 20 ms
+    grace, a client process that pauses longer than that between packets
+    jumps the clock to the next timer. During a TLS handshake that timer is
+    asyncio's 60 s handshake timeout, which then aborts the connection. The
+    loop waits on the wall clock while the client runs.
+    """
+    loop = asyncio.get_running_loop()
+    virtual = isinstance(loop, VirtualTimeLoop)
+    if virtual:
+        loop.idle_grace = 10.0
+    try:
+        return await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(cmd, check=False, capture_output=True, text=True),
+        )
+    finally:
+        if virtual:
+            del loop.idle_grace
+
+
 async def _curl(*args: str) -> subprocess.CompletedProcess[str]:
-    """Run curl without blocking the event loop (the server lives on it)."""
     if shutil.which("curl") is None:
         pytest.skip("curl not installed")
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        None,
-        lambda: subprocess.run(
-            ["curl", "-sS", "--max-time", "5", *args],
-            check=False,
-            capture_output=True,
-            text=True,
-        ),
-    )
+    return await _run_client(["curl", "-sS", "--max-time", "5", *args])
 
 
 def _make_self_signed(dir_path: Path) -> tuple[Path, Path]:
@@ -285,25 +299,19 @@ async def test_h2_keep_alive_returns_window_credit() -> None:
         with tempfile.NamedTemporaryFile() as tmp:
             tmp.write(payload)
             tmp.flush()
-            result = await loop.run_in_executor(
-                None,
-                lambda: subprocess.run(
-                    [
-                        "h2load",
-                        "-n",
-                        str(nreq),
-                        "-c",
-                        "1",
-                        "-m",
-                        "1",
-                        "-d",
-                        tmp.name,
-                        f"http://127.0.0.1:{port}/echo",
-                    ],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                ),
+            result = await _run_client(
+                [
+                    "h2load",
+                    "-n",
+                    str(nreq),
+                    "-c",
+                    "1",
+                    "-m",
+                    "1",
+                    "-d",
+                    tmp.name,
+                    f"http://127.0.0.1:{port}/echo",
+                ]
             )
         assert result.returncode == 0, result.stderr
         assert f"{nreq} succeeded" in result.stdout, result.stdout
