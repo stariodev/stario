@@ -484,7 +484,7 @@ connections, making `Writer` thread-safe, multiprocess + Relay.
 
 - Server / one loop: `src/stario/http/server.py`, `src/stario/http/app.py`
 - Protocol dispatch: `src/stario_cython/protocol.pyx` (`asyncio.Task`,
-  compiled trie lookup, `connections`, `date_box`)
+  compiled trie lookup, `connections`)
 - Pools: `src/stario_cython/exchange.pyx` (`_thread_pool`, `release_exchange`),
   `vendor/compression_buf.c`
 - Relay: `src/stario/relay.py`, `tests/test_relay.py`
