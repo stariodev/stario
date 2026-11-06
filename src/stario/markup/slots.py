@@ -120,3 +120,18 @@ class AttrSlot:
 
     key: str  # validated attribute name, ready for the wire
     name: str  # parameter name
+
+
+@dataclass(frozen=True, slots=True)
+class RawSlot:
+    """A run of raw-text content with parameters in it (`h.Script(code)`).
+
+    `parts` is the run in document order: `str` pieces are literal text and
+    `BakeSlot` entries are parameters. The splice joins the run with the
+    values in place, verbatim, and runs the element's breakout check once
+    over the whole, so a value cannot complete a `</script` with the text
+    around it.
+    """
+
+    tag: str  # element name, for the breakout check
+    parts: tuple[str | BakeSlot, ...]

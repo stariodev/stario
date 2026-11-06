@@ -33,7 +33,6 @@ cdef extern from "Python.h":
     unsigned int PyUnicode_MAX_CHAR_VALUE(object o)
     object PyUnicode_New(Py_ssize_t size, unsigned int maxchar)
     int PyUnicode_1BYTE_KIND
-    PyObject* PyDict_GetItemWithError(object d, object key) except? NULL
     int PyDict_Next(object d, Py_ssize_t* pos, PyObject** key, PyObject** value)
 
 cdef extern from *:
@@ -67,12 +66,16 @@ cdef object _SafeString = None
 cdef object _Attrs = None
 cdef object _BakeSlot = None
 cdef object _AttrSlot = None
+cdef object _RawSlot = None
 cdef object _slot_name = None
 cdef object _validate_attribute_key = None
 cdef object _Mapping = None
 cdef bint _bound = False
 
 # Validated attribute names: str -> str, so the hot path is one dict lookup.
+# Bounded by refusing new entries past the cap, never by clearing: a clear
+# in place could free a key another thread is still reading (free-threaded
+# builds), and the dict object itself is never replaced for the same reason.
 cdef dict _VALID_KEYS = {}
 cdef int _VALID_KEYS_MAX = 4096
 
@@ -83,19 +86,27 @@ cdef int _MAX_DEPTH = 1000
 
 
 cdef void _bind():
-    global _Element, _SafeString, _Attrs, _BakeSlot, _AttrSlot, _slot_name
-    global _validate_attribute_key, _Mapping, _bound
+    """Bind the Python symbols once.
+
+    The first call happens while ``stario.markup.html`` builds its tags at
+    import, under the import lock, so every later caller (any thread) sees
+    the symbols already set. The imports are idempotent and ``_bound`` is
+    written last, so a repeated call can only rewrite the same values.
+    """
+    global _Element, _SafeString, _Attrs, _BakeSlot, _AttrSlot, _RawSlot
+    global _slot_name, _validate_attribute_key, _Mapping, _bound
     if _bound:
         return
     from collections.abc import Mapping
     from stario.markup.escape import validate_attribute_key
-    from stario.markup.slots import AttrSlot, BakeSlot, slot_name
+    from stario.markup.slots import AttrSlot, BakeSlot, RawSlot, slot_name
     from stario.markup.types import Attrs, Element, SafeString
     _Element = Element
     _SafeString = SafeString
     _Attrs = Attrs
     _BakeSlot = BakeSlot
     _AttrSlot = AttrSlot
+    _RawSlot = RawSlot
     _slot_name = slot_name
     _validate_attribute_key = validate_attribute_key
     _Mapping = Mapping
@@ -105,7 +116,13 @@ cdef void _bind():
 # ---------------------------------------------------------------------------
 # Escaping
 
-cdef object _escape_1byte(object s, bint quotes):
+cdef enum:
+    ESC_TEXT = 0      # & < >
+    ESC_DQUOTE = 1    # & < > "
+    ESC_SQUOTE = 2    # & < > '
+
+
+cdef object _escape_1byte(object s, int mode):
     """Escape a Latin-1 / ASCII ``str`` in one C pass; same object if clean."""
     cdef const unsigned char* src = <const unsigned char*>PyUnicode_DATA(s)
     cdef Py_ssize_t n = PyUnicode_GET_LENGTH(s)
@@ -113,6 +130,7 @@ cdef object _escape_1byte(object s, bint quotes):
     cdef Py_ssize_t extra = 0
     cdef Py_ssize_t w = 0
     cdef unsigned char c
+    cdef unsigned char quote = 34 if mode == ESC_DQUOTE else (39 if mode == ESC_SQUOTE else 0)
     cdef unsigned char* dst
     cdef object out
     for i in range(n):
@@ -121,8 +139,8 @@ cdef object _escape_1byte(object s, bint quotes):
             extra += 4
         elif c == 60 or c == 62:
             extra += 3
-        elif quotes and c == 34:
-            extra += 5
+        elif c == quote and quote != 0:
+            extra += 5 if quote == 34 else 4
     if extra == 0:
         return s
     out = PyUnicode_New(n + extra, PyUnicode_MAX_CHAR_VALUE(s))
@@ -138,10 +156,13 @@ cdef object _escape_1byte(object s, bint quotes):
         elif c == 62:
             dst[w] = 38; dst[w + 1] = 103; dst[w + 2] = 116; dst[w + 3] = 59
             w += 4
-        elif quotes and c == 34:
+        elif c == 34 and quote == 34:
             dst[w] = 38; dst[w + 1] = 113; dst[w + 2] = 117; dst[w + 3] = 111
             dst[w + 4] = 116; dst[w + 5] = 59
             w += 6
+        elif c == 39 and quote == 39:
+            dst[w] = 38; dst[w + 1] = 35; dst[w + 2] = 51; dst[w + 3] = 57; dst[w + 4] = 59
+            w += 5
         else:
             dst[w] = c
             w += 1
@@ -150,7 +171,7 @@ cdef object _escape_1byte(object s, bint quotes):
 
 cdef inline object c_escape_text(object s):
     if PyUnicode_KIND(s) == PyUnicode_1BYTE_KIND:
-        return _escape_1byte(s, False)
+        return _escape_1byte(s, ESC_TEXT)
     if "&" not in s and "<" not in s and ">" not in s:
         return s
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -158,7 +179,7 @@ cdef inline object c_escape_text(object s):
 
 cdef inline object c_escape_attr(object s):
     if PyUnicode_KIND(s) == PyUnicode_1BYTE_KIND:
-        return _escape_1byte(s, True)
+        return _escape_1byte(s, ESC_DQUOTE)
     if "&" not in s and "<" not in s and ">" not in s and '"' not in s:
         return s
     return (
@@ -166,6 +187,19 @@ cdef inline object c_escape_attr(object s):
         .replace("<", "&lt;")
         .replace(">", "&gt;")
         .replace('"', "&quot;")
+    )
+
+
+cdef inline object c_escape_sq_attr(object s):
+    if PyUnicode_KIND(s) == PyUnicode_1BYTE_KIND:
+        return _escape_1byte(s, ESC_SQUOTE)
+    if "'" not in s and "&" not in s and "<" not in s and ">" not in s:
+        return s
+    return (
+        s.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("'", "&#39;")
     )
 
 
@@ -188,6 +222,39 @@ def escape_attribute_value(str s not None):
     return c_escape_attr(s)
 
 
+def escape_sq_attribute_value(str s not None):
+    """Escape for single-quoted attribute values (`'`, `&`, `<`, `>`).
+
+    Use when the value is JSON or other text that already contains double
+    quotes, so the attribute can be wrapped in single quotes on the wire.
+    """
+    return c_escape_sq_attr(s)
+
+
+def check_raw_text(str text not None, str tag not None):
+    """Raise if ``text`` could end a raw-text element named ``tag`` early."""
+    _check_raw_text(text, tag)
+
+
+cdef int _check_raw_text(object text, object tag) except -1:
+    cdef object lowered = text.lower()
+    cdef bint script = tag == "script"
+    if f"</{tag}" in lowered or (script and "<!--" in lowered):
+        raise StarioError(
+            f"Text inside <{tag}> would end the element early",
+            context={"tag": tag, "text": text[:100]},
+            help_text=(
+                f"Raw text in <{tag}> is sent verbatim, so it must "
+                f"not contain '</{tag}'"
+                + (" or '<!--'" if script else "")
+                + ". Build it differently, or pass a SafeString if you "
+                "control the bytes."
+            ),
+            example='h.Script("const tag = \'<\\\\/script>\';")',
+        )
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Tag
 
@@ -202,17 +269,23 @@ cdef object _attrs_before_children_error(object tag_repr):
     )
 
 
+def _valid_key_cache_size():
+    """Entries in the attribute-name cache (tests check it stops at the cap)."""
+    return len(_VALID_KEYS)
+
+
 cdef inline object _valid_key(object raw_key):
     """The validated attribute name: one dict hit, else the Python validator."""
-    cdef PyObject* hit
+    cdef object hit
     if type(raw_key) is str:
-        hit = PyDict_GetItemWithError(_VALID_KEYS, raw_key)
-        if hit != NULL:
-            return <object>hit
+        # ``dict.get`` hands back a new reference (Cython uses the
+        # free-threading-safe lookup), so a concurrent writer cannot free it.
+        hit = _VALID_KEYS.get(raw_key)
+        if hit is not None:
+            return hit
     key = _validate_attribute_key(raw_key)
-    if len(_VALID_KEYS) >= _VALID_KEYS_MAX:
-        _VALID_KEYS.clear()
-    _VALID_KEYS[key] = key
+    if len(_VALID_KEYS) < _VALID_KEYS_MAX:
+        _VALID_KEYS[key] = key
     return key
 
 
@@ -277,7 +350,6 @@ cdef class Tag:
     cdef readonly str no_children_close
     cdef readonly object empty
     cdef bint _void
-    cdef bint _script
 
     def __init__(
         self,
@@ -320,7 +392,6 @@ cdef class Tag:
         self.empty_mode = empty
         self.raw_text = raw_text
         self._void = empty == "void"
-        self._script = name == "script"
         self.tag_start = prefix + "<" + name
         self.tag_start_no_attrs = self.tag_start + ">"
         self.closing_tag = f"</{name}>"
@@ -333,29 +404,77 @@ cdef class Tag:
     def __repr__(self):
         return self._repr()
 
-    cdef object _raw_text_child(self, object child):
-        """`str` inside a raw-text element: verbatim, unless it could close the element."""
+    cdef int _raw_walk(self, object child, list run, list out, bint* slots) except -1:
+        """Collect raw-text content in document order.
+
+        ``str`` pieces and ``@baked`` slots build up one *run*; lists are
+        flattened into it. Anything else (a ``SafeString`` the caller vouches
+        for, a number, ``None``) ends the run and passes through untouched.
+        """
         cdef object child_type = type(child)
-        cdef object lowered
         if child_type is str:
-            lowered = child.lower()
-            if f"</{self.name}" in lowered or (self._script and "<!--" in lowered):
-                raise StarioError(
-                    f"Text inside <{self.name}> would end the element early",
-                    context={"tag": self.name, "text": child[:100]},
-                    help_text=(
-                        f"Raw text in <{self.name}> is sent verbatim, so it must "
-                        f"not contain '</{self.name}'"
-                        + (" or '<!--'" if self._script else "")
-                        + ". Build it differently, or pass a SafeString if you "
-                        "control the bytes."
-                    ),
-                    example='h.Script("const tag = \'<\\\\/script>\';")',
-                )
-            return _SafeString(child)
-        if child_type is list:
-            return [self._raw_text_child(item) for item in child]
-        return child
+            PyList_Append(run, child)
+        elif child_type is list:
+            for item in <list>child:
+                self._raw_walk(item, run, out, slots)
+        elif child_type is _BakeSlot:
+            PyList_Append(run, child)
+            slots[0] = True
+        else:
+            self._raw_flush(run, out, slots)
+            if child is not None:
+                PyList_Append(out, child)
+        return 0
+
+    cdef int _raw_flush(self, list run, list out, bint* slots) except -1:
+        """Close a run: check it once, joined, and emit it as one child.
+
+        The wire concatenates children, so ``"</scr"`` next to ``"ipt>"``
+        must fail like ``"</script>"`` does. Without slots the run becomes a
+        single ``SafeString``. With slots it becomes a ``RawSlot`` whose
+        ``parts`` alternate literal text and slots: adjacent literals are
+        joined and checked now, and the splice checks the whole run again
+        with the values in place.
+        """
+        cdef list parts
+        cdef list literal
+        cdef object text
+        if not run:
+            return 0
+        if not slots[0]:
+            text = "".join(run)
+            _check_raw_text(text, self.name)
+            PyList_Append(out, _SafeString(text))
+        else:
+            parts = []
+            literal = []
+            for item in run:
+                if type(item) is str:
+                    PyList_Append(literal, item)
+                    continue
+                if literal:
+                    text = "".join(literal)
+                    _check_raw_text(text, self.name)
+                    PyList_Append(parts, text)
+                    del literal[:]
+                PyList_Append(parts, item)
+            if literal:
+                text = "".join(literal)
+                _check_raw_text(text, self.name)
+                PyList_Append(parts, text)
+            PyList_Append(out, _RawSlot(self.name, tuple(parts)))
+            slots[0] = False
+        del run[:]
+        return 0
+
+    cdef list _raw_text_children(self, list children):
+        cdef list run = []
+        cdef list out = []
+        cdef bint slots = False
+        for child in children:
+            self._raw_walk(child, run, out, &slots)
+        self._raw_flush(run, out, &slots)
+        return out
 
     cdef int _add_mapping(
         self, object mapping, list attribute_parts, bint* has_slots
@@ -493,7 +612,7 @@ cdef class Tag:
             )
 
         if child_elements is not None and self.raw_text:
-            child_elements = [self._raw_text_child(c) for c in child_elements]
+            child_elements = self._raw_text_children(child_elements)
 
         # Build the final leaf or branch node (always an Element except cached empty).
         if not attribute_parts and child_elements is None:
@@ -526,6 +645,15 @@ cdef class Tag:
 
 # ---------------------------------------------------------------------------
 # Render
+
+cdef object _unfilled_slot_name(object node):
+    if type(node) is _BakeSlot:
+        return _slot_name(node)
+    for part in node.parts:
+        if type(part) is _BakeSlot:
+            return _slot_name(part)
+    return "?"
+
 
 cdef int _render_node(object node, list out, int depth) except -1:
     cdef object node_type = type(node)
@@ -594,10 +722,10 @@ cdef int _render_node(object node, list out, int depth) except -1:
     if node is None:
         return 0
 
-    if node_type is _BakeSlot:
+    if node_type is _BakeSlot or node_type is _RawSlot:
         raise StarioError(
             "Unfilled @baked slot in render tree",
-            context={"slot_name": _slot_name(node)},
+            context={"slot_name": _unfilled_slot_name(node)},
             help_text="Call the baked function to substitute slots, then render the returned fragment.",
             example=(
                 "@baked\n"

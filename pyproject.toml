@@ -73,7 +73,7 @@ environment = { PKG_CONFIG_PATH = "/tmp/stario-deps/lib/pkgconfig", DYLD_LIBRARY
 test = [
     "hypothesis>=6.148",
     "pytest>=8.4.1",
-    "pytest-asyncio>=1.3.0",
+    "pytest-asyncio>=1.4.0",
     "pytest-timeout>=2.3",
 ]
 dev = [

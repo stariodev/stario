@@ -2386,7 +2386,7 @@ cdef class RequestExchange:
         cdef Headers headers = self.headers
         cdef object raw_length
         cdef list nva
-        if self._transport.is_closing():
+        if self._t_is_closing():
             return self
         if self._status_code >= 0:
             raise StarioRuntime(
@@ -2470,7 +2470,7 @@ cdef class RequestExchange:
         cdef object part
         cdef const unsigned char* native_out = NULL
         cdef size_t native_len = 0
-        if self._transport.is_closing():
+        if self._t_is_closing():
             self._free_compressors()
             return self
         if self._completed:
@@ -2600,7 +2600,7 @@ cdef class RequestExchange:
         cdef size_t native_len = 0
         if self._completed:
             return
-        if self._transport.is_closing():
+        if self._t_is_closing():
             self._free_compressors()
             self._completed = True
             self._done()

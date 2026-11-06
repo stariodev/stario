@@ -119,6 +119,58 @@ class TestValidateAttributeKey:
             validate_attribute_key(bad_key)
 
 
+class TestCacheBounds:
+    """Bounded caches stop filling at their cap and are never cleared in place.
+
+    Both caches are read without a lock from every thread (see
+    docs/free-threading.md), so past the cap a miss must still validate and
+    render correctly, just without being remembered.
+    """
+
+    def test_attribute_keys_past_the_cache_cap_still_validate(self):
+        from stario_cython.markup import _valid_key_cache_size
+
+        cap = 4096
+        keys = [f"data-k{i}" for i in range(cap + 64)]
+        for key in keys:
+            assert render(h.Div({key: "v"})) == f'<div {key}="v"></div>'
+        with pytest.raises(StarioError, match="Invalid attribute name"):
+            h.Div({"bad key": "v"})
+        # Full, and still full: entries past the cap are not remembered and
+        # the ones before it were not thrown away.
+        assert _valid_key_cache_size() == cap
+
+    def test_class_fragments_past_the_cache_cap_still_render(self):
+        from stario.markup import attributes
+
+        cap = attributes._CLASSES_CACHE_MAX
+        for i in range(cap + 64):
+            assert classes(f"c{i}", "x") == Attrs(f' class="c{i} x"')
+        assert len(attributes._CLASSES_CACHE) == cap
+        assert ("c0", "x") in attributes._CLASSES_CACHE
+
+    def test_concurrent_builds_with_many_distinct_keys(self):
+        import threading
+
+        errors: list[BaseException] = []
+
+        def worker(offset: int) -> None:
+            try:
+                for i in range(5000):
+                    key = f"data-t{offset}-{i}"
+                    node = h.Div({key: "v"}, classes("a", f"b{i}"), "t")
+                    assert render(node) == f'<div {key}="v" class="a b{i}">t</div>'
+            except BaseException as error:  # pragma: no cover - reported below
+                errors.append(error)
+
+        threads = [threading.Thread(target=worker, args=(n,)) for n in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert errors == []
+
+
 class TestSvgNamespace:
     """SVG tags live on `stario.markup.svg`."""
 
@@ -782,6 +834,107 @@ class TestBakedAttributeSlots:
             baked(bad)
 
 
+class TestBakedRawText:
+    """A parameter inside h.Script / h.Style splices verbatim, with the breakout check."""
+
+    def test_script_parameter_is_verbatim(self):
+        @baked
+        def inline(code):
+            return h.Script(code)
+
+        assert render(inline("a<b && c")) == "<script>a<b && c</script>"
+        assert render(inline("if (a > b) { go(); }")) == (
+            "<script>if (a > b) { go(); }</script>"
+        )
+
+    def test_script_parameter_cannot_end_the_element(self):
+        @baked
+        def inline(code):
+            return h.Script(code)
+
+        with pytest.raises(StarioError, match="would end the element early"):
+            inline("</script>")
+        with pytest.raises(StarioError, match="would end the element early"):
+            inline('x("</SCRIPT >")')
+        with pytest.raises(StarioError, match="would end the element early"):
+            inline("<!-- x -->")
+
+    def test_style_parameter_is_verbatim_and_checked(self):
+        @baked
+        def sheet(css):
+            return h.Style(css)
+
+        assert render(sheet("a > b { color: red; }")) == (
+            "<style>a > b { color: red; }</style>"
+        )
+        with pytest.raises(StarioError, match="would end the element early"):
+            sheet("</style><script>x()</script>")
+
+    def test_breakout_check_joins_literal_text_and_values(self):
+        # Literal text around the slot is part of the same run on the wire.
+        @baked
+        def inline(code):
+            return h.Script("</scr", code, "ipt>")
+
+        assert render(inline("X")) == "<script></scrXipt></script>"
+        with pytest.raises(StarioError, match="would end the element early"):
+            inline("")
+
+        @baked
+        def pair(a, b):
+            return h.Script(a, b)
+
+        assert render(pair("a<", "b")) == "<script>a<b</script>"
+        with pytest.raises(StarioError, match="would end the element early"):
+            pair("</scr", "ipt>")
+
+    def test_literal_breakout_is_rejected_at_decoration(self):
+        with pytest.raises(StarioError, match="would end the element early"):
+
+            @baked
+            def inline(code):
+                return h.Script("</script>", code)
+
+    def test_raw_slot_value_ladder(self):
+        @baked
+        def inline(code):
+            return h.Script("var x = ", code, ";")
+
+        assert render(inline(None)) == "<script>var x = ;</script>"
+        assert render(inline(42)) == "<script>var x = 42;</script>"
+        assert render(inline(["a", "<", "b"])) == "<script>var x = a<b;</script>"
+        assert render(inline(SafeString("'<'"))) == "<script>var x = '<';</script>"
+
+    def test_raw_text_attributes_and_siblings_still_escape(self):
+        @baked
+        def page(src, code, label):
+            return h.Div(h.Script({"src": src}, code), h.P(label))
+
+        assert render(page('/a.js?x="1"&y', "a<b", "<p>")) == (
+            '<div><script src="/a.js?x=&quot;1&quot;&amp;y">a<b</script>'
+            "<p>&lt;p&gt;</p></div>"
+        )
+
+    def test_parameter_in_raw_run_counts_as_used(self):
+        # `code` is used inside the raw run; only `unused` is reported.
+        with pytest.raises(StarioError, match="'unused' is never used") as info:
+
+            @baked
+            def inline(code, unused):
+                return h.Script(code)
+
+        assert info.value.context["parameter"] == "unused"
+
+    def test_unfilled_raw_slot_cannot_be_rendered(self):
+        def builder(code):
+            return h.Script("x = ", code)
+
+        tree = builder(BakeSlot("code"))
+        with pytest.raises(StarioError, match="Unfilled @baked slot") as info:
+            render(tree)
+        assert info.value.context["slot_name"] == "code"
+
+
 class TestBakedDifferential:
     """baked(f)(args) must render byte-identical to the undecorated f(args)."""
 
@@ -992,6 +1145,25 @@ class TestTrustBoundaries:
     def test_script_safestring_children_are_verbatim(self):
         result = render(h.Script(SafeString("if (a < b) { go(); }")))
         assert result == "<script>if (a < b) { go(); }</script>"
+
+    def test_raw_text_breakout_check_runs_over_the_joined_children(self):
+        # The wire concatenates children, so a closing tag split across
+        # two str children (or a list, or a nested list) is still a breakout.
+        with pytest.raises(StarioError, match="would end the element early"):
+            h.Script("</scr", "ipt>")
+        with pytest.raises(StarioError, match="would end the element early"):
+            h.Script(["</scr", "ipt>"])
+        with pytest.raises(StarioError, match="would end the element early"):
+            h.Script("x = 1;", ["y", ["</scr", "ipt>"]])
+        with pytest.raises(StarioError, match="would end the element early"):
+            h.Style("</sty", "le>")
+
+    def test_raw_text_safestring_separates_runs(self):
+        # A SafeString is the caller's responsibility and sits between the
+        # two str pieces on the wire, so "</scr" + SafeString + "ipt>" is
+        # not a breakout.
+        result = render(h.Script("</scr", SafeString("x"), "ipt>"))
+        assert result == "<script></scrxipt></script>"
 
 
 class TestRenderEdgeCases:

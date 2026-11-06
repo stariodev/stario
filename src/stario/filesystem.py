@@ -99,6 +99,19 @@ COMPRESSION: Final = CompressionConfig(
 )
 HASH_CHUNK: Final = 4 << 20
 STREAM_SPAN: Final = 1 << 20
+# Media types that can execute or render active content in the browser.
+_ACTIVE_TYPES: Final = frozenset(
+    {
+        b"text/html",
+        b"application/xhtml+xml",
+        b"image/svg+xml",
+        b"text/xml",
+        b"application/xml",
+        b"text/javascript",
+        b"application/javascript",
+        b"application/ecmascript",
+    }
+)
 
 
 UNSAT: Final = object()
@@ -290,11 +303,8 @@ def _etag(base: str, encoding: bytes | None) -> bytes:
     return f'"{base}-{encoding.decode()}"'.encode()
 
 
-def _stat_etag(stat: stat_result, encoding: bytes | None) -> bytes:
-    return _etag(
-        f"{stat.st_dev:x}-{stat.st_ino:x}-{stat.st_mtime_ns:x}-{stat.st_size:x}",
-        encoding,
-    )
+def _stat_validator(stat: stat_result) -> str:
+    return f"{stat.st_dev:x}-{stat.st_ino:x}-{stat.st_mtime_ns:x}-{stat.st_size:x}"
 
 
 def _last_modified(modified: float) -> bytes:
@@ -710,12 +720,7 @@ class _Mount:
         return _Cached(content_type, content, identity, encodings)
 
     def _emit_cached(
-        self,
-        context: Context,
-        writer: Writer,
-        cached: _Cached,
-        *,
-        encoding: bytes | None,
+        self, writer: Writer, cached: _Cached, *, encoding: bytes | None
     ) -> None:
         headers = writer.headers
         if encoding is None:
@@ -756,6 +761,70 @@ class _Mount:
 
     async def __call__(self, context: Context, writer: Writer) -> None:
         raise NotImplementedError
+
+    async def _serve(
+        self,
+        context: Context,
+        writer: Writer,
+        *,
+        validator: str,
+        size: int,
+        modified: float,
+        source: Path,
+        cached: _Cached | None,
+        fd: int | None = None,
+        untrusted: bool = False,
+    ) -> None:
+        """Answer GET/HEAD for one file: validators, then 304, 416, 206, or 200.
+
+        `validator` is the ETag base (digest or stat identity). `cached` holds
+        the body and its precompressed variants; without it `fd` is streamed.
+        """
+        request = context.req.headers
+        identity_etag = _etag(validator, None)
+        byte_range = _parse_range(_range_header(request, identity_etag, modified), size)
+        encodings = None if cached is None else cached.encodings
+        # Range is always identity bytes, so negotiate encoding only for a full reply.
+        encoding = (
+            None
+            if byte_range is not None or not encodings
+            else negotiate_content_encoding(
+                request.unsafe_get(b"accept-encoding", b""),
+                encodings,
+                CODECS,
+            )
+        )
+        etag = identity_etag if encoding is None else _etag(validator, encoding)
+        content_type = (
+            cached.content_type
+            if cached is not None
+            else self._content_types.get(source.suffix.lower(), DEFAULT_TYPE)
+        )
+        self._headers(writer, content_type, etag, modified, encodings)
+        if untrusted:
+            headers = writer.headers
+            headers.unsafe_set(b"content-security-policy", b"sandbox")
+            media_type = content_type.split(b";", 1)[0].strip().lower()
+            if media_type in _ACTIVE_TYPES:
+                headers.unsafe_set(b"content-disposition", b"attachment")
+        if _fresh(request, etag, modified):
+            writer.write_headers(304).end()
+            return
+        if byte_range is not None:
+            await self._write_range(
+                context,
+                writer,
+                byte_range,
+                size=size,
+                body=None if cached is None else cached.content,
+                source=fd,
+            )
+            return
+        if cached is not None:
+            self._emit_cached(writer, cached, encoding=encoding)
+            return
+        assert fd is not None
+        await self._emit_file(context, writer, fd, size)
 
     async def _write_range(
         self,
@@ -919,37 +988,15 @@ class Assets(_Mount):
         hashed = self._hashed.get(path)
         cached = self._cache.get(path)
         if cached is not None and hashed is not None:
-            request = context.req.headers
-            identity_etag = _etag(hashed.digest, None)
-            modified = hashed.modified_ns / 1_000_000_000
-            byte_range = _parse_range(
-                _range_header(request, identity_etag, modified), len(cached.content)
+            await self._serve(
+                context,
+                writer,
+                validator=hashed.digest,
+                size=len(cached.content),
+                modified=hashed.modified_ns / 1_000_000_000,
+                source=hashed.source,
+                cached=cached,
             )
-            encodings = cached.encodings
-            encoding = (
-                None
-                if byte_range is not None or not encodings
-                else negotiate_content_encoding(
-                    request.unsafe_get(b"accept-encoding", b""),
-                    encodings,
-                    CODECS,
-                )
-            )
-            etag = identity_etag if encoding is None else _etag(hashed.digest, encoding)
-            self._headers(writer, cached.content_type, etag, modified, encodings)
-            if _fresh(request, etag, modified):
-                writer.write_headers(304).end()
-                return
-            if byte_range is not None:
-                await self._write_range(
-                    context,
-                    writer,
-                    byte_range,
-                    size=len(cached.content),
-                    body=cached.content,
-                )
-                return
-            self._emit_cached(context, writer, cached, encoding=encoding)
             return
         if hashed is not None:
             await self._stream_pinned(context, writer, hashed)
@@ -975,44 +1022,18 @@ class Assets(_Mount):
             ):
                 _not_found(writer)
                 return
-            request = context.req.headers
-            etag = _etag(entry.digest, None)
-            modified = entry.modified_ns / 1_000_000_000
-            byte_range = _parse_range(
-                _range_header(request, etag, modified), entry.size
-            )
-            self._headers(
+            await self._serve(
+                context,
                 writer,
-                self._content_types.get(entry.source.suffix.lower(), DEFAULT_TYPE),
-                etag,
-                modified,
+                validator=entry.digest,
+                size=entry.size,
+                modified=entry.modified_ns / 1_000_000_000,
+                source=entry.source,
+                cached=None,
+                fd=fd,
             )
-            if _fresh(request, etag, modified):
-                writer.write_headers(304).end()
-                return
-            if byte_range is not None:
-                await self._write_range(
-                    context, writer, byte_range, size=entry.size, source=fd
-                )
-                return
-            await self._emit_file(context, writer, fd, entry.size)
         finally:
             os.close(fd)
-
-
-# Media types that can execute or render active content in the browser.
-_ACTIVE_TYPES: Final = frozenset(
-    {
-        b"text/html",
-        b"application/xhtml+xml",
-        b"image/svg+xml",
-        b"text/xml",
-        b"application/xml",
-        b"text/javascript",
-        b"application/javascript",
-        b"application/ecmascript",
-    }
-)
 
 
 class Files(_Mount):
@@ -1122,56 +1143,17 @@ class Files(_Mount):
                 # Another event-loop thread may have evicted it already.
                 self._cache.pop(path, None)
                 entry = None
-            size = file_stat.st_size
-            modified = file_stat.st_mtime
-            request = context.req.headers
-            identity_etag = _stat_etag(file_stat, None)
-            byte_range = _parse_range(
-                _range_header(request, identity_etag, modified), size
+            await self._serve(
+                context,
+                writer,
+                validator=_stat_validator(file_stat),
+                size=file_stat.st_size,
+                modified=file_stat.st_mtime,
+                source=source,
+                cached=entry,
+                fd=fd,
+                untrusted=self.untrusted,
             )
-            encodings = None if entry is None else entry.encodings
-            # Range is always identity bytes, so negotiate encoding only for a full reply.
-            encoding = (
-                None
-                if byte_range is not None or not encodings
-                else negotiate_content_encoding(
-                    request.unsafe_get(b"accept-encoding", b""),
-                    encodings,
-                    CODECS,
-                )
-            )
-            etag = (
-                identity_etag if encoding is None else _stat_etag(file_stat, encoding)
-            )
-            content_type = (
-                entry.content_type
-                if entry is not None
-                else self._content_types.get(source.suffix.lower(), DEFAULT_TYPE)
-            )
-            self._headers(writer, content_type, etag, modified, encodings)
-            if self.untrusted:
-                headers = writer.headers
-                headers.unsafe_set(b"content-security-policy", b"sandbox")
-                media_type = content_type.split(b";", 1)[0].strip().lower()
-                if media_type in _ACTIVE_TYPES:
-                    headers.unsafe_set(b"content-disposition", b"attachment")
-            if _fresh(request, etag, modified):
-                writer.write_headers(304).end()
-                return
-            if byte_range is not None:
-                await self._write_range(
-                    context,
-                    writer,
-                    byte_range,
-                    size=size,
-                    body=None if entry is None else entry.content,
-                    source=fd,
-                )
-                return
-            if entry is not None:
-                self._emit_cached(context, writer, entry, encoding=encoding)
-                return
-            await self._emit_file(context, writer, fd, size)
         finally:
             os.close(fd)
 

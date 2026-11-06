@@ -1237,15 +1237,19 @@ class TestPassthrough:
 
 class TestThreadSafety:
     def test_concurrent_mutation_and_render(self, monkeypatch):
+        # Each thread does a fixed amount of work. With open-ended producers
+        # the renderer could be starved of the GIL for a while, the backlog
+        # of finished traces grew into the tens of thousands, and the first
+        # render then formatted all of it under the lock: seconds locally,
+        # past the test timeout on a slow runner.
         _patch_terminal(monkeypatch)
         out = io.StringIO()
         tracer = _manual_tracer(out)
         errors: list[BaseException] = []
-        stop = threading.Event()
 
         def hammer(i: int) -> None:
             try:
-                while not stop.is_set():
+                for _ in range(200):
                     root = tracer.create(f"worker.{i}")
                     root.start()
                     root.attr("k", "v")
@@ -1260,15 +1264,15 @@ class TestThreadSafety:
         threads = [threading.Thread(target=hammer, args=(i,)) for i in range(4)]
         for t in threads:
             t.start()
-        deadline = time.monotonic() + 0.3
-        while time.monotonic() < deadline:
+        while any(t.is_alive() for t in threads):
             tracer._render()
-        stop.set()
         for t in threads:
             t.join()
+        tracer._render()
 
         assert not errors
-        assert "worker.0" in out.getvalue()
+        rendered = out.getvalue()
+        assert all(f"worker.{i}" in rendered for i in range(4))
 
 
 class TestShutdown:
