@@ -325,8 +325,17 @@ shares it safely.
 Unsafe: `app.add` / `use` concurrent with lookups. Register routes in
 bootstrap.
 
-The `stario.http.compression` accept-encoding LRU and `markup.escape`
-caches are the same story — OK.
+The `stario.http.compression` accept-encoding LRU and the `lru_cache` on
+`markup.escape.validate_attribute_key` are the same story — OK.
+
+Two plain-dict caches are safe by construction rather than by a lock:
+`_VALID_KEYS` in `stario_cython/markup.pyx` (attribute name → itself) and
+`_CLASSES_CACHE` in `markup/attributes.py` (class token tuple → fragment).
+Both are bounded by refusing new entries past a cap, never by clearing in
+place, and reads take a strong reference (`dict.get`), so a lookup can
+never hold a borrowed pointer to an entry another thread frees. Keep both
+rules if you touch them; a `clear()` or a `PyDict_GetItem` would reopen
+the race under free threading.
 
 The compiled trie is C structs plus read-only dicts; concurrent reads
 need no lock.

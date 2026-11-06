@@ -34,8 +34,16 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 - `h.Script` and `h.Style` are raw-text elements: `str` children are sent
   as they are, because the browser never decodes entities inside them, so
   `h.Script("if (a < b) go()")` now works. Text that would end the element
-  early (`</script`, `<!--` in a script, `</style`) raises `StarioError`.
-  `Tag(name, raw_text=True)` marks a custom raw-text tag.
+  early (`</script`, `<!--` in a script, `</style`) raises `StarioError`;
+  the check runs once over the joined children, so `h.Script("</scr",
+  "ipt>")` fails like `h.Script("</script>")` does. A `@baked` parameter
+  inside `h.Script` or `h.Style` is spliced verbatim too, with the same
+  joined check on every call. `Tag(name, raw_text=True)` marks a custom
+  raw-text tag.
+- The compiled attribute-name cache and the `classes()` fragment cache
+  stop filling at their cap instead of being cleared in place, and the
+  name cache reads with a strong reference, so a build on one thread can
+  no longer free an entry another thread is reading under free threading.
 - `data.on("myEvent", …)` emits `data-on:my-event__case.camel`, and
   `data.class_("myClass", …)` emits `data-class:my-class__case.camel`
   (`__case.pascal` for PascalCase), so the browser's lowercasing of the
@@ -178,6 +186,9 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
   per body chunk. A 1 GB upload is about a thousand executor jobs instead
   of thousands. The `max_file_size` check runs per chunk, and a cancelled
   request still waits for the thread, as before.
+- Internal: `Files` and `Assets` answer a request through one `_Mount._serve`
+  pipeline (validators, `Range`, content-coding, then 304 / 416 / 206 / 200)
+  instead of three copies of it. The response bytes are unchanged.
 
 ### Added
 
@@ -200,6 +211,7 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
   writer encodes responses itself. `compress_bytes(config, encoding, data)`
   encodes one body for precompressed files, `Headers.unsafe_merge_vary(token)`
   replaces `merge_vary`, and the decoders are in `stario_cython.codecs`.
+- `stario.datastar.format.case_modifier`, which had no caller.
 
 ## 5.4.0 - 2026-11-05
 

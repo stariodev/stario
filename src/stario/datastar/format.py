@@ -529,8 +529,3 @@ def to_kebab_key(key: str) -> str:
         else:
             parts.append(c)
     return "".join(parts)
-
-
-def case_modifier(case: Case) -> str:
-    """Return the explicit Datastar case modifier, omitting the camel default."""
-    return "" if case == "camel" else "__case." + case

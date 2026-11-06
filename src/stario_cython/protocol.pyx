@@ -684,6 +684,11 @@ cdef class Connections:
     # 0 means unlimited; `rejected` counts connections refused at the cap.
     cdef public Py_ssize_t max_connections
     cdef public Py_ssize_t rejected
+    # ``Task(coro, loop=..., eager_start=...)`` kwargs, built once per loop
+    # and borrowed by every protocol on it (``_bind_task_kwargs``).
+    cdef object _task_loop
+    cdef dict _task_kw_eager
+    cdef dict _task_kw_lazy
 
     def __cinit__(self):
         self._live = []
@@ -697,6 +702,9 @@ cdef class Connections:
         self._date_fixed = False
         self.max_connections = 0
         self.rejected = 0
+        self._task_loop = None
+        self._task_kw_eager = None
+        self._task_kw_lazy = None
 
     def __init__(self, *, sweep_interval=1.0, max_connections=0, date=None):
         interval = float(sweep_interval)
@@ -799,6 +807,13 @@ cdef class Connections:
 
     cdef void _schedule(self):
         self._tick_handle = self._loop.call_later(self._interval, self._tick)
+
+    cdef void _bind_task_kwargs(self, object loop):
+        """Build the task kwargs for ``loop`` once; later protocols reuse them."""
+        if self._task_loop is not loop:
+            self._task_loop = loop
+            self._task_kw_eager = {"loop": loop, "eager_start": True}
+            self._task_kw_lazy = {"loop": loop, "eager_start": False}
 
     cdef void _connection_opened(self, CHttpProtocol proto):
         if proto._live_index >= 0:
@@ -910,6 +925,7 @@ cdef class CHttpProtocol(HttpConnection):
     cdef list _write_waiters
     # Bound once per connection: skips a method lookup on every request.
     cdef object _t_is_closing
+    # Borrowed from ``Connections``: one pair of dicts per loop.
     cdef dict _task_kw_eager
     cdef dict _task_kw_lazy
     cdef object _task_factory
@@ -1000,17 +1016,19 @@ cdef class CHttpProtocol(HttpConnection):
         self.loop = loop
         self.app = app
         self.tracer = tracer
-        # Task(coro, loop=..., eager_start=...) without building kwargs per call.
-        # A loop with a task factory set gets create_task() so the factory
-        # is honoured; the default fast path builds the Task directly.
-        self._task_kw_eager = {"loop": loop, "eager_start": True}
-        self._task_kw_lazy = {"loop": loop, "eager_start": False}
+        self.connections = <Connections>connections
+        # Task(coro, loop=..., eager_start=...) without building kwargs per
+        # call: the dicts live on the loop's Connections. A loop with a task
+        # factory set gets create_task() so the factory is honoured; the
+        # default fast path builds the Task directly.
+        self.connections._bind_task_kwargs(loop)
+        self._task_kw_eager = self.connections._task_kw_eager
+        self._task_kw_lazy = self.connections._task_kw_lazy
         self._task_factory = loop.get_task_factory()
         self.noop_span = (
             tracer.create("request") if isinstance(tracer, NoOpTracer) else None
         )
         self.compression = compression
-        self.connections = <Connections>connections
         self._app_state = getattr(app, "_app_state", None)
         # Protocols are built on the loop's thread, so this is the same set
         # App.tasks returns here; binding it skips a threading.local lookup
