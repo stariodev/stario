@@ -222,9 +222,26 @@ class TestReadForm:
             )
         assert r.text == "title=t"
 
-    async def test_empty_file_parts_count_toward_max_files(self):
-        # max_files=2 in `echo`; each part would otherwise open a spool.
+    async def test_empty_file_inputs_count_as_fields_not_files(self):
+        # `echo` allows max_fields=3 and max_files=2. Three empty file inputs
+        # are not files (no spool is opened for them) and the form posts;
+        # four exceed max_fields, like four empty text fields would.
         body = multipart_body(*[(file_part("photo", ""), b"")] * 3)
+        async with TestClient(form_app()) as client:
+            r = await client.post(
+                "/form", content=body, headers={"content-type": MULTIPART}
+            )
+            assert (r.status_code, r.text) == (200, "")
+            body = multipart_body(*[(file_part("photo", ""), b"")] * 4)
+            r = await client.post(
+                "/form", content=body, headers={"content-type": MULTIPART}
+            )
+        assert (r.status_code, r.text) == (413, "Too many form fields")
+
+    async def test_bytes_under_an_empty_filename_are_a_file(self):
+        # A part with filename="" that carries bytes opens a spool when the
+        # first byte arrives and counts toward max_files.
+        body = multipart_body(*[(file_part("photo", ""), b"x")] * 3)
         async with TestClient(form_app()) as client:
             r = await client.post(
                 "/form", content=body, headers={"content-type": MULTIPART}

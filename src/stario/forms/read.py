@@ -54,9 +54,9 @@ async def read_form(
     - `max_fields` / `max_field_size`: count of text fields in a body, and
       bytes of one multipart text field. GET reads the query, which the
       header limit of the server already bounds.
-    - `max_files` / `max_file_size`: count of file parts in a body (an empty
-      file input counts), and bytes of one file (default: no limit below
-      `max_size`).
+    - `max_files` / `max_file_size`: count of files in a body, and bytes of
+      one file (default: no limit below `max_size`). A file input left empty
+      is not a file; it counts toward `max_fields` like an empty field.
     - `spool_size`: bytes of one file kept in memory before it moves to disk.
 
     Raise `RequestBodyError`: 400 for a malformed body, 413 past a limit, 415
@@ -131,10 +131,23 @@ async def _read_multipart(
     fields: list[tuple[str, str]] = []
     files: list[tuple[str, UploadFile]] = []
     file_parts = 0
+    empty_parts = 0
     part: PartStart | None = None
     text = bytearray()
     spool: SpooledTemporaryFile[bytes] | None = None
     size = 0
+
+    def open_spool() -> SpooledTemporaryFile[bytes]:
+        # Counted when the spool opens, so a flood of empty file parts
+        # cannot allocate one spool each; a real file costs one of
+        # `max_files` whether or not it is kept.
+        nonlocal file_parts
+        file_parts += 1
+        if file_parts > max_files:
+            raise RequestBodyError(413, "Too many files")
+        # Owned by the UploadFile (or closed by _discard), not a block.
+        return SpooledTemporaryFile(max_size=spool_size, mode="w+b")
+
     try:
         async for chunk in req.stream(max_size=max_size):
             for event in parser.feed(chunk):
@@ -145,38 +158,38 @@ async def _read_multipart(
                         if len(fields) >= max_fields:
                             raise RequestBodyError(413, "Too many form fields")
                         text.clear()
+                    elif not _filename(event.filename):
+                        # A file input left empty (`filename=""`): no spool
+                        # unless bytes arrive, and bounded like a field, so
+                        # a form with many optional file inputs still posts.
+                        empty_parts += 1
+                        if len(fields) + empty_parts > max_fields:
+                            raise RequestBodyError(413, "Too many form fields")
                     else:
-                        # Count parts as they start: an empty part is never kept.
-                        file_parts += 1
-                        if file_parts > max_files:
-                            raise RequestBodyError(413, "Too many files")
-                        # Owned by the UploadFile (or closed by _discard), not a block.
-                        spool = SpooledTemporaryFile(  # noqa: SIM115
-                            max_size=spool_size, mode="w+b"
-                        )
+                        spool = open_spool()
                 elif isinstance(event, PartEnd):
                     assert part is not None
-                    if spool is None:
+                    if part.filename is None:
                         fields.append((part.name, text.decode("utf-8", "replace")))
-                    else:
-                        filename = _filename(part.filename or "")
-                        if not filename and size == 0:
-                            spool.close()
-                        else:
-                            spool.seek(0)
-                            upload = UploadFile(
-                                filename, part.content_type, spool, size
-                            )
-                            files.append((part.name, upload))
+                    elif spool is not None:
+                        spool.seek(0)
+                        upload = UploadFile(
+                            _filename(part.filename), part.content_type, spool, size
+                        )
+                        files.append((part.name, upload))
                         spool = None
                     part = None
                 else:
+                    assert part is not None
                     size += len(event)
-                    if spool is None:
+                    if part.filename is None:
                         if size > max_field_size:
                             raise RequestBodyError(413, "Form field too large")
                         text += event
                     else:
+                        if spool is None:
+                            # Bytes under an empty filename: a file after all.
+                            spool = open_spool()
                         if max_file_size is not None and size > max_file_size:
                             raise RequestBodyError(413, "File too large")
                         if size > spool_size:

@@ -93,9 +93,12 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
   file under `max_file_size` was read into memory before the budget
   applied, and every file was hashed from disk a second time. A file
   pinned by `href()` before `load()` is still verified against the disk.
-- `read_form`'s `max_files` counts every file part of a multipart body,
-  an empty file input included. Before, an empty part did not count, so a
-  body could carry any number of them, each opening a temporary file.
+- `read_form` opens a file spool only when a file part has a filename or
+  carries bytes. A file input left empty (`filename=""`) counts toward
+  `max_fields` like an empty field, not toward `max_files`, so a form with
+  many optional file inputs still posts. Before, each empty part allocated
+  and closed a spool and never counted, so an unlimited number of them was
+  accepted.
 
 ### Removed
 

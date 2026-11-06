@@ -302,7 +302,9 @@ async def main(only: str | None) -> None:
     if only in (None, "await_once"):
         show("await_once", await bench_await_once(app))
     if only in (None, "traced_json"):
-        with JsonTracer(path="/dev/null") as tracer:
+        # A queue deep enough that the writer thread never drops a span
+        # while the request loop runs ahead of it.
+        with JsonTracer(path="/dev/null", max_pending_spans=1 << 20) as tracer:
             show("traced_json", await bench_eager(app, EAGER["plaintext"], tracer))
             await asyncio.sleep(0.5)
     if only in (None, "sse_patch"):
