@@ -188,6 +188,30 @@ def escape_attribute_value(str s not None):
     return c_escape_attr(s)
 
 
+def check_raw_text(str text not None, str tag not None):
+    """Raise if ``text`` could end a raw-text element named ``tag`` early."""
+    _check_raw_text(text, tag)
+
+
+cdef int _check_raw_text(object text, object tag) except -1:
+    cdef object lowered = text.lower()
+    cdef bint script = tag == "script"
+    if f"</{tag}" in lowered or (script and "<!--" in lowered):
+        raise StarioError(
+            f"Text inside <{tag}> would end the element early",
+            context={"tag": tag, "text": text[:100]},
+            help_text=(
+                f"Raw text in <{tag}> is sent verbatim, so it must "
+                f"not contain '</{tag}'"
+                + (" or '<!--'" if script else "")
+                + ". Build it differently, or pass a SafeString if you "
+                "control the bytes."
+            ),
+            example='h.Script("const tag = \'<\\\\/script>\';")',
+        )
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Tag
 
@@ -277,7 +301,6 @@ cdef class Tag:
     cdef readonly str no_children_close
     cdef readonly object empty
     cdef bint _void
-    cdef bint _script
 
     def __init__(
         self,
@@ -320,7 +343,6 @@ cdef class Tag:
         self.empty_mode = empty
         self.raw_text = raw_text
         self._void = empty == "void"
-        self._script = name == "script"
         self.tag_start = prefix + "<" + name
         self.tag_start_no_attrs = self.tag_start + ">"
         self.closing_tag = f"</{name}>"
@@ -333,29 +355,47 @@ cdef class Tag:
     def __repr__(self):
         return self._repr()
 
-    cdef object _raw_text_child(self, object child):
-        """`str` inside a raw-text element: verbatim, unless it could close the element."""
+    cdef int _raw_walk(self, object child, list run, list out) except -1:
+        """Collect raw-text content in document order.
+
+        ``str`` pieces build up one *run*; lists are flattened into it.
+        Anything else (a ``SafeString`` the caller vouches for, a number,
+        ``None``) ends the run and passes through untouched.
+        """
         cdef object child_type = type(child)
-        cdef object lowered
         if child_type is str:
-            lowered = child.lower()
-            if f"</{self.name}" in lowered or (self._script and "<!--" in lowered):
-                raise StarioError(
-                    f"Text inside <{self.name}> would end the element early",
-                    context={"tag": self.name, "text": child[:100]},
-                    help_text=(
-                        f"Raw text in <{self.name}> is sent verbatim, so it must "
-                        f"not contain '</{self.name}'"
-                        + (" or '<!--'" if self._script else "")
-                        + ". Build it differently, or pass a SafeString if you "
-                        "control the bytes."
-                    ),
-                    example='h.Script("const tag = \'<\\\\/script>\';")',
-                )
-            return _SafeString(child)
-        if child_type is list:
-            return [self._raw_text_child(item) for item in child]
-        return child
+            PyList_Append(run, child)
+        elif child_type is list:
+            for item in <list>child:
+                self._raw_walk(item, run, out)
+        else:
+            self._raw_flush(run, out)
+            if child is not None:
+                PyList_Append(out, child)
+        return 0
+
+    cdef int _raw_flush(self, list run, list out) except -1:
+        """Close a run: check it once, joined, and emit it as one child.
+
+        The wire concatenates children, so ``"</scr"`` next to ``"ipt>"``
+        must fail like ``"</script>"`` does.
+        """
+        cdef object text
+        if not run:
+            return 0
+        text = "".join(run)
+        _check_raw_text(text, self.name)
+        PyList_Append(out, _SafeString(text))
+        del run[:]
+        return 0
+
+    cdef list _raw_text_children(self, list children):
+        cdef list run = []
+        cdef list out = []
+        for child in children:
+            self._raw_walk(child, run, out)
+        self._raw_flush(run, out)
+        return out
 
     cdef int _add_mapping(
         self, object mapping, list attribute_parts, bint* has_slots
@@ -493,7 +533,7 @@ cdef class Tag:
             )
 
         if child_elements is not None and self.raw_text:
-            child_elements = [self._raw_text_child(c) for c in child_elements]
+            child_elements = self._raw_text_children(child_elements)
 
         # Build the final leaf or branch node (always an Element except cached empty).
         if not attribute_parts and child_elements is None:

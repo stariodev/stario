@@ -993,6 +993,25 @@ class TestTrustBoundaries:
         result = render(h.Script(SafeString("if (a < b) { go(); }")))
         assert result == "<script>if (a < b) { go(); }</script>"
 
+    def test_raw_text_breakout_check_runs_over_the_joined_children(self):
+        # The wire concatenates children, so a closing tag split across
+        # two str children (or a list, or a nested list) is still a breakout.
+        with pytest.raises(StarioError, match="would end the element early"):
+            h.Script("</scr", "ipt>")
+        with pytest.raises(StarioError, match="would end the element early"):
+            h.Script(["</scr", "ipt>"])
+        with pytest.raises(StarioError, match="would end the element early"):
+            h.Script("x = 1;", ["y", ["</scr", "ipt>"]])
+        with pytest.raises(StarioError, match="would end the element early"):
+            h.Style("</sty", "le>")
+
+    def test_raw_text_safestring_separates_runs(self):
+        # A SafeString is the caller's responsibility and sits between the
+        # two str pieces on the wire, so "</scr" + SafeString + "ipt>" is
+        # not a breakout.
+        result = render(h.Script("</scr", SafeString("x"), "ipt>"))
+        assert result == "<script></scrxipt></script>"
+
 
 class TestRenderEdgeCases:
     def test_decimal_child_is_rejected(self):
