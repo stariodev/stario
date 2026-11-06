@@ -61,8 +61,8 @@ uv run benchmarks/server/inproc.py plaintext  # one case
 ```
 
 Use it to compare two checkouts on the same machine; a change of a few
-hundred nanoseconds on the plaintext case is visible. The audit notes in
-[`docs/audit-2026-11.md`](../docs/audit-2026-11.md) record a baseline.
+hundred nanoseconds on the plaintext case is visible. Record both numbers
+in a change that touches the request path or the markup builder.
 
 ## HTTP server (`server/`)
 
