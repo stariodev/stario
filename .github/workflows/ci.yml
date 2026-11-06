@@ -38,7 +38,7 @@ jobs:
       - name: GIL is off on the free-threaded build
         if: matrix.python-version == '3.14t'
         run: |
-          uv run python -c "import sys, stario_cython.exchange, stario_cython.protocol; assert not sys._is_gil_enabled(), 'an extension re-enabled the GIL'"
+          uv run python -c "import sys, stario_cython.exchange, stario_cython.protocol, stario_cython.markup, stario_cython.codecs, stario_cython.xxh64; assert not sys._is_gil_enabled(), 'an extension re-enabled the GIL'"
       - run: uv run ruff check src tests setup.py
       - run: uv run ruff format --check src tests setup.py
       - run: uv run pyrefly check
