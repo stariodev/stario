@@ -16,6 +16,8 @@ jobs:
         # STARIO_THREADS>1 are only real if the suite runs with the GIL off.
         python-version: ["3.12", "3.13", "3.14", "3.14t"]
     runs-on: ubuntu-latest
+    # A hung apt mirror or build stops here, not at the 6-hour default.
+    timeout-minutes: 30
     env:
       # Ubuntu's 1.59 is new enough to test against; release wheels bundle 1.70.
       STARIO_ALLOW_OLD_NGHTTP2: "1"

@@ -57,7 +57,7 @@ jobs:
         include:
           - os: ubuntu-latest
           - os: ubuntu-24.04-arm
-          - os: macos-14
+          - os: macos-15
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -105,7 +105,14 @@ jobs:
         run: |
           awk -v v="${GITHUB_REF_NAME#v}" '$0 == "## " v || index($0, "## " v " ") == 1 {f = 1; next} /^## / {f = 0} f' CHANGELOG.md > notes.md
           test -s notes.md
-      - name: Create the GitHub release
+      # A release made by hand before the workflow keeps its tag; only the
+      # title and notes are replaced.
+      - name: Create the GitHub release or update its notes
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --verify-tag --title "${GITHUB_REF_NAME#v}" --notes-file notes.md
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --title "${GITHUB_REF_NAME#v}" --notes-file notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "${GITHUB_REF_NAME#v}" --notes-file notes.md
+          fi
