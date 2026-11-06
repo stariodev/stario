@@ -1,5 +1,6 @@
 """Unit tests for compression negotiation and one-shot encoding helpers."""
 
+import os
 import zlib
 from collections.abc import Callable
 from pathlib import Path
@@ -177,7 +178,11 @@ def test_linked_brotli_decoder_rejects_invalid_block_switch() -> None:
     from stario_cython.codecs import BrotliDecoder, brotli_decoder_version
 
     version = brotli_decoder_version()
-    assert _brotli_has_cve_2026_111497_fix(version), version
+    fixed = _brotli_has_cve_2026_111497_fix(version)
+    if not fixed and os.environ.get("STARIO_ALLOW_OLD_BROTLI") == "1":
+        # The build-time escape hatch for a distro Brotli; CI never sets it.
+        pytest.skip(f"STARIO_ALLOW_OLD_BROTLI=1: linked Brotli {version} lacks the fix")
+    assert fixed, version
 
     invalid = bytes.fromhex("200010414141fcffff07002228f00b60f7f41f000000")
     with pytest.raises(StarioError, match="brotli decompression failed"):

@@ -126,6 +126,25 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
   naive tree-per-call page now renders in the same time as a compiled
   Jinja2 template (`benchmarks/html/compare.py`: 127 µs against 121 µs).
   `Tag.empty_mode` is the name of the `empty=` setting on a tag.
+- `Files.href()` builds the URL without reading the disk. Before, it
+  resolved the path and checked for a regular file: about ten syscalls on
+  the event loop for each call, so a page that listed 200 uploads blocked
+  the loop for 2000 of them. A missing file, a directory, or an uncontained
+  symlink is a 404 on GET, as before. A hidden segment still raises unless
+  `include_hidden=True`.
+- `Files` and `Assets` resolve the real path of the directory once, on the
+  first request, not on every request. It is resolved again only when a
+  served file no longer lies under it, as after a re-pointed directory
+  symlink.
+- `Relay` keeps the subscribers of a pattern in an insertion-ordered dict,
+  so leaving is O(1) instead of a rebuild of the bucket under the registry
+  lock. 2000 subscribers of one pattern leaving at shutdown no longer costs
+  O(N²). Delivery order is unchanged.
+- `read_form` gathers the chunks of an upload that moved to disk and writes
+  them in one thread hop per 1 MiB, or at the end of the part, not one hop
+  per body chunk. A 1 GB upload is about a thousand executor jobs instead
+  of thousands. The `max_file_size` check runs per chunk, and a cancelled
+  request still waits for the thread, as before.
 
 ### Added
 

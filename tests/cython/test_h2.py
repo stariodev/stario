@@ -58,6 +58,8 @@ from tests.cython.http import (
 
 async def _curl(*args: str) -> subprocess.CompletedProcess[str]:
     """Run curl without blocking the event loop (the server lives on it)."""
+    if shutil.which("curl") is None:
+        pytest.skip("curl not installed")
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,
@@ -71,6 +73,8 @@ async def _curl(*args: str) -> subprocess.CompletedProcess[str]:
 
 
 def _make_self_signed(dir_path: Path) -> tuple[Path, Path]:
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl not installed")
     cert = dir_path / "cert.pem"
     key = dir_path / "key.pem"
     subprocess.run(
