@@ -4,8 +4,8 @@ A design study with measurements, November 2026. It answers three questions
 the audit left open: how the server should read the clock (sweeps, the
 `Date` header, deadlines), whether handlers need a time dependency such as
 `app.sleep()`, and how the test suite can stop waiting for real timeouts.
-Nothing here is implemented yet except as throwaway prototypes in a
-scratch directory; the numbers come from those.
+Sections 1–5 are the study as written before the change; §7 records what
+landed and what it measured.
 
 ## 1. What exists today
 
@@ -252,3 +252,38 @@ pass, about 15 µs of the 50-row page's 177 µs. Step 11, a compiled
 element builder and render walk, is where the remaining 100+ µs of pure
 Python per page go; `@baked` at 41 µs shows what the same page costs once
 the per-element Python work is gone.
+
+## 7. Status (2026-11-06)
+
+Implemented on this branch:
+
+- `Connections` is the loop's clock: a `cdef list` of live protocols with
+  an index on each protocol (O(1) swap-remove), a `tick()` scheduled from
+  one `loop.call_later` handle only while a connection with timeouts
+  exists, and `c_date()` with the per-second cache. The `Server`'s
+  `_date_tick` coroutine, the `date_box` list, and the protocol's two
+  `call_later` timers (lingering close, GOAWAY grace) are gone; the
+  latter are deadlines on the tick. With timeouts off (the test client) a
+  lingering close closes at once.
+- Deadlines stay "armed as 0.0, filled by the next tick" (§3.1 proposed
+  exact deadlines from the coarse clock; that would tie the C clock to
+  the loop's, which the virtual-time loop replaces, so the existing
+  semantics were kept: never early, at most one tick late, no clock read
+  per request).
+- `stario.testing.VirtualTimeLoop`, applied to every test under
+  `tests/cython` by a `pytest_asyncio_loop_factories` hook.
+
+Measured after the change, same container:
+
+| Measure | Before | After |
+| --- | ---: | ---: |
+| full suite (1528 tests) | 24–32 s | 13.7 s |
+| slowest test | 3.0 s | 0.7 s |
+| `plaintext` µs/req | 1.8 | 1.8 |
+| `traced_json` µs/req | 9.2 | 9.4 |
+| timer wakeups on an idle loop | 1/s | 0 |
+
+The tests that still take 0.3–0.5 s read the socket for a fixed real
+interval (`_collect(reader, buf, 0.8)`) with a wall-clock deadline in the
+test itself; those loops can drop to virtual time later by waiting on a
+condition instead of a duration.

@@ -3,18 +3,21 @@ from collections.abc import Iterator
 from typing import Any
 
 class Connections:
-    """One event loop's live connections plus their timeout sweep."""
+    """One event loop's live connections, their timeout tick, and the clock."""
 
-    server_driven: bool
+    now: float
     max_connections: int
     rejected: int
     def __init__(
         self,
         *,
         sweep_interval: float = 1.0,
-        server_driven: bool = False,
         max_connections: int = 0,
+        date: bytes | None = None,
     ) -> None: ...
+    def pin_date(self, line: bytes) -> None: ...
+    @property
+    def date_line(self) -> bytes: ...
     def add(self, proto: Any) -> None: ...
     def discard(self, proto: Any) -> None: ...
     def __len__(self) -> int: ...
@@ -41,7 +44,6 @@ class HttpProtocol(asyncio.Protocol):
         loop: asyncio.AbstractEventLoop,
         app: Any,
         tracer: Any,
-        date_box: list[bytes],
         compression: Any,
         connections: Connections,
         max_header_bytes: int = ...,

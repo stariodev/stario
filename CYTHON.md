@@ -146,20 +146,26 @@ put a process-global increment on that path.
 
 ## Timeouts
 
-Header, idle, and body-stall share **one** cleanup: the Server's Date tick
-(1s) calls `Connections.sweep(now)`: one `loop.time()`, then one C loop over
-the live protocols. No per-request `TimerHandle`, no stall `call_later` per
-chunk. Without a Server (tests), the registry runs its own sweep task from
-the first connection to the last close.
+Header, idle, body-stall, write-stall, lingering close, and the HTTP/2
+GOAWAY grace share **one** cleanup: `Connections` (one per loop) ticks
+from a single `loop.call_later` handle while it holds a connection with
+timeouts: one `loop.time()`, then one C walk over its live list comparing
+stored deadlines. No Task, no per-request `TimerHandle`, no `call_later`
+per chunk, and no wakeup while idle. The same object serves the `Date`
+header from a per-second cache (one coarse wall-clock read per response,
+reformatted in C only when the second changed; `pin_date()` fixes it for
+tests).
 
 | | |
 | --- | --- |
 | Header | 5s, while headers or a deferred small body are still arriving |
 | Idle | 5s, only when the connection is idle |
 | Body stall | 30s, generation counter on the exchange |
+| Lingering close | 2s after the FIN, then the socket closes |
+| GOAWAY grace | 1s for the shutdown PING ACK, then the final GOAWAY |
 | Pipeline cap | 8 |
-| Tests | `Connections(sweep_interval=0.05)` runs its own sweep task |
-| Off | `HttpProtocol(timeout_cleanup="off")` (tests only) |
+| Tests | `Connections(sweep_interval=0.05, date=...)`, or `sweep(now)` driven by the test; `tests/cython` runs on `stario.testing.VirtualTimeLoop`, so timers fire in virtual time |
+| Off | `HttpProtocol(timeout_cleanup="off")` (the test client): no tick, and a lingering close closes at once |
 
 A deadline is stored as `0.0` when armed and filled with `now + timeout` on
 the next sweep, so an effective timeout is `T` to `T + 1s`. That trade keeps

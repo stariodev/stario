@@ -77,6 +77,37 @@ from stario_cython.exchange cimport (
 
 cdef extern from *:
     """
+    #include <stdio.h>
+    #include <time.h>
+
+    /* Wall-clock second for the Date header. The coarse clock is a few ns
+       (no syscall); macOS has no coarse variant, and the plain one is ~30 ns. */
+    static long stario_wall_second(void) {
+        struct timespec ts;
+    #if defined(CLOCK_REALTIME_COARSE)
+        clock_gettime(CLOCK_REALTIME_COARSE, &ts);
+    #else
+        clock_gettime(CLOCK_REALTIME, &ts);
+    #endif
+        return (long)ts.tv_sec;
+    }
+
+    /* ``date: Tue, 18 Aug 2026 00:00:00 GMT\\r\\n`` (RFC 9110 IMF-fixdate). */
+    static int stario_date_line(long second, char* out, size_t cap) {
+        static const char days[] = "SunMonTueWedThuFriSat";
+        static const char months[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+        struct tm parts;
+        time_t t = (time_t)second;
+        if (gmtime_r(&t, &parts) == NULL) {
+            return -1;
+        }
+        return snprintf(
+            out, cap, "date: %.3s, %02d %.3s %04d %02d:%02d:%02d GMT\\r\\n",
+            days + parts.tm_wday * 3, parts.tm_mday, months + parts.tm_mon * 3,
+            parts.tm_year + 1900, parts.tm_hour, parts.tm_min, parts.tm_sec
+        );
+    }
+
     #if defined(__linux__)
     #include <malloc.h>
     static void stario_malloc_tune(void) {
@@ -93,6 +124,8 @@ cdef extern from *:
     #endif
     """
     void stario_malloc_tune() noexcept
+    long stario_wall_second() noexcept nogil
+    int stario_date_line(long second, char* out, size_t cap) noexcept nogil
 from stario_cython.llhttp cimport *
 from stario_cython.nghttp2 cimport (
     ssize_t,
@@ -613,58 +646,113 @@ cdef int _h2_send_data(
 
 
 cdef class Connections:
-    """One event loop's live connections plus their timeout sweep.
+    """One event loop's live connections, their timeout tick, and the clock.
 
-    The ``Server`` creates one per loop and hands it to every protocol. Its
-    Date tick calls ``sweep(now)`` once a second (``server_driven=True``).
-    Without a Server, the first connection starts a sweep task on its loop at
-    ``sweep_interval`` and the last connection to close stops it.
+    The ``Server`` creates one per loop and hands it to every protocol on
+    that loop. It is the only thing that reads a clock:
 
-    Iterable and sized like the set it replaces. ``sweep`` is one C loop:
-    one ``loop.time()`` and no Python call per connection.
+    - ``tick()`` runs from one ``loop.call_later`` handle while a connection
+      with timeouts exists, reads ``loop.time()`` once, and walks the live
+      list in C comparing stored deadlines (``sweep``). No Task, no wakeup
+      when idle, no Python call per connection.
+    - ``c_date()`` is the ``date: ...\\r\\n`` line for responses: one coarse
+      wall-clock read per call, reformatted only when the second changed.
+      ``pin_date()`` fixes it for tests.
+
+    Nothing here is shared between loops, so nothing is locked. Iterable and
+    sized like the set it replaces.
     """
 
-    cdef set _protocols
-    cdef object _sweep_task
+    cdef list _live
+    cdef Py_ssize_t _timed
+    cdef object _tick_handle
+    cdef object _loop
     cdef double _interval
-    cdef public bint server_driven
+    # ``loop.time()`` at the last tick, for anything that wants a cheap,
+    # slightly stale clock.
+    cdef public double now
+    cdef long _date_second
+    cdef object _date_line
+    cdef bint _date_fixed
     # 0 means unlimited; `rejected` counts connections refused at the cap.
     cdef public Py_ssize_t max_connections
     cdef public Py_ssize_t rejected
 
     def __cinit__(self):
-        self._protocols = set()
-        self._sweep_task = None
+        self._live = []
+        self._timed = 0
+        self._tick_handle = None
+        self._loop = None
         self._interval = 1.0
-        self.server_driven = False
+        self.now = 0.0
+        self._date_second = -1
+        self._date_line = b""
+        self._date_fixed = False
         self.max_connections = 0
         self.rejected = 0
 
-    def __init__(self, *, sweep_interval=1.0, server_driven=False, max_connections=0):
+    def __init__(self, *, sweep_interval=1.0, max_connections=0, date=None):
         interval = float(sweep_interval)
         if interval < 0.001:
             interval = 0.001
         self._interval = interval
-        self.server_driven = server_driven
         self.max_connections = max(int(max_connections), 0)
+        if date is not None:
+            self.pin_date(date)
+
+    def pin_date(self, bytes line not None):
+        """Serve ``line`` (``date: ...\\r\\n``) on every response; tests only."""
+        if not line.endswith(b"\r\n"):
+            raise ValueError("date line must end with CRLF")
+        self._date_line = line
+        self._date_fixed = True
+
+    cdef inline object c_date(self):
+        cdef long second
+        if self._date_fixed:
+            return self._date_line
+        second = stario_wall_second()
+        if second != self._date_second:
+            self._refresh_date(second)
+        return self._date_line
+
+    cdef void _refresh_date(self, long second):
+        cdef char buf[48]
+        cdef int n = stario_date_line(second, buf, sizeof(buf))
+        if n > 0 and n < <int>sizeof(buf):
+            self._date_line = PyBytes_FromStringAndSize(buf, n)
+            self._date_second = second
+
+    @property
+    def date_line(self):
+        """The current ``date: ...\\r\\n`` line."""
+        return self.c_date()
 
     def add(self, proto):
-        self._protocols.add(proto)
+        if not isinstance(proto, CHttpProtocol):
+            raise TypeError("Connections holds HttpProtocol objects")
+        self._connection_opened(<CHttpProtocol>proto)
 
     def discard(self, proto):
-        self._protocols.discard(proto)
+        if isinstance(proto, CHttpProtocol):
+            self._connection_closed(<CHttpProtocol>proto)
 
     def __len__(self):
-        return len(self._protocols)
+        return len(self._live)
 
     def __iter__(self):
-        return iter(self._protocols)
+        # A snapshot: a close inside the loop body unregisters from the list.
+        return iter(list(self._live))
 
     def __contains__(self, proto):
-        return proto in self._protocols
+        cdef Py_ssize_t i
+        if not isinstance(proto, CHttpProtocol):
+            return False
+        i = (<CHttpProtocol>proto)._live_index
+        return i >= 0 and i < len(self._live) and self._live[i] is proto
 
     def __bool__(self):
-        return bool(self._protocols)
+        return len(self._live) > 0
 
     @property
     def sweep_interval(self):
@@ -672,50 +760,61 @@ cdef class Connections:
 
     @property
     def sweeping(self):
-        """True while this registry runs its own sweep task."""
-        task = self._sweep_task
-        return task is not None and not task.done()
+        """True while a tick is scheduled (a connection with timeouts exists)."""
+        return self._tick_handle is not None
 
     cpdef void sweep(self, double now):
         """Compare every connection's stored deadlines to ``now``."""
-        cdef object proto
-        cdef set protocols = self._protocols
-        if not protocols:
-            return
-        # Snapshot: a firing timeout closes the connection, which unregisters
-        # it from this set mid-loop.
-        for proto in tuple(protocols):
-            if isinstance(proto, CHttpProtocol):
-                (<CHttpProtocol>proto).check_timeouts(now)
-            else:
-                proto.check_timeouts(now)
+        cdef Py_ssize_t i = 0
+        cdef list live = self._live
+        cdef CHttpProtocol proto
+        self.now = now
+        # A firing timeout may close the connection, which swaps the last
+        # entry into this slot: only advance when the slot is unchanged.
+        while i < len(live):
+            proto = <CHttpProtocol>live[i]
+            proto._check_timeouts(now)
+            if i < len(live) and live[i] is proto:
+                i += 1
+
+    def _tick(self):
+        self._tick_handle = None
+        self.sweep(self._loop.time())
+        if self._timed > 0:
+            self._schedule()
+
+    cdef void _schedule(self):
+        self._tick_handle = self._loop.call_later(self._interval, self._tick)
 
     cdef void _connection_opened(self, CHttpProtocol proto):
-        self._protocols.add(proto)
-        if proto.timeout_cleanup != CLEANUP_SWEEP or self.server_driven:
+        if proto._live_index >= 0:
             return
-        if self.sweeping:
+        proto._live_index = len(self._live)
+        self._live.append(proto)
+        if proto.timeout_cleanup != CLEANUP_SWEEP:
             return
-        self._sweep_task = proto.loop.create_task(
-            self._sweep_loop(proto.loop), name="stario-timeout-sweep"
-        )
+        self._timed += 1
+        if self._tick_handle is None:
+            self._loop = proto.loop
+            self._schedule()
 
     cdef void _connection_closed(self, CHttpProtocol proto):
-        cdef object task
-        self._protocols.discard(proto)
-        if self._protocols:
+        cdef Py_ssize_t i = proto._live_index
+        cdef CHttpProtocol last
+        if i < 0:
             return
-        task = self._sweep_task
-        self._sweep_task = None
-        if task is not None and not task.done():
-            task.cancel()
-
-    async def _sweep_loop(self, loop):
-        sleep = asyncio.sleep
-        interval = self._interval
-        while True:
-            await sleep(interval)
-            self.sweep(loop.time())
+        proto._live_index = -1
+        last = <CHttpProtocol>self._live[len(self._live) - 1]
+        if last is not proto:
+            self._live[i] = last
+            last._live_index = i
+        self._live.pop()
+        if proto.timeout_cleanup != CLEANUP_SWEEP:
+            return
+        self._timed -= 1
+        if self._timed == 0 and self._tick_handle is not None:
+            self._tick_handle.cancel()
+            self._tick_handle = None
 
 
 cdef class CHttpProtocol(HttpConnection):
@@ -726,9 +825,10 @@ cdef class CHttpProtocol(HttpConnection):
     cdef object app
     cdef object tracer
     cdef object noop_span
-    cdef list date_box
     cdef object compression
     cdef Connections connections
+    # Slot in ``connections``' live list, -1 when not registered.
+    cdef Py_ssize_t _live_index
     # This thread's ``app.tasks`` set, bound once: handler Tasks that did not
     # finish eagerly join it so shutdown drain can await them.
     cdef set _tasks
@@ -778,11 +878,14 @@ cdef class CHttpProtocol(HttpConnection):
     cdef bint h2_goaway_sent
     # Shutdown notice sent; the final GOAWAY waits for our PING's ACK.
     cdef bint h2_goaway_pending
+    # 0.0 = arm on the next tick; the final GOAWAY goes out at the deadline.
+    cdef double h2_goaway_deadline
     # Streams holding their WINDOW_UPDATE (body backpressure).
     cdef int h2_paused_streams
-    cdef object h2_goaway_timer
-    # Set while a lingering close drops input (``close_lingering``).
-    cdef object linger_timer
+    # Set while a lingering close drops input (``close_lingering``); the
+    # socket closes at ``linger_deadline`` (0.0 = arm on the next tick).
+    cdef bint lingering
+    cdef double linger_deadline
     cdef bint h1_headers_too_large
     # Set at headers-complete: later header callbacks are chunked trailers.
     cdef bint h1_in_trailers
@@ -822,10 +925,16 @@ cdef class CHttpProtocol(HttpConnection):
         self.h2 = NULL
         self.h2_streams = {}
         self.h2_out = bytearray()
+        self.h2_paused_streams = 0
         self.h2_out_used = 0
         self.h2_in_recv = False
         self.h2_in_send = False
         self.h2_goaway_sent = False
+        self.h2_goaway_pending = False
+        self.h2_goaway_deadline = 0.0
+        self.lingering = False
+        self.linger_deadline = 0.0
+        self._live_index = -1
         self.h1_headers_too_large = False
         self.deferred_status = 0
         self.deferred_body = None
@@ -854,7 +963,6 @@ cdef class CHttpProtocol(HttpConnection):
         loop,
         app,
         tracer,
-        list date_box,
         compression,
         connections,
         max_header_bytes=DEFAULT_MAX_HEADER_BYTES,
@@ -883,7 +991,6 @@ cdef class CHttpProtocol(HttpConnection):
         self.noop_span = (
             tracer.create("request") if isinstance(tracer, NoOpTracer) else None
         )
-        self.date_box = date_box
         self.compression = compression
         self.connections = <Connections>connections
         self._app_state = getattr(app, "_app_state", None)
@@ -927,7 +1034,7 @@ cdef class CHttpProtocol(HttpConnection):
         cdef Connections conns = self.connections
         if (
             conns.max_connections > 0
-            and len(conns._protocols) >= conns.max_connections
+            and len(conns._live) >= conns.max_connections
         ):
             # Refuse before registering: nothing tracks this socket.
             conns.rejected += 1
@@ -946,7 +1053,8 @@ cdef class CHttpProtocol(HttpConnection):
         self.held_offset = 0
         self.pump_scheduled = False
         self.rejected = False
-        self.linger_timer = None
+        self.lingering = False
+        self.linger_deadline = 0.0
         self.timeout_kind = TIMEOUT_NONE
         self.timeout_deadline = 0.0
         self.parse_mode = PARSE_NONE
@@ -993,12 +1101,10 @@ cdef class CHttpProtocol(HttpConnection):
         cdef RequestExchange exchange
         self.closed = True
         self._cancel_timeout()
-        if self.h2_goaway_timer is not None:
-            self.h2_goaway_timer.cancel()
-            self.h2_goaway_timer = None
-        if self.linger_timer is not None:
-            self.linger_timer.cancel()
-            self.linger_timer = None
+        self.h2_goaway_pending = False
+        self.h2_goaway_deadline = 0.0
+        self.lingering = False
+        self.linger_deadline = 0.0
         self.connections._connection_closed(self)
 
         if self.h2 != NULL:
@@ -1197,11 +1303,29 @@ cdef class CHttpProtocol(HttpConnection):
 
     cpdef void check_timeouts(self, double now):
         """Compare stored deadlines against ``now`` (one value per sweep)."""
+        self._check_timeouts(now)
+
+    cdef object date_line(self):
+        return self.connections.c_date()
+
+    cdef void _check_timeouts(self, double now):
         cdef RequestExchange reading
         cdef RequestExchange active
         cdef RequestExchange exchange
+        cdef object transport
         cdef double seconds
         cdef int kind
+        if self.lingering:
+            # Input is being dropped after the response; hang up once the
+            # client had LINGER_TIME to read it (RFC 9112 9.6).
+            if self.linger_deadline <= 0.0:
+                self.linger_deadline = now + LINGER_TIME
+            elif now >= self.linger_deadline:
+                self.linger_deadline = 0.0
+                transport = self.transport
+                if transport is not None and not transport.is_closing():
+                    transport.close()
+            return
         if self._check_write_stall(now) or self.rejected:
             return
 
@@ -1236,6 +1360,14 @@ cdef class CHttpProtocol(HttpConnection):
             self._check_body_stall(active, now)
 
         if self.parse_mode == PARSE_H2:
+            if self.h2_goaway_pending:
+                # A client that never ACKs the shutdown PING gets the final
+                # GOAWAY after H2_GOAWAY_GRACE anyway.
+                if self.h2_goaway_deadline <= 0.0:
+                    self.h2_goaway_deadline = now + H2_GOAWAY_GRACE
+                elif now >= self.h2_goaway_deadline:
+                    self._h2_final_goaway()
+                    self._h2_send()
             for exchange in list(self.h2_streams.values()):
                 if exchange.in_pool:
                     continue
@@ -1507,11 +1639,11 @@ cdef class CHttpProtocol(HttpConnection):
         until the client closes or LINGER_TIME passes (RFC 9112 9.6).
         """
         cdef object transport = self.transport
-        if (
-            transport is None
-            or transport.is_closing()
-            or self.linger_timer is not None
-        ):
+        if transport is None or transport.is_closing() or self.lingering:
+            return
+        if self.timeout_cleanup == CLEANUP_OFF:
+            # No tick to end the linger window (the test client): close now.
+            transport.close()
             return
         # ``rejected`` drops input before the parser; reading stays on.
         self.rejected = True
@@ -1527,7 +1659,8 @@ cdef class CHttpProtocol(HttpConnection):
         except Exception:
             transport.close()
             return
-        self.linger_timer = self.loop.call_later(LINGER_TIME, transport.close)
+        self.lingering = True
+        self.linger_deadline = 0.0
 
     cdef void _close_after_response(self, RequestExchange exchange):
         # The client may still be sending the body of this request.
@@ -1577,14 +1710,14 @@ cdef class CHttpProtocol(HttpConnection):
             if not self.h2_goaway_sent:
                 self.h2_goaway_sent = True
                 if (
-                    nghttp2_submit_shutdown_notice(self.h2) == 0
+                    self.timeout_cleanup == CLEANUP_SWEEP
+                    and nghttp2_submit_shutdown_notice(self.h2) == 0
                     and nghttp2_submit_ping(self.h2, NGHTTP2_FLAG_NONE, NULL) == 0
                 ):
+                    # The final GOAWAY follows the PING ACK, or the tick
+                    # sends it at H2_GOAWAY_GRACE for a client that never ACKs.
                     self.h2_goaway_pending = True
-                    # A client that never ACKs gets the final GOAWAY anyway.
-                    self.h2_goaway_timer = self.loop.call_later(
-                        H2_GOAWAY_GRACE, self._h2_goaway_expired
-                    )
+                    self.h2_goaway_deadline = 0.0
                 else:
                     self._h2_final_goaway()
                 self._h2_send()
@@ -1663,7 +1796,6 @@ cdef class CHttpProtocol(HttpConnection):
                 self,
                 self.app,
                 self.transport,
-                self.date_box,
                 self.compression,
                 self.max_body_bytes,
                 self.body_timeout,
@@ -1673,7 +1805,6 @@ cdef class CHttpProtocol(HttpConnection):
             self,
             self.app,
             self.transport,
-            self.date_box,
             self.compression,
             self.max_body_bytes,
             self.body_timeout,
@@ -2402,7 +2533,7 @@ cdef class CHttpProtocol(HttpConnection):
         cdef object date
         if transport is None or transport.is_closing():
             return
-        date = self.date_box[0]
+        date = self.connections.c_date()
         if head_only:
             transport.write(
                 b"".join((
@@ -3088,17 +3219,9 @@ cdef class CHttpProtocol(HttpConnection):
         if not self.h2_streams and not self.rejected:
             self._arm_timeout(TIMEOUT_IDLE, self.keep_alive_timeout)
 
-    def _h2_goaway_expired(self):
-        self.h2_goaway_timer = None
-        if self.h2_goaway_pending:
-            self._h2_final_goaway()
-            self._h2_send()
-
     cdef void _h2_final_goaway(self):
         self.h2_goaway_pending = False
-        if self.h2_goaway_timer is not None:
-            self.h2_goaway_timer.cancel()
-            self.h2_goaway_timer = None
+        self.h2_goaway_deadline = 0.0
         if self.h2 == NULL:
             return
         nghttp2_submit_goaway(

@@ -201,9 +201,8 @@ def make_protocol(loop, app, tracer=None):
         loop,
         app,
         tracer or NoOpTracer(),
-        [DATE],
         CompressionConfig(),
-        Connections(server_driven=True),
+        Connections(date=DATE),
     )
     transport = NullTransport()
     proto.connection_made(transport)

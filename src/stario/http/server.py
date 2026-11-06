@@ -17,8 +17,6 @@ import sysconfig
 import threading
 from collections.abc import AsyncGenerator, Callable, Generator
 from contextlib import asynccontextmanager, contextmanager, suppress
-from datetime import UTC, datetime
-from email.utils import format_datetime
 from types import FrameType
 from typing import Any, Literal
 
@@ -41,7 +39,6 @@ type ProtocolMaker = Callable[
         asyncio.AbstractEventLoop,
         App,
         Tracer,
-        list[bytes],
         CompressionConfig,
         Connections,
         RequestPolicy,
@@ -54,7 +51,6 @@ def _make_http_protocol(
     loop: asyncio.AbstractEventLoop,
     app: App,
     tracer: Tracer,
-    date_box: list[bytes],
     compression: CompressionConfig,
     connections: Connections,
     requests: RequestPolicy,
@@ -63,7 +59,6 @@ def _make_http_protocol(
         loop,
         app,
         tracer,
-        date_box,
         compression,
         connections,
         max_header_bytes=requests.max_header_bytes,
@@ -259,7 +254,6 @@ class _LoopWorker:
         self.loop: asyncio.AbstractEventLoop | None = None
         self.loop_kind: EventLoopKind | None = None
         self.connections = connections
-        self.date_box: list[bytes] = [b""]
         self.listen_sock: socket.socket | None = None
         self.cpu: int | None = None
         self.ready = threading.Event()
@@ -352,23 +346,23 @@ class Server:
         self.make_protocol = make_protocol
 
         self._used = False
-        self._date_box = [b""]
         self._urgent_drain = False
-        self._live_connections: Connections | None = None
         self._thread_count = 1
         self._leader_sock: socket.socket | None = None
         # Allowed CPUs, read before any thread is pinned (see pin_worker_cpu).
         self.cpus: list[int] = []
 
     def _new_connections(self) -> Connections:
-        """One loop's registry; the process cap is split evenly across loops."""
+        """One loop's registry and clock; the process cap is split across loops.
+
+        The registry ticks itself once a second from a ``call_later`` handle
+        while it holds a connection, sweeping timeouts in C; the ``Date``
+        header comes from its per-second cache.
+        """
         limit = self.config.max_connections
         if limit is None:
-            return Connections(server_driven=True)
-        return Connections(
-            server_driven=True,
-            max_connections=-(-limit // max(self._thread_count, 1)),
-        )
+            return Connections()
+        return Connections(max_connections=-(-limit // max(self._thread_count, 1)))
 
     async def serve(self) -> None:
         """Run until SIGINT/SIGTERM (or fatal error); requires a running event loop.
@@ -395,10 +389,7 @@ class Server:
                     await self._serve_reuseport(run)
                 else:
                     with self._listen_socket() as listen_sock:
-                        async with (
-                            self._date_tick(),
-                            self._listener(listen_sock, run),
-                        ):
+                        async with self._listener(listen_sock, run):
                             # Blocks until a signal (or test code) completes app.shutdown.
                             await app.shutdown
 
@@ -408,12 +399,10 @@ class Server:
         app: App,
         connections: Connections,
         *,
-        date_box: list[bytes] | None = None,
         reuse_port: bool = False,
     ) -> asyncio.Server:
         loop = asyncio.get_running_loop()
         make_protocol = self.make_protocol
-        box = self._date_box if date_box is None else date_box
 
         def protocol_factory() -> asyncio.Protocol:
             factory = (
@@ -423,7 +412,6 @@ class Server:
                 loop,
                 app,
                 self.tracer,
-                box,
                 self.config.compression,
                 connections,
                 self.config.requests,
@@ -795,7 +783,6 @@ class Server:
         """Bind on enter; drain in-flight work on exit."""
         app = run.app
         connections = self._new_connections()
-        self._live_connections = connections
         listener = await self._create_listener(listen_sock, app, connections)
 
         # Startup span ends once we are listening; shutdown span opens on exit.
@@ -810,44 +797,6 @@ class Server:
             run.begin_shutdown("expected_stop")  # signal or app.shutdown
         finally:
             await self._drain_listener(listener, app, connections, run.span)
-            self._live_connections = None
-
-    @asynccontextmanager
-    async def _date_tick(
-        self,
-        date_box: list[bytes] | None = None,
-        connections: Connections | None = None,
-    ) -> AsyncGenerator[None]:
-        """Refresh Date, then once per second also sweep connection timeouts.
-
-        Header/idle/body-stall defaults are 5s/5s/30s. One-second granularity
-        matches Date and avoids a second timer on the event loop.
-        """
-        box = self._date_box if date_box is None else date_box
-
-        def refresh() -> None:
-            now = datetime.now(UTC)
-            # Preformatted wire bytes; Writer concatenates without per-response format_datetime.
-            box[0] = b"date: %s\r\n" % format_datetime(now, usegmt=True).encode("ascii")
-
-        loop = asyncio.get_running_loop()
-
-        async def tick() -> None:
-            while True:
-                await asyncio.sleep(1)
-                refresh()
-                live = self._live_connections if connections is None else connections
-                if live is not None:
-                    live.sweep(loop.time())
-
-        refresh()  # first value before any connection can read it
-        task = asyncio.create_task(tick())
-        try:
-            yield
-        finally:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
 
     async def run_reuseport_worker(self, worker: _LoopWorker) -> None:
         """Extra thread: bind SO_REUSEPORT, serve until shutdown, then drain."""
@@ -859,23 +808,21 @@ class Server:
         unix = self.config.unix_socket is not None
         sock = self._bind_reuseport(leader=False) if unix else None
         try:
-            async with self._date_tick(worker.date_box, worker.connections):
-                listener = await self._create_listener(
-                    sock,
-                    worker.app,
-                    worker.connections,
-                    date_box=worker.date_box,
-                    reuse_port=not unix,
+            listener = await self._create_listener(
+                sock,
+                worker.app,
+                worker.connections,
+                reuse_port=not unix,
+            )
+            worker.listen_sock = sock
+            sock = None
+            worker.ready.set()
+            try:
+                await worker.app.shutdown
+            finally:
+                worker.cancelled = await self._drain_listener(
+                    listener, worker.app, worker.connections
                 )
-                worker.listen_sock = sock
-                sock = None
-                worker.ready.set()
-                try:
-                    await worker.app.shutdown
-                finally:
-                    worker.cancelled = await self._drain_listener(
-                        listener, worker.app, worker.connections
-                    )
         finally:
             if sock is not None:
                 sock.close()
@@ -923,61 +870,58 @@ class Server:
         )
         cancelled: list[str] = []
         try:
-            async with self._date_tick(self._date_box, connections):
-                listener = await self._create_listener(
-                    sock,
-                    app,
-                    connections,
-                    reuse_port=not unix,
-                )
-                self._leader_sock = sock
-                sock = None
+            listener = await self._create_listener(
+                sock,
+                app,
+                connections,
+                reuse_port=not unix,
+            )
+            self._leader_sock = sock
+            sock = None
+            for worker in extras:
+                worker.start()
+            try:
                 for worker in extras:
-                    worker.start()
+                    started = await asyncio.to_thread(worker.ready.wait, 5.0)
+                    if not started:
+                        raise StarioError(
+                            f"worker {worker.index} failed to start",
+                            help_text="Check worker thread logs.",
+                        )
+                    if worker.error is not None:
+                        raise worker.error
+                span.attr("server.worker_event_loop", kind)
+                span.attr("server.listening", True)
+                run.end_startup()
                 try:
-                    for worker in extras:
-                        started = await asyncio.to_thread(worker.ready.wait, 5.0)
-                        if not started:
-                            raise StarioError(
-                                f"worker {worker.index} failed to start",
-                                help_text="Check worker thread logs.",
-                            )
-                        if worker.error is not None:
-                            raise worker.error
-                    span.attr("server.worker_event_loop", kind)
-                    span.attr("server.listening", True)
-                    run.end_startup()
-                    try:
-                        await app.shutdown
-                    except BaseException:
-                        run.begin_shutdown("runtime_failure")
-                        raise
-                    else:
-                        run.begin_shutdown("expected_stop")
-                    finally:
-                        cancelled = await self._drain_listener(
-                            listener, app, connections, run.span
-                        )
+                    await app.shutdown
+                except BaseException:
+                    run.begin_shutdown("runtime_failure")
+                    raise
+                else:
+                    run.begin_shutdown("expected_stop")
                 finally:
-                    app.signal_shutdown()
+                    cancelled = await self._drain_listener(
+                        listener, app, connections, run.span
+                    )
+            finally:
+                app.signal_shutdown()
+                for worker in extras:
+                    await asyncio.to_thread(worker.join, join_timeout)
+                # Workers drain on their own loops; thread 0 owns the span.
+                if any(worker.cancelled for worker in extras):
                     for worker in extras:
-                        await asyncio.to_thread(worker.join, join_timeout)
-                    # Workers drain on their own loops; thread 0 owns the span.
-                    if any(worker.cancelled for worker in extras):
-                        for worker in extras:
-                            record_cancelled(
-                                span, worker.cancelled, {"server.thread": worker.index}
-                            )
-                        span.attr(
-                            "server.shutdown.cancelled_tasks",
-                            len(cancelled)
-                            + sum(len(worker.cancelled) for worker in extras),
+                        record_cancelled(
+                            span, worker.cancelled, {"server.thread": worker.index}
                         )
-                    errors = [
-                        worker.error for worker in extras if worker.error is not None
-                    ]
-                    if errors:
-                        raise errors[0]
+                    span.attr(
+                        "server.shutdown.cancelled_tasks",
+                        len(cancelled)
+                        + sum(len(worker.cancelled) for worker in extras),
+                    )
+                errors = [worker.error for worker in extras if worker.error is not None]
+                if errors:
+                    raise errors[0]
         except BaseException:
             app.signal_shutdown()
             for worker in extras:

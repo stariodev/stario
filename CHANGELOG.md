@@ -55,6 +55,23 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ### Changed
 
+- One clock per event loop. `Connections` (one per loop) now owns the
+  timeout tick: a single `loop.call_later` handle, scheduled only while a
+  connection with timeouts exists, reads `loop.time()` once and walks the
+  live connections in C. The `Server` no longer runs a `Date` coroutine per
+  loop, and an idle loop makes no timer wakeups. The `Date` header comes
+  from a per-second cache on the same object: one coarse wall-clock read
+  per response, reformatted in C only when the second changed, so a busy
+  loop can no longer serve a stale `Date`. The lingering-close wait and
+  the HTTP/2 GOAWAY grace are deadlines on that tick instead of timers,
+  so the protocol holds no `TimerHandle`. With timeouts off
+  (`timeout_cleanup="off"`, the test client) a lingering close closes
+  at once.
+- `HttpProtocol(loop, app, tracer, compression, connections, ...)` no
+  longer takes a `date_box` list; `Connections(date=...)` or
+  `Connections.pin_date()` fixes the `Date` line for tests, and
+  `Connections.date_line` reads it. `Connections(server_driven=...)` is
+  gone: a registry always ticks itself.
 - `SSE.patch_elements` documents that `bytes` and `str` are trusted HTML
   sent as they are (like `w.html`); build user text with `h.*`.
 - `at.get` / `post` / `put` / `patch` / `delete` / `query` share one
@@ -100,6 +117,15 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
   and closed a spool and never counted, so an unlimited number of them was
   accepted.
 
+### Added
+
+- `stario.testing.VirtualTimeLoop`: an asyncio loop whose clock advances
+  only when the loop would otherwise block on a timer. `asyncio.sleep`,
+  `loop.call_later`, `loop.time()` deadlines and the connection timeout
+  tick all run in virtual time, with real sockets and the real protocol,
+  so a 30 s timeout costs milliseconds of wall time. `tests/cython` runs on
+  it through a `pytest_asyncio_loop_factories` hook.
+
 ### Removed
 
 - `stario.http.wire`. `parse_accept_encoding` lives in
@@ -112,7 +138,6 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
   writer encodes responses itself. `compress_bytes(config, encoding, data)`
   encodes one body for precompressed files, `Headers.unsafe_merge_vary(token)`
   replaces `merge_vary`, and the decoders are in `stario_cython.codecs`.
-
 
 ## 5.4.0 - 2026-11-05
 

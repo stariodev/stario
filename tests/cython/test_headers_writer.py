@@ -533,7 +533,7 @@ async def test_exchange_sse_zstd_flushes_each_write() -> None:
 
 
 @pytest.mark.asyncio
-async def test_exchange_respond_plaintext_uses_date_box() -> None:
+async def test_exchange_respond_plaintext_uses_the_registry_date() -> None:
     app = App()
     state = {}
 

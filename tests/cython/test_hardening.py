@@ -16,6 +16,7 @@ from stario.testing.tracer import TestTracer
 from stario_cython.exchange import Request
 from stario_cython.protocol import Connections, HttpProtocol
 from tests.cython.http import (
+    DATE,
     RecordingTransport,
     connection_set,
     free_port,
@@ -1491,13 +1492,13 @@ async def test_connections_run_one_sweep_task_until_the_last_close() -> None:
 
 
 @pytest.mark.asyncio
-async def test_server_driven_connections_start_no_sweep_task() -> None:
-    """The Server's Date tick calls sweep(); the registry must not add a task."""
-    connections = Connections(server_driven=True)
+async def test_sweep_with_an_explicit_now_closes_past_the_deadline() -> None:
+    """A test can drive the sweep itself: deadlines are arm-on-next-sweep."""
+    connections = Connections(date=DATE)
     _proto, app, transport = _attach(connections=connections, header_timeout=_TIMEOUT)
     try:
-        assert not connections.sweeping
-        # The Server would call this once a second; one call past the deadline closes.
+        assert connections.sweeping
+        # The tick would call this once a second; one call past the deadline closes.
         loop = asyncio.get_running_loop()
         connections.sweep(loop.time())  # arms the deadline
         connections.sweep(loop.time() + _TIMEOUT + 1.0)

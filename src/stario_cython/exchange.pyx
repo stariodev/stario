@@ -106,6 +106,10 @@ cdef class HttpConnection:
     cdef void close_lingering(self):
         raise NotImplementedError("close_lingering")
 
+    cdef object date_line(self):
+        """The loop clock's ``date: ...\\r\\n`` line for this response."""
+        raise NotImplementedError("date_line")
+
     cdef object ensure_disconnect(self):
         raise NotImplementedError("ensure_disconnect")
 
@@ -795,7 +799,6 @@ cdef class RequestExchange:
         self._declared_length = -1
         self._bytes_written = 0
         self._completed = False
-        self._date_box = None
         self._body_buf = None
         self._body_used = 0
         self._body_cap = 0
@@ -1428,7 +1431,6 @@ cdef class RequestExchange:
         HttpConnection connection,
         object app,
         object transport,
-        list date_box,
         object compression,
         int max_body_size,
         double body_timeout,
@@ -1440,7 +1442,6 @@ cdef class RequestExchange:
             self._transport = transport
             self._t_is_closing = transport.is_closing if transport is not None else None
             self._t_writelines = transport.writelines if transport is not None else None
-            self._date_box = date_box
             if self._compression is not compression:
                 self._compression = compression
                 self._apply_compression(compression)
@@ -2043,8 +2044,8 @@ cdef class RequestExchange:
         return 0
 
     cdef object _h2_date_value(self):
-        """The shared ``date: ...\\r\\n`` line as an H2 header value (no name, no CRLF)."""
-        cdef object line = self._date_box[0]
+        """The loop clock's ``date: ...\\r\\n`` line as an H2 header value (no name, no CRLF)."""
+        cdef object line = self._connection.date_line()
         cdef bytes raw
         cdef Py_ssize_t n
         if line is self._h2_date_line and self._h2_date_bare is not None:
@@ -2207,14 +2208,14 @@ cdef class RequestExchange:
                 # RFC 9110 §8.6: no Content-Length on 204; 304 omits it too.
                 self._t_writelines((
                     _status_line(status),
-                    self._date_box[0],
+                    self._connection.date_line(),
                     CRLF,
                 ))
             elif nbytes and not self._head_request:
                 if type(wire) is bytes and nbytes <= OUTPUT_BUFFER_RETAIN_MAX:
                     self._t_writelines((
                         _status_line(status),
-                        self._date_box[0],
+                        self._connection.date_line(),
                         CT_PREFIX,
                         content_type,
                         CL_PREFIX,
@@ -2225,7 +2226,7 @@ cdef class RequestExchange:
                 elif type(wire) is bytes:
                     self._t_writelines((
                         _status_line(status),
-                        self._date_box[0],
+                        self._connection.date_line(),
                         CT_PREFIX,
                         content_type,
                         CL_PREFIX,
@@ -2236,7 +2237,7 @@ cdef class RequestExchange:
                 else:
                     self._t_writelines((
                         _status_line(status),
-                        self._date_box[0],
+                        self._connection.date_line(),
                         CT_PREFIX,
                         content_type,
                         CL_PREFIX,
@@ -2247,7 +2248,7 @@ cdef class RequestExchange:
             else:
                 self._t_writelines((
                     _status_line(status),
-                    self._date_box[0],
+                    self._connection.date_line(),
                     CT_PREFIX,
                     content_type,
                     CL_PREFIX,
@@ -2280,7 +2281,7 @@ cdef class RequestExchange:
                         self._declared_length = <Py_ssize_t>native_len
                         self._bytes_written = 0
                         self._buf_bytes(_status_line(status))
-                        self._buf_bytes(self._date_box[0])
+                        self._buf_bytes(self._connection.date_line())
                         if self._out_buf is None:
                             self._out_buf = bytearray(256)
                         h.c_write_respond_pairs(
@@ -2321,7 +2322,7 @@ cdef class RequestExchange:
             if existing_cl is not None:
                 h.c_require_respond_length(existing_cl, _dec(<size_t>nbytes))
             self._buf_bytes(_status_line(status))
-            self._buf_bytes(self._date_box[0])
+            self._buf_bytes(self._connection.date_line())
             if self._out_buf is None:
                 self._out_buf = bytearray(256)
             h.c_write_respond_pairs(self._out_buf, &self._out_len, False)
@@ -2438,7 +2439,7 @@ cdef class RequestExchange:
             return self
 
         self._buf_bytes(_status_line(status_code))
-        self._buf_bytes(self._date_box[0])
+        self._buf_bytes(self._connection.date_line())
         if self._out_buf is None:
             self._out_buf = bytearray(256)
         headers.c_write_wire_ba(self._out_buf, &self._out_len)
@@ -3853,7 +3854,6 @@ cdef RequestExchange acquire_exchange(
     HttpConnection connection,
     object app,
     object transport,
-    list date_box,
     object compression,
     int max_body_size,
     double body_timeout,
@@ -3868,7 +3868,6 @@ cdef RequestExchange acquire_exchange(
         connection,
         app,
         transport,
-        date_box,
         compression,
         max_body_size,
         body_timeout,
