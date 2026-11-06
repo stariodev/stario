@@ -1271,6 +1271,32 @@ class TestThreadSafety:
         assert "worker.0" in out.getvalue()
 
 
+class TestShutdown:
+    def test_stop_gives_up_on_a_write_lock_held_by_a_stuck_write(self, monkeypatch):
+        import stario.telemetry.tty as tty_module
+
+        _patch_terminal(monkeypatch)
+        monkeypatch.setattr(tty_module, "_STOP_WAIT_S", 0.05)
+        out = io.StringIO()
+        tracer = _manual_tracer(out)
+        _open_root(tracer).end()
+        proxy = tty_module._Passthrough(
+            out, tracer._write_lock, lambda: None, lambda _paused: None
+        )
+        proxy.write("partial line")
+        tracer._out_proxy = proxy
+
+        tracer._write_lock.acquire()  # the render thread, stuck in a write
+        stopper = threading.Thread(target=tracer._stop, daemon=True)
+        stopper.start()
+        stopper.join(2.0)
+        finished = not stopper.is_alive()
+        tracer._write_lock.release()
+
+        assert finished
+        assert out.getvalue() == ""
+
+
 class TestPerformance:
     def test_live_frame_with_many_roots_is_fast(self):
         children: dict[UUID, list[RecordingSpan]] = {}

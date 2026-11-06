@@ -6,6 +6,40 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ## Unreleased
 
+### Fixed
+
+- A span that fails with an exception whose message is empty (`KeyError()`,
+  `asyncio.CancelledError()`) is exported with status `error`, and the
+  error text is the exception type name. Before, the JSON, SQLite, and
+  test tracers exported it as `ok` with no error.
+- `JsonTracer` and `SqliteTracer` keep spans that end while the tracer
+  exits: the writer thread drains them before it stops. Before, a span that
+  ended between the stop request and the join was dropped and logged as
+  ended "while stopped".
+- `TTYTracer` exit no longer waits forever on a terminal write that is
+  stuck. The final render and the stdout/stderr drain give up after one
+  second, like the render thread join.
+
+### Changed
+
+- A full span queue in `JsonTracer` / `SqliteTracer` writes at most one
+  message per second to stderr. The message carries the number of spans
+  dropped since the previous one; `stats().dropped_spans` still counts
+  every drop.
+- A span keeps at most 1000 events. Later events are dropped and counted,
+  and the span ends with the attribute `span.dropped_events` when the
+  count is above zero.
+- A recorded span costs less: on the in-process benchmark a traced
+  plaintext request went from about 27 µs to about 9 µs on one machine.
+  Span ids come from a per-thread uuid7 state with pooled `os.urandom`
+  bytes instead of a process-wide lock and one syscall per id, so ids are
+  monotonic within one thread only. The span lock is taken directly
+  instead of through a generator, and the JSON serializer formats ids
+  without `str()`.
+- Internal: `RecordingSpan.mutex` is always a context manager (a no-op one
+  by default) instead of `None`. `RecordingSpan.duration_ns` and the
+  unused `stario._terminal.style_text` / `styled` are removed.
+
 ## 5.4.0 - 2026-11-05
 
 ### Changed

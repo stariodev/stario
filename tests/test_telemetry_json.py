@@ -1,5 +1,7 @@
 import io
 import json
+import threading
+import time
 
 import pytest
 
@@ -100,3 +102,93 @@ def test_json_tracer_skips_non_serializable_span(capsys) -> None:
     ]
     assert len(lines) == 1
     assert lines[0]["name"] == "good"
+
+
+class BlockingOutput(io.StringIO):
+    """Blocks the first write until released, so the writer thread stays busy."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.blocked = threading.Event()
+        self.release = threading.Event()
+
+    def write(self, s: str) -> int:
+        if not self.blocked.is_set():
+            self.blocked.set()
+            assert self.release.wait(5)
+        return super().write(s)
+
+
+def test_json_tracer_exports_message_less_exception_as_error() -> None:
+    output = io.StringIO()
+
+    with (
+        pytest.raises(KeyError),
+        JsonTracer(output=output, flush_interval=60.0) as tracer,
+        tracer.create("request"),
+    ):
+        raise KeyError()
+
+    payload = json.loads(output.getvalue())
+    assert payload["status"] == "error"
+    assert payload["error"] == "KeyError"
+    assert payload["events"][0]["attributes"]["exc.type"] == "KeyError"
+
+
+def test_json_tracer_reports_a_full_queue_once_a_second(capsys) -> None:
+    output = BlockingOutput()
+    tracer = JsonTracer(
+        output=output, flush_interval=60.0, max_pending_spans=1, max_batch_spans=1
+    )
+
+    with tracer:
+        with tracer.create("busy"):
+            pass
+        assert output.blocked.wait(5)  # the writer is inside a write
+        with tracer.create("queued"):
+            pass
+        for _ in range(3):
+            with tracer.create("dropped"):
+                pass
+        # A second later the next drop reports everything since the last one.
+        assert tracer._drop_reported_at_ns is not None
+        tracer._drop_reported_at_ns -= 1_000_000_000
+        with tracer.create("dropped"):
+            pass
+        output.release.set()
+
+    err = capsys.readouterr().err
+    messages = [line for line in err.splitlines() if "pending queue full" in line]
+    assert len(messages) == 2
+    assert "dropped 1 finished span since the last report" in messages[0]
+    assert "dropped 3 finished spans since the last report" in messages[1]
+    assert tracer.stats().dropped_spans == 4
+    names = [json.loads(line)["name"] for line in output.getvalue().splitlines()]
+    assert names == ["busy", "queued"]
+
+
+def test_json_tracer_exit_keeps_a_span_that_ends_while_the_writer_drains(
+    capsys,
+) -> None:
+    output = BlockingOutput()
+    tracer = JsonTracer(output=output, flush_interval=60.0, max_batch_spans=1)
+    tracer.__enter__()
+    with tracer.create("first"):
+        pass
+    assert output.blocked.wait(5)  # the writer is inside a write
+    late = tracer.create("late")
+    late.start()
+
+    stopper = threading.Thread(target=tracer.__exit__, args=(None, None, None))
+    stopper.start()
+    while tracer._thread is not None:  # exit has asked the writer to stop
+        time.sleep(0.001)
+    late.end()
+    output.release.set()
+    stopper.join(5)
+    assert not stopper.is_alive()
+
+    names = [json.loads(line)["name"] for line in output.getvalue().splitlines()]
+    assert names == ["first", "late"]
+    assert tracer.stats().dropped_spans == 0
+    assert "while stopped" not in capsys.readouterr().err

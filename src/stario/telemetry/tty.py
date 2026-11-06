@@ -66,6 +66,8 @@ from stario._terminal import SGR, color_enabled, enable_vt_for_stream
 from .core import Attributes, Span, TelemetryStats
 from .spans import RecordedEvent, RecordedLink, RecordingSpan
 
+# Shutdown waits this long for the render thread and for a write in flight.
+_STOP_WAIT_S = 1.0
 _REFRESH_INTERVAL_S = 0.125
 _ELLIPSIS = "…"
 _FRAME_NS = 125_000_000
@@ -1242,12 +1244,19 @@ class _Passthrough:
                 self._original.flush()
 
     def drain(self) -> None:
-        """Teardown: write a remaining partial line (plus newline) out of the way."""
-        with self._lock:
+        """Teardown: write a remaining partial line (plus newline) out of the way.
+
+        Gives up after `_STOP_WAIT_S` when a write holds the lock.
+        """
+        if not self._lock.acquire(timeout=_STOP_WAIT_S):
+            return
+        try:
             if self._buf:
                 self._original.write(self._buf + "\n")
                 self._buf = ""
             self._original.flush()
+        finally:
+            self._lock.release()
 
     def isatty(self) -> bool:
         return _isatty(self._original)
@@ -1432,7 +1441,7 @@ class TTYTracer:
             self._running = False
         thread = self._thread
         if thread is not None:
-            thread.join(timeout=1.0)
+            thread.join(timeout=_STOP_WAIT_S)
             self._thread = None
         self.flush()
         for proxy in (self._out_proxy, self._err_proxy):
@@ -1441,6 +1450,11 @@ class TTYTracer:
         self._restore_streams()
 
     def flush(self) -> None:
+        """Write the pending history and every open root as finished.
+
+        Skips the write when the write lock stays held for `_STOP_WAIT_S` (the
+        render thread stuck in a terminal write), so shutdown cannot hang.
+        """
         with self._lock:
             width, _ = _terminal_size()
             now = _clock_ns()
@@ -1464,7 +1478,7 @@ class TTYTracer:
             self._roots.clear()
             self._children.clear()
             self._open_span_ids.clear()
-        self._write_frame(blocks, None, width, force=True)
+        self._write_frame(blocks, None, width, force=True, timeout=_STOP_WAIT_S)
 
     # --------------------------------------------------------------
     # render thread
@@ -1548,8 +1562,11 @@ class TTYTracer:
         width: int,
         *,
         force: bool = False,
+        timeout: float = -1,
     ) -> None:
-        with self._write_lock:
+        if not self._write_lock.acquire(timeout=timeout):
+            return
+        try:
             if self._paused:
                 if not force:
                     self._deferred.extend(blocks)
@@ -1587,6 +1604,8 @@ class TTYTracer:
             self._out.flush()
             if live_text:
                 self._region.store(live_text, width)
+        finally:
+            self._write_lock.release()
 
     def _spaced(self, blocks: list[str]) -> list[str]:
         """Put a blank line before and after every block of several lines.

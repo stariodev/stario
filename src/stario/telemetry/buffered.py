@@ -12,6 +12,9 @@ from .spans import RecordingSpan
 # Subclassed by JsonTracer and SqliteTracer.
 __all__ = ["_BufferedTracer"]
 
+# A full queue says so on stderr at most this often.
+_DROP_REPORT_INTERVAL_NS = 1_000_000_000
+
 
 class _BufferedTracer:
     """Background writer thread with a bounded pending queue and drop metrics.
@@ -22,7 +25,9 @@ class _BufferedTracer:
 
     __slots__ = (
         "_control_lock",
+        "_drop_reported_at_ns",
         "_dropped_spans",
+        "_dropped_unreported",
         "_flush_interval",
         "_last_writer_error",
         "_last_writer_error_at_ns",
@@ -32,6 +37,7 @@ class _BufferedTracer:
         "_pending",
         "_running",
         "_serialization_error_count",
+        "_stop_requested",
         "_thread",
         "_tracer_label",
         "_tracer_type_name",
@@ -69,8 +75,11 @@ class _BufferedTracer:
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
         self._running = False
+        self._stop_requested = False
         self._metrics_lock = threading.Lock()
         self._dropped_spans = 0
+        self._dropped_unreported = 0
+        self._drop_reported_at_ns: int | None = None
         self._serialization_error_count = 0
         self._writer_error_count = 0
         self._last_writer_error: str | None = None
@@ -143,6 +152,7 @@ class _BufferedTracer:
                 return
             self._on_start_writer()
             self._running = True
+            self._stop_requested = False
             self._thread = threading.Thread(
                 target=self._writer_loop,
                 name=self._thread_name(),
@@ -155,10 +165,14 @@ class _BufferedTracer:
             thread = self._thread
             if thread is None:
                 return
-            self._running = False
             self._thread = None
+            self._stop_requested = True
             self._wake.set()
+        # Spans still queue while the writer finishes: its last pass and the
+        # drain below take them. Only spans ending after that are dropped.
         thread.join()
+        with self._control_lock:
+            self._running = False
         pending = self._take_pending()
         if pending:
             self._write_batches_safe(pending)
@@ -178,7 +192,7 @@ class _BufferedTracer:
             if pending:
                 self._write_batches_safe(pending)
 
-            if not self._running:
+            if self._stop_requested:
                 pending = self._take_pending()
                 if pending:
                     self._write_batches_safe(pending)
@@ -188,12 +202,7 @@ class _BufferedTracer:
         try:
             self._pending.put_nowait(span)
         except queue.Full:
-            self._record_dropped_spans(1)
-            self._emit_stderr(
-                f"{self._tracer_label} pending queue full "
-                f"(max={self._max_pending_spans}); dropping finished span "
-                f"{span.id} ({span.name!r})"
-            )
+            self._report_dropped(span)
             self._wake.set()
             return
         if self._pending.qsize() >= self._wake_batch_spans:
@@ -207,6 +216,25 @@ class _BufferedTracer:
             except queue.Empty:
                 break
         return batch
+
+    def _report_dropped(self, span: RecordingSpan) -> None:
+        """Count a span the full queue dropped; say so at most once a second."""
+        now = time.monotonic_ns()
+        with self._metrics_lock:
+            self._dropped_spans += 1
+            self._dropped_unreported += 1
+            last = self._drop_reported_at_ns
+            if last is not None and now - last < _DROP_REPORT_INTERVAL_NS:
+                return
+            count = self._dropped_unreported
+            self._dropped_unreported = 0
+            self._drop_reported_at_ns = now
+        self._emit_stderr(
+            f"{self._tracer_label} pending queue full "
+            f"(max={self._max_pending_spans}); dropped {count} finished "
+            f"span{'' if count == 1 else 's'} since the last report, "
+            f"latest {span.id} ({span.name!r})"
+        )
 
     def _record_dropped_spans(self, count: int) -> None:
         if count <= 0:

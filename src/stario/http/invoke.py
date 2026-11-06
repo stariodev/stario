@@ -110,7 +110,7 @@ def on_handler_done(c: Context, w: Writer, task: asyncio.Task[Any]) -> None:
             if w.started or not _answer_framework_exception(w, exc):
                 if record:
                     # The span carries status, message, and traceback.
-                    span.fail(str(exc))
+                    span.fail(str(exc) or type(exc).__name__)
                     span.exception(exc)
                 else:
                     _log.error("Handler failed", exc_info=exc)
