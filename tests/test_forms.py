@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import random
 import threading
+from collections.abc import Callable
 from typing import ClassVar
 
 import pytest
@@ -12,6 +13,7 @@ import pytest
 from stario import App, Context, Route, Writer
 from stario.exceptions import RequestBodyError
 from stario.forms import Form, UploadFile, read_form
+from stario.forms import read as forms_read
 from stario.forms._multipart import (
     MultipartError,
     MultipartLimitError,
@@ -403,6 +405,34 @@ class TestReadFormEdges:
         async with TestClient(app) as client:
             r = await client.post("/keep", files={"f": ("big.bin", payload)})
         assert (r.status_code, r.text) == (200, f"{len(payload)} True")
+
+    async def test_disk_writes_hop_to_a_thread_per_batch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Past the spool size, chunks gather and one hop writes about 1 MiB."""
+        payload = bytes(range(256)) * (3 * 4096)  # 3 MiB
+        hops = 0
+
+        async def counting[T](fn: Callable[[], T]) -> T:
+            nonlocal hops
+            hops += 1
+            return await in_thread(fn)
+
+        monkeypatch.setattr(forms_read, "in_thread", counting)
+
+        async def keep(c: Context, w: Writer) -> None:
+            with await read_form(c.req, spool_size=10) as form:
+                upload = form.file("f")
+                assert upload is not None
+                data = await upload.read()
+                w.text(f"{upload.size} {data == payload}")
+
+        app = App()
+        app.add(Route("POST /keep"), keep)
+        async with TestClient(app) as client:
+            r = await client.post("/keep", files={"f": ("big.bin", payload)})
+        assert (r.status_code, r.text) == (200, f"{len(payload)} True")
+        assert 1 <= hops <= 4, hops
 
     async def test_quote_cr_lf_escapes_round_trip(self):
         """Browsers write `"`, CR, LF as %22, %0D, %0A; the reader decodes them."""

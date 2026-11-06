@@ -3,6 +3,7 @@
 import asyncio
 import queue
 import threading
+import time
 
 import pytest
 
@@ -491,6 +492,25 @@ class TestRelayRaceConditions:
 
         assert unsubscribed == 5
         await _collect_one(relay, "concurrent.*", "concurrent.after", "ok")
+
+    async def test_mass_unsubscribe_is_fast_and_keeps_order(self) -> None:
+        relay = Relay[int]()
+        subs = [relay.subscribe("bulk.*") for _ in range(2000)]
+        for sub in subs:
+            await sub.__aenter__()
+        kept = subs[::10]
+
+        started = time.perf_counter()
+        for index, sub in enumerate(subs):
+            if index % 10:
+                relay.drop_subscription(sub)
+        elapsed = time.perf_counter() - started
+
+        assert elapsed < 0.5
+        assert list(relay.subs["bulk.*"]) == kept
+        for sub in kept:
+            relay.drop_subscription(sub)
+        assert "bulk.*" not in relay.subs
 
 
 class TestRelaySubscriptionOrdering:

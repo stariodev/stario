@@ -144,12 +144,25 @@ def _is_relative(path: object) -> TypeGuard[str]:
     )
 
 
+def _is_hidden(path: str) -> bool:
+    return any(part.startswith(".") for part in path.split("/"))
+
+
 def _bad_path(path: object) -> StarioError:
     return StarioError(
         "File path must be a non-empty relative POSIX path",
         context={"path": path},
         help_text="Use a path like 'css/app.css'. Do not use '..', a leading slash, or backslashes.",
         example='files.href("css/app.css")',
+    )
+
+
+def _hidden(path: str) -> StarioError:
+    return StarioError(
+        "Hidden path segments are not served",
+        context={"path": path},
+        help_text="Pass include_hidden=True to serve names that start with a dot.",
+        example="Files(directory, include_hidden=True)",
     )
 
 
@@ -384,6 +397,7 @@ class _Mount:
         "_compression",
         "_content_types",
         "_loaded",
+        "_root",
         "_route",
         "directory",
         "follow_symlinks",
@@ -449,6 +463,8 @@ class _Mount:
         self._content_types = types
         self._cache: dict[str, _Cached] = {}
         self._loaded = False
+        # The real path of `directory`, resolved on first use (see resolve()).
+        self._root: Path | None = None
 
     def register(
         self,
@@ -583,13 +599,10 @@ class _Mount:
     def resolve(self, path: str) -> tuple[Path, stat_result] | None:
         if not _is_relative(path):
             return None
-        parts = Path(*path.split("/"))
-        if not self.include_hidden and any(
-            part.startswith(".") for part in parts.parts
-        ):
+        if not self.include_hidden and _is_hidden(path):
             return None
+        parts = Path(*path.split("/"))
         try:
-            root = self.directory.resolve(strict=True)
             if not self.follow_symlinks:
                 current = self.directory
                 for part in parts.parts:
@@ -597,8 +610,13 @@ class _Mount:
                     if stat_module.S_ISLNK(current.lstat().st_mode):
                         return None
             resolved = self.directory.joinpath(parts).resolve(strict=True)
-            if not resolved.is_relative_to(root):
-                return None
+            root = self._root
+            if root is None or not resolved.is_relative_to(root):
+                # First use, or `directory` now points elsewhere (a re-pointed
+                # symlink): resolve the root again, once, not on every request.
+                root = self._root = self.directory.resolve(strict=True)
+                if not resolved.is_relative_to(root):
+                    return None
             file_stat = resolved.stat()
         except FileNotFoundError:
             return None
@@ -998,7 +1016,11 @@ _ACTIVE_TYPES: Final = frozenset(
 
 
 class Files(_Mount):
-    """Live files. `href()` checks the path exists. GET uses ETag and Range.
+    """Live files. `href()` builds the URL. GET uses ETag and Range.
+
+    `href()` does not read the disk: it checks the path shape and builds the
+    URL, like `Route.href`. A path that is missing, a directory, or an
+    uncontained symlink is a 404 on GET.
 
     Pass `untrusted=True` for directories holding user uploads or other
     untrusted bytes: every served response then carries
@@ -1044,8 +1066,8 @@ class Files(_Mount):
     ) -> str:
         if not _is_relative(path):
             raise _bad_path(path)
-        if self.resolve(path) is None:
-            raise _missing(path)
+        if not self.include_hidden and _is_hidden(path):
+            raise _hidden(path)
         return self._route.href(path, query=query, fragment=fragment)
 
     def _load(self) -> None:

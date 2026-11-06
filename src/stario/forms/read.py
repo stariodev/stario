@@ -31,6 +31,8 @@ DEFAULT_MAX_FIELD_SIZE = 1024 * 1024
 DEFAULT_MAX_FILES = 10
 DEFAULT_SPOOL_SIZE = 1024 * 1024
 DEFAULT_MAX_PART_HEADER_BYTES = 16 * 1024
+# Bytes of a file past `spool_size` gathered before one thread hop writes them.
+_WRITE_BATCH = 1024 * 1024
 
 # RFC 2046 5.1.1: 1 to 70 bchars, not ending with a space.
 _BOUNDARY = re.compile(r"[0-9A-Za-z'()+_,\-./:=? ]{0,69}[0-9A-Za-z'()+_,\-./:=?]")
@@ -135,6 +137,7 @@ async def _read_multipart(
     part: PartStart | None = None
     text = bytearray()
     spool: SpooledTemporaryFile[bytes] | None = None
+    pending = bytearray()  # bytes past spool_size not yet written to disk
     size = 0
 
     def open_spool() -> SpooledTemporaryFile[bytes]:
@@ -172,6 +175,9 @@ async def _read_multipart(
                     if part.filename is None:
                         fields.append((part.name, text.decode("utf-8", "replace")))
                     elif spool is not None:
+                        if pending:
+                            await in_thread(partial(spool.write, pending))
+                            pending.clear()
                         spool.seek(0)
                         upload = UploadFile(
                             _filename(part.filename), part.content_type, spool, size
@@ -193,8 +199,13 @@ async def _read_multipart(
                         if max_file_size is not None and size > max_file_size:
                             raise RequestBodyError(413, "File too large")
                         if size > spool_size:
-                            # On disk now: keep the event loop free.
-                            await in_thread(partial(spool.write, event))
+                            # On disk now: gather chunks and write them in one
+                            # thread hop per _WRITE_BATCH, so the event loop
+                            # stays free without a hop per body chunk.
+                            pending += event
+                            if len(pending) >= _WRITE_BATCH:
+                                await in_thread(partial(spool.write, pending))
+                                pending.clear()
                         else:
                             spool.write(event)
         parser.close()

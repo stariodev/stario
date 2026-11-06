@@ -171,7 +171,7 @@ class RelaySubscription[T]:
         # Join the registry while still inactive; publish skips until active is set.
         with self._relay.lock:
             for pat in self.patterns:
-                self._relay.subs.setdefault(pat, []).append(self)
+                self._relay.subs.setdefault(pat, {})[self] = None
         with self._inbox_lock:
             self.active = True
 
@@ -337,9 +337,10 @@ class Relay[T]:
 
     def __init__(self) -> None:
         self.lock = Lock()
-        # pattern -> subscriptions registered for it. Lists preserve delivery order
-        # and iterate fast for the small fanouts this registry is built for.
-        self.subs: dict[str, list[RelaySubscription[T]]] = {}
+        # pattern -> subscriptions registered for it, in delivery order. A dict
+        # keeps insertion order with O(1) add and remove, so N subscribers of
+        # one pattern can leave without rebuilding the bucket N times.
+        self.subs: dict[str, dict[RelaySubscription[T], None]] = {}
 
     def drop_subscription(self, subscription: RelaySubscription[T]) -> None:
         # Wake/cancel any blocked receive first, then remove from the registry.
@@ -349,13 +350,8 @@ class Relay[T]:
                 subs = self.subs.get(pattern)
                 if subs is None:
                     continue
-                remaining = [s for s in subs if s is not subscription]
-                # Nothing removed for this pattern — leave the existing list in place.
-                if len(remaining) == len(subs):
-                    continue
-                if remaining:
-                    self.subs[pattern] = remaining
-                else:
+                subs.pop(subscription, None)
+                if not subs:
                     # Drop empty buckets so the registry doesn't accumulate dead keys.
                     del self.subs[pattern]
 
@@ -363,8 +359,11 @@ class Relay[T]:
         """Deliver `(subject, data)` to every subscriber whose pattern matches.
 
         Thread-safe from any OS thread. Delivery runs after the subscriber
-        snapshot is taken; neither `Relay.lock` nor `_inbox_lock` is held while
-        `Future.set_result` runs. Does not await subscribers.
+        snapshot is taken, so `Relay.lock` is not held while `Future.set_result`
+        runs. A same-loop delivery does hold that subscription's `_inbox_lock`
+        for the `set_result` call; it only schedules the waiter's callbacks on
+        the loop, so no other code runs under the lock. Does not await
+        subscribers.
         """
         if not subject:
             raise StarioError("publish subject must be non-empty")

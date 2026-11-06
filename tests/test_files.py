@@ -36,17 +36,19 @@ class TestFiles:
 
         assert files.href("new file.txt") == "/media/new%20file.txt"
 
-    def test_href_tracks_live_state(self, tmp_path: Path) -> None:
-        target = tmp_path / "file.txt"
+    def test_href_does_not_touch_the_filesystem(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         files = Files(tmp_path)
 
-        with pytest.raises(StarioError, match="not found"):
-            files.href("file.txt")
-        target.write_text("ready")
-        assert files.href("file.txt") == "/data/file.txt"
-        target.unlink()
-        with pytest.raises(StarioError, match="not found"):
-            files.href("file.txt")
+        def no_stat(*args: object, **kwargs: object) -> object:
+            raise AssertionError("href() must not stat")
+
+        with monkeypatch.context() as patched:
+            patched.setattr(os, "stat", no_stat)
+            patched.setattr(os, "lstat", no_stat)
+            assert files.href("missing.txt") == "/data/missing.txt"
+            assert files.href("a/b/missing.txt") == "/data/a/b/missing.txt"
 
     def test_href_appends_query_and_fragment(self, tmp_path: Path) -> None:
         (tmp_path / "file.txt").write_text("ready")
@@ -66,48 +68,20 @@ class TestFiles:
         with pytest.raises(StarioError):
             files.href(path)
 
-    def test_rejects_directory_hidden_and_symlink(self, tmp_path: Path) -> None:
-        (tmp_path / "folder").mkdir()
-        (tmp_path / ".secret").write_text("secret")
-        (tmp_path / "target.txt").write_text("target")
-        (tmp_path / "link.txt").symlink_to(tmp_path / "target.txt")
+    def test_rejects_hidden_segments(self, tmp_path: Path) -> None:
         files = Files(tmp_path)
+        hidden = Files(tmp_path, include_hidden=True)
 
-        for path in ("folder", ".secret", "link.txt"):
-            with pytest.raises(StarioError, match="not found"):
+        for path in (".secret", "a/.b/c.txt"):
+            with pytest.raises(StarioError, match="Hidden"):
                 files.href(path)
-
-    def test_symlinks_must_remain_contained(self, tmp_path: Path) -> None:
-        root = tmp_path / "root"
-        root.mkdir()
-        (root / "target.txt").write_text("target")
-        (root / "inside.txt").symlink_to(root / "target.txt")
-        outside = tmp_path / "outside.txt"
-        outside.write_text("secret")
-        (root / "outside.txt").symlink_to(outside)
-        files = Files(root, follow_symlinks=True)
-
-        assert files.href("inside.txt") == "/data/inside.txt"
-        with pytest.raises(StarioError, match="not found"):
-            files.href("outside.txt")
+        assert hidden.href(".secret") == "/data/.secret"
 
     def test_host_prefix_can_generate_urls(self, tmp_path: Path) -> None:
         (tmp_path / "file.txt").write_text("ready")
         files = Files(tmp_path, "//cdn.example.com/media")
 
         assert files.href("file.txt") == "//cdn.example.com/media/file.txt"
-
-    def test_directory_symlink_cannot_escape(self, tmp_path: Path) -> None:
-        root = tmp_path / "root"
-        root.mkdir()
-        outside = tmp_path / "outside"
-        outside.mkdir()
-        (outside / "secret.txt").write_text("leak")
-        (root / "via").symlink_to(outside)
-        files = Files(root, follow_symlinks=True)
-
-        with pytest.raises(StarioError, match="not found"):
-            files.href("via/secret.txt")
 
 
 @pytest.mark.asyncio
@@ -170,6 +144,81 @@ class TestServing:
         assert {missing.status_code, folder.status_code, hidden.status_code} == {404}
         assert traversal.status_code == 404
         assert missing.headers.get("x-content-type-options") == "nosniff"
+
+    async def test_symlinks_must_remain_contained(self, tmp_path: Path) -> None:
+        root = tmp_path / "root"
+        root.mkdir()
+        (root / "target.txt").write_text("target")
+        (root / "inside.txt").symlink_to(root / "target.txt")
+        outside = tmp_path / "outside.txt"
+        outside.write_text("secret")
+        (root / "outside.txt").symlink_to(outside)
+        followed = Files(root, follow_symlinks=True)
+
+        assert followed.href("outside.txt") == "/data/outside.txt"
+        async with TestClient(_app(Files(root))) as client:
+            unfollowed = await client.get("/data/inside.txt")
+        async with TestClient(_app(followed)) as client:
+            inside = await client.get("/data/inside.txt")
+            escaped = await client.get("/data/outside.txt")
+
+        assert unfollowed.status_code == 404
+        assert (inside.status_code, inside.content) == (200, b"target")
+        assert escaped.status_code == 404
+
+    async def test_directory_symlink_cannot_escape(self, tmp_path: Path) -> None:
+        root = tmp_path / "root"
+        root.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.txt").write_text("leak")
+        (root / "via").symlink_to(outside)
+        files = Files(root, follow_symlinks=True)
+
+        async with TestClient(_app(files)) as client:
+            response = await client.get("/data/via/secret.txt")
+
+        assert response.status_code == 404
+
+    async def test_root_is_resolved_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "a.txt").write_text("a")
+        files = Files(tmp_path)
+        original = Path.resolve
+        root_resolves = 0
+
+        def counting(path: Path, strict: bool = False) -> Path:
+            nonlocal root_resolves
+            if path == files.directory:
+                root_resolves += 1
+            return original(path, strict=strict)
+
+        monkeypatch.setattr(Path, "resolve", counting)
+        async with TestClient(_app(files)) as client:
+            for _ in range(3):
+                assert (await client.get("/data/a.txt")).status_code == 200
+
+        assert root_resolves == 1
+
+    async def test_repointed_directory_symlink_serves_the_new_target(
+        self, tmp_path: Path
+    ) -> None:
+        for release in ("one", "two"):
+            (tmp_path / release).mkdir()
+            (tmp_path / release / "x.txt").write_text(release)
+        current = tmp_path / "current"
+        current.symlink_to(tmp_path / "one")
+        files = Files(current)
+
+        async with TestClient(_app(files)) as client:
+            first = await client.get("/data/x.txt")
+            current.unlink()
+            current.symlink_to(tmp_path / "two")
+            second = await client.get("/data/x.txt")
+
+        assert first.content == b"one"
+        assert second.content == b"two"
 
     async def test_content_type_override(self, tmp_path: Path) -> None:
         (tmp_path / "site.custom").write_text("data")

@@ -74,6 +74,7 @@ test = [
     "hypothesis>=6.148",
     "pytest>=8.4.1",
     "pytest-asyncio>=1.3.0",
+    "pytest-timeout>=2.3",
 ]
 dev = [
     { include-group = "test" },
@@ -90,6 +91,9 @@ default-groups = ["dev"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+# A hung test fails here instead of running to the CI limit.
+timeout = 120
+timeout_method = "thread"
 
 [tool.pyrefly]
 python-version = "3.12"
