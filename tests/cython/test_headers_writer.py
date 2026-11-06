@@ -6,13 +6,14 @@ import pytest
 import stario.cookies as cookies
 from stario import App, Route
 from stario.exceptions import StarioError, StarioRuntime
-from stario.http.compression import (
-    CompressionConfig,
+from stario.http.compression import CompressionConfig
+from stario.http.headers import Headers as PublicHeaders
+from stario_cython.codecs import (
+    BrotliDecoder,
+    ZstdDecoder,
     brotli_decompress,
     zstd_decompress,
 )
-from stario.http.headers import Headers as PublicHeaders
-from stario_cython.codecs import BrotliDecoder, ZstdDecoder
 from stario_cython.exchange import Headers
 from tests.cython.http import read_chunk, read_response, running_server
 

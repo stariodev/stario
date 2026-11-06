@@ -29,6 +29,15 @@ def test_expires_int_and_datetime() -> None:
     assert "2030" in combined2
 
 
+def test_expires_http_date_string() -> None:
+    w = make_writer()
+    cookies.set_cookie(w, "sid", "v", expires="Wed, 21 Oct 2015 07:28:00 GMT")
+    assert "expires=Wed, 21 Oct 2015 07:28:00 GMT" in _cookie_header(w)
+
+    with pytest.raises(StarioError, match="expires"):
+        cookies.set_cookie(make_writer(), "sid", "v", expires="x; path=/")
+
+
 def test_set_cookie_max_age_and_defaults() -> None:
     w = make_writer()
     cookies.set_cookie(w, "sid", "v", max_age=3600)

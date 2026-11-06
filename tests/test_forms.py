@@ -222,6 +222,15 @@ class TestReadForm:
             )
         assert r.text == "title=t"
 
+    async def test_empty_file_parts_count_toward_max_files(self):
+        # max_files=2 in `echo`; each part would otherwise open a spool.
+        body = multipart_body(*[(file_part("photo", ""), b"")] * 3)
+        async with TestClient(form_app()) as client:
+            r = await client.post(
+                "/form", content=body, headers={"content-type": MULTIPART}
+            )
+        assert (r.status_code, r.text) == (413, "Too many files")
+
     @pytest.mark.parametrize(
         ("kwargs", "detail"),
         [

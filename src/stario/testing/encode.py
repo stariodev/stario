@@ -6,11 +6,11 @@ from typing import Any
 from urllib.parse import urlencode
 from uuid import uuid4
 
-from stario.http.compression import brotli_decompress, zstd_decompress
 from stario.http.headers import Headers
 from stario.json import dumps_bytes as json_dumps_bytes
 from stario.testing.cookies import parse_set_cookie_headers
 from stario.testing.types import FileData, FormData, QueryParamInput
+from stario_cython.codecs import brotli_decompress, zstd_decompress
 
 
 def expand_pairs(items: QueryParamInput | FormData) -> list[tuple[str, str]]:

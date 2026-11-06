@@ -325,8 +325,8 @@ shares it safely.
 Unsafe: `app.add` / `use` concurrent with lookups. Register routes in
 bootstrap.
 
-`stario.http.wire` path/accept-encoding LRUs and `markup.escape` caches
-are the same story — OK.
+The `stario.http.compression` accept-encoding LRU and `markup.escape`
+caches are the same story — OK.
 
 The compiled trie is C structs plus read-only dicts; concurrent reads
 need no lock.
