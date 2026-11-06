@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import random
 import threading
 from pathlib import Path
 from typing import Any
@@ -368,6 +369,27 @@ class TestServing:
 
         assert response.status_code == 200
         assert response.headers.get("content-encoding") is None
+
+    async def test_streamed_body_larger_than_a_span_round_trips(
+        self, tmp_path: Path
+    ) -> None:
+        """A body over STREAM_SPAN is several reads with a drain between them."""
+        span = filesystem.STREAM_SPAN
+        body = random.Random(7).randbytes(2 * span + 12345)
+        (tmp_path / "big.bin").write_bytes(body)
+        files = Files(tmp_path)
+
+        async with TestClient(_app(files)) as client:
+            full = await client.get("/data/big.bin")
+            partial = await client.get(
+                "/data/big.bin", headers={"Range": f"bytes={span - 8}-{span + 7}"}
+            )
+
+        assert full.status_code == 200
+        assert full.headers.get("content-length") == str(len(body))
+        assert full.content == body
+        assert partial.status_code == 206
+        assert partial.content == body[span - 8 : span + 8]
 
     async def test_validators_and_304(self, tmp_path: Path) -> None:
         (tmp_path / "file.txt").write_text("content")
