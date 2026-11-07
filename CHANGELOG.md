@@ -4,6 +4,17 @@ All notable changes to Stario are documented in this file.
 
 The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Fixed
+
+- `Tag`, `VoidTag`, `Tag.__init__` and `Tag.__call__` have signatures for
+  `inspect.signature` again. `Tag` became a Cython type in 5.5.0, and its
+  slot methods lost their signatures, so doc tools showed `Tag` without
+  arguments.
+- The `prefixed()` docstring names its import path again
+  (`from stario.markup.attributes import prefixed`); 5.6.0 dropped it.
+
 ## 5.6.0 - 2026-11-07
 
 ### Changed

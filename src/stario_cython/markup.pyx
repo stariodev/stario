@@ -1115,8 +1115,14 @@ cdef int _set_attr(list names, list fragments, object name, object fragment) exc
 # ---------------------------------------------------------------------------
 # Tag
 
+# Tag, VoidTag and their __init__ / __call__ open their docstrings with a
+# signature block too: Cython slot methods have no signature otherwise,
+# and doc tools (stario.dev's apidoc) read it from there.
 cdef class Tag:
-    """Callable factory for a single HTML or SVG element name.
+    """Tag(name, *, empty='normal', prefix='', raw_text=False)
+--
+
+    Callable factory for a single HTML or SVG element name.
 
     Instantiate with the constructor (e.g. `P = Tag("p")`). Prefer the
     built-in catalogs in `stario.markup.html` and `stario.markup.svg` where they
@@ -1157,7 +1163,10 @@ cdef class Tag:
         str prefix not None = "",
         bint raw_text=False,
     ):
-        """Create a tag factory.
+        """__init__($self, /, name, *, empty='normal', prefix='', raw_text=False)
+--
+
+        Create a tag factory.
 
         `name` is the element name on the wire (e.g. `"div"`, `"circle"`).
         Use `empty="void"` for HTML void elements (children are an error), or
@@ -1306,7 +1315,10 @@ cdef class Tag:
         return tuple(out)
 
     def __call__(self, *args):
-        """Build one element from positional arguments.
+        """__call__($self, /, *children)
+--
+
+        Build one element from positional arguments.
 
         Arguments are processed in order:
 
@@ -1418,13 +1430,21 @@ cdef class Tag:
 
 
 cdef class VoidTag(Tag):
-    """A void element factory (`br`, `img`, `input`, ...): attributes only.
+    """VoidTag(name, *, prefix='')
+--
+
+    A void element factory (`br`, `img`, `input`, ...): attributes only.
 
     Same as `Tag(name, empty="void")`; the separate type lets a type checker
     reject children (`h.Br("x")`) before the code runs.
     """
 
     def __init__(self, str name not None, *, str prefix not None = ""):
+        """__init__($self, /, name, *, prefix='')
+--
+
+        Create a void element factory: ``Tag(name, empty="void", prefix=prefix)``.
+        """
         Tag.__init__(self, name, empty="void", prefix=prefix)
 
 
@@ -1572,7 +1592,8 @@ cdef Attrs _prefixed(object prefix, object attrs):
 def prefixed(prefix, attrs):
     """Return pre-rendered `prefix-name` attribute fragments from a flat mapping.
 
-    Internal primitive for `data()` and `aria()`.
+    Internal primitive for `data()` and `aria()`. For other prefixes import
+    from this submodule, e.g. `from stario.markup.attributes import prefixed`.
     """
     return _prefixed(prefix, attrs)
 

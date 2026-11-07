@@ -463,6 +463,14 @@ class TestValueInputs:
     def test_signatures(self):
         assert str(inspect.signature(SafeString)) == "(rendered)"
         assert str(inspect.signature(Attrs)) == "(rendered)"
+        tag = "(name, *, empty='normal', prefix='', raw_text=False)"
+        assert str(inspect.signature(Tag)) == tag
+        assert str(inspect.signature(Tag.__init__)) == tag.replace("(", "(self, /, ", 1)
+        assert str(inspect.signature(Tag.__call__)) == "(self, /, *children)"
+        assert str(inspect.signature(VoidTag)) == "(name, *, prefix='')"
+        assert (
+            str(inspect.signature(VoidTag.__init__)) == "(self, /, name, *, prefix='')"
+        )
 
     def test_a_bad_child_error_names_the_parent(self):
         with pytest.raises(StarioError) as caught:
