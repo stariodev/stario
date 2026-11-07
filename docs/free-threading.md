@@ -328,14 +328,29 @@ bootstrap.
 The `stario.http.compression` accept-encoding LRU and the `lru_cache` on
 `markup.escape.validate_attribute_key` are the same story — OK.
 
-Two plain-dict caches are safe by construction rather than by a lock:
-`_VALID_KEYS` in `stario_cython/markup.pyx` (attribute name → itself) and
-`_CLASSES_CACHE` in `markup/attributes.py` (class token tuple → fragment).
-Both are bounded by refusing new entries past a cap, never by clearing in
-place, and reads take a strong reference (`dict.get`), so a lookup can
-never hold a borrowed pointer to an entry another thread frees. Keep both
-rules if you touch them; a `clear()` or a `PyDict_GetItem` would reopen
-the race under free threading.
+Three plain-dict caches in `stario_cython/markup.pyx` are safe by
+construction rather than by a lock: `_VALID_KEYS` (attribute name →
+itself), `_classes_cache` (class token tuple → `Attrs`; re-exported as
+`markup.attributes._CLASSES_CACHE`), and `_PREFIXED_KEYS` (prefix →
+{key → `prefix-key`}, for `data()` and `aria()`). All three follow the
+same rules:
+
+- A cap refuses new entries; nothing clears the dict in place.
+- Inserts use `setdefault`, so the first value wins and is never replaced.
+- Reads use `stario_dict_get_ref` (`PyDict_GetItemRef` on 3.13+), which
+  returns a strong reference.
+
+Thus a reader never holds a borrowed pointer to an entry that another
+thread frees. Cython's `dict.get` is not enough: it borrows the value,
+then takes a reference. Keep all three rules if you touch a cache.
+
+The same goes for walking a caller's mapping or list. Another thread can
+change it during a tag call, or the attribute-name validator can run
+Python code in the middle of the walk. Iterate with
+`for k, v in d.items()` and `for x in lst`: Cython then takes a strong
+reference to each item and the dict's lock on each step. A raw
+`PyDict_Next` or `PyList_GET_ITEM` loop reads borrowed pointers that can be
+freed under it.
 
 The compiled trie is C structs plus read-only dicts; concurrent reads
 need no lock.

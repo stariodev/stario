@@ -5,25 +5,30 @@ The hot path is deliberately small: `Tag` renders plain mappings as
 """
 
 import re
-from collections.abc import Mapping
 from typing import Any, cast
 
 from stario.exceptions import StarioError
+from stario_cython.markup import CLASSES_CACHE_MAX as _CLASSES_CACHE_MAX_C
+from stario_cython.markup import aria as aria
+from stario_cython.markup import classes as classes
+from stario_cython.markup import classes_cache as _classes_cache
+from stario_cython.markup import data as data
+from stario_cython.markup import prefixed as prefixed
 
-from .escape import escape_attribute_value, validate_attribute_key
-from .slots import BakeSlot, bake_slot_if_present, slot_name
-from .types import AttributeValue, Attrs, ClassInput, StyleDeclarations
-from .wire import wire_scalar_attr_fragment
+from .escape import escape_attribute_value
+from .slots import BakeSlot, slot_name
+from .types import Attrs, StyleDeclarations
 
 # A property name or value that could start another declaration or block.
 _STYLE_KEY_BAD = re.compile(r"[:;{}\\]")
 _STYLE_VALUE_BAD = re.compile(r"[;{}\\]")
-# Rendered `class="..."` fragments for all-str token tuples (Tailwind lists
-# repeat). Bounded by refusing new entries past the cap, never by clearing:
-# a clear in place could free an entry another thread is still reading
-# (free-threaded builds). See docs/free-threading.md.
-_CLASSES_CACHE: dict[tuple[Any, ...], Attrs] = {}
-_CLASSES_CACHE_MAX = 1024
+# `classes()` runs in `stario_cython.markup`. Its cache holds rendered
+# `class="..."` fragments for all-str token tuples (Tailwind lists repeat),
+# bounded by refusing new entries past the cap, never by clearing: a clear in
+# place could free an entry another thread is still reading (free-threaded
+# builds). See docs/free-threading.md.
+_CLASSES_CACHE: dict[tuple[Any, ...], Attrs] = _classes_cache
+_CLASSES_CACHE_MAX: int = _CLASSES_CACHE_MAX_C
 
 
 def styles(declarations: StyleDeclarations) -> Attrs:
@@ -102,108 +107,3 @@ def styles(declarations: StyleDeclarations) -> Attrs:
         parts.append(f"{rendered_key}:{rendered_value};")
 
     return Attrs(f' style="{"".join(parts)}"')
-
-
-def classes(*tokens: ClassInput) -> Attrs:
-    """Return a pre-rendered `class` attribute fragment.
-
-    Mapping values are truthy-tested (not strictly bool): any truthy value
-    includes the class name.
-    """
-    cached = None
-    for token in tokens:
-        if type(token) is not str:
-            break
-    else:
-        cached = _CLASSES_CACHE.get(tokens)
-        if cached is not None:
-            return cached
-
-    rendered: list[str] = []
-
-    for token in tokens:
-        if type(token) is str:
-            rendered.append(escape_attribute_value(token))
-            continue
-
-        if token is None or token is False:
-            continue
-
-        if type(token) is dict or isinstance(token, Mapping):
-            for name, include in cast(Mapping[str, Any], token).items():
-                bake_slot = bake_slot_if_present(include)
-                if bake_slot is not None:
-                    raise StarioError(
-                        f"@baked: parameters are not supported inside classes() conditional values (class {name!r})",
-                        context={"class": name, "parameter": slot_name(bake_slot)},
-                        help_text=(
-                            "Pass the finished class mapping from outside the baked "
-                            "builder, or use a whole classes() fragment as one parameter."
-                        ),
-                    )
-
-                if include:
-                    if type(name) is not str:
-                        raise StarioError(
-                            f"Invalid class token type: {type(name).__name__}",
-                            context={"token_type": type(name).__name__},
-                            help_text="Class tokens must be strings. Use None or False to omit a token.",
-                            example='h.Div(classes({"btn": is_active}))',
-                        )
-                    rendered.append(escape_attribute_value(name))
-            continue
-
-        raise StarioError(
-            f"Invalid class token type: {type(token).__name__}",
-            context={"token_type": type(token).__name__},
-            help_text="Class tokens must be strings. Use None or False to omit a token.",
-            example='h.Div(classes("btn", "primary"))',
-        )
-
-    result = Attrs(f' class="{" ".join(rendered)}"')
-    if (
-        cached is None
-        and len(_CLASSES_CACHE) < _CLASSES_CACHE_MAX
-        and all(type(token) is str for token in tokens)
-    ):
-        _CLASSES_CACHE[tokens] = result
-    return result
-
-
-def prefixed(prefix: str, attrs: Mapping[str, AttributeValue]) -> Attrs:
-    """Return pre-rendered `prefix-name` attribute fragments from a flat mapping.
-
-    Internal primitive for `data()` and `aria()`. For other prefixes import
-    from this submodule, e.g. `from stario.markup.attributes import prefixed`.
-    """
-    prefix = validate_attribute_key(prefix)
-    out: list[str] = []
-
-    for key, value in attrs.items():
-        wire_key = f"{prefix}-{validate_attribute_key(key)}"
-        bake_slot = bake_slot_if_present(value)
-        if bake_slot is not None:
-            raise StarioError(
-                f"@baked: parameters are not supported inside {prefix}() helper values ('{wire_key}')",
-                context={"attribute": wire_key, "parameter": slot_name(bake_slot)},
-                help_text=(
-                    "Pass the flat attribute directly to the baked template instead, "
-                    f"e.g. h.Div({{{wire_key!r}: value}})."
-                ),
-            )
-
-        fragment = wire_scalar_attr_fragment(wire_key, value)
-        if fragment is not None:
-            out.append(fragment)
-
-    return Attrs("".join(out))
-
-
-def data(attrs: Mapping[str, AttributeValue]) -> Attrs:
-    """Return pre-rendered `data-*` attribute fragments from a flat mapping."""
-    return prefixed("data", attrs)
-
-
-def aria(attrs: Mapping[str, AttributeValue]) -> Attrs:
-    """Return pre-rendered `aria-*` attribute fragments from a flat mapping."""
-    return prefixed("aria", attrs)
