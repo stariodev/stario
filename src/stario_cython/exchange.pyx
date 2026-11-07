@@ -3782,10 +3782,10 @@ cdef class RequestHandle:
             body = content.encode("utf-8")
         else:
             if _markup_render is None:
-                from stario.markup import render
+                from stario.markup.render import render_bytes
 
-                _markup_render = render
-            body = _markup_render(content).encode("utf-8")
+                _markup_render = render_bytes
+            body = _markup_render(content)
         self.respond(body, b"text/html; charset=utf-8", status)
 
     def redirect(self, url, status=307):

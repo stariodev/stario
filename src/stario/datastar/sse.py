@@ -13,7 +13,7 @@ from stario.http.writer import Writer
 from stario.json import JsonValue
 from stario.json import dumps as json_dumps
 from stario.json import dumps_bytes as json_dumps_bytes
-from stario.markup.render import render
+from stario.markup.render import render_bytes
 
 from .format import expand_signal_paths, require_mapping
 
@@ -161,7 +161,7 @@ class SSE:
         elif isinstance(content, str):
             html_bytes = content.encode("utf-8")
         else:
-            html_bytes = render(content).encode("utf-8")
+            html_bytes = render_bytes(content)
 
         # SSE represents multiline payloads as repeated `data:` lines.
         # Split on CR, LF, and CRLF: a bare CR is a line terminator in the

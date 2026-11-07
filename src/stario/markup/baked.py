@@ -13,14 +13,18 @@ from functools import update_wrapper
 from typing import Any, cast, overload
 
 from stario.exceptions import StarioError
-from stario_cython.markup import check_raw_text
+from stario_cython.markup import (
+    check_raw_text,
+    element_parts,
+    splice_attribute,
+    splice_child,
+)
 
 from .escape import escape_text
 from .render import render_nodes_to_string
 from .slots import AttrSlot, BakeSlot, RawSlot, slot_name
 from .tag import Tag
 from .types import Element, HtmlElement, SafeString
-from .wire import wire_scalar_attr_fragment
 
 type BakedNode = HtmlElement | BakeSlot | Tag
 type PlanSegment = SafeString | BakeSlot | AttrSlot | RawSlot
@@ -103,37 +107,17 @@ def _flatten_node_into_segments(
         case str():
             pending.append(escape_text(node))
         case bool():
-            raise StarioError(
-                f"@baked {builder_qualname}: boolean literal is not valid HTML child content",
-                context={"function": builder_qualname, "value": str(node)},
-                help_text=(
-                    "The builder runs once at decoration with placeholder parameters. "
-                    "A literal True or False in the tree is fixed forever. Pass a "
-                    "parameter and branch outside the builder, or use str(...) for text."
-                ),
-                example=(
-                    "@baked\n"
-                    "def row(label, active):\n"
-                    '    return h.Li(label, "!" if active else "")'
-                ),
-            )
+            raise _static_boolean_error(builder_qualname, str(node))
         case int() | float():
             pending.append(str(node))
 
         case Tag():
-            raise StarioError(
-                f"@baked {builder_qualname}: uncalled Tag factory in child position",
-                context={"function": builder_qualname, "tag": repr(node)},
-                help_text=(
-                    "Call the tag inside the builder so it returns an element tuple, "
-                    "e.g. h.Div(body) not h.Div."
-                ),
-                example=("@baked\ndef card(body):\n    return h.Div(body)"),
-            )
+            raise _uncalled_tag_error(builder_qualname, repr(node))
 
         case Element() as element:
-            # Element walk must stay in sync with render._render.
-            tag_start, attrs, children, tail = element
+            # Element walk must stay in sync with the render walk in
+            # stario_cython.markup (element_parts gives the same pieces).
+            tag_start, attrs, children, tail = element_parts(element)
             pending.append(tag_start)
             if attrs is not None:
                 if type(attrs) is str:
@@ -171,19 +155,80 @@ def _flatten_node_into_segments(
                 )
 
         case _:
-            raise StarioError(
-                f"@baked {builder_qualname}: unsupported static child type {type(node).__name__}",
-                context={
-                    "function": builder_qualname,
-                    "node_type": type(node).__name__,
-                    "node_value": str(node)[:100],
-                },
-                help_text=(
-                    "Only str, int, float, SafeString, lists, elements built by "
-                    "h.*, and parameters may appear in a @baked builder."
-                ),
-                example=("@baked\ndef row(label):\n    return h.Li(label)"),
+            raise _unsupported_child_error(
+                builder_qualname, type(node).__name__, str(node)[:100]
             )
+
+
+def _static_boolean_error(builder_qualname: str, value: str) -> StarioError:
+    return StarioError(
+        f"@baked {builder_qualname}: boolean literal is not valid HTML child content",
+        context={"function": builder_qualname, "value": value},
+        help_text=(
+            "The builder runs once at decoration with placeholder parameters. "
+            "A literal True or False in the tree is fixed forever. Pass a "
+            "parameter and branch outside the builder, or use str(...) for text."
+        ),
+        example=(
+            "@baked\n"
+            "def row(label, active):\n"
+            '    return h.Li(label, "!" if active else "")'
+        ),
+    )
+
+
+def _uncalled_tag_error(builder_qualname: str, tag: str) -> StarioError:
+    return StarioError(
+        f"@baked {builder_qualname}: uncalled Tag factory in child position",
+        context={"function": builder_qualname, "tag": tag},
+        help_text=(
+            "Call the tag inside the builder so it returns an element, "
+            "e.g. h.Div(body) not h.Div."
+        ),
+        example=("@baked\ndef card(body):\n    return h.Div(body)"),
+    )
+
+
+def _capture_child_error(builder_qualname: str, error: StarioError) -> StarioError:
+    """A tag call rejected a static child while the builder ran: say it as @baked.
+
+    The tag call sets ``stario_child_kind`` on the error (an attribute, so it
+    stays out of the context users see).
+    """
+    context = error.context
+    match getattr(error, "stario_child_kind", None):
+        case "bool":
+            return _static_boolean_error(
+                builder_qualname, str(context.get("node_value"))
+            )
+        case "tag":
+            return _uncalled_tag_error(builder_qualname, str(context.get("tag")))
+        case "tuple" | "other":
+            return _unsupported_child_error(
+                builder_qualname,
+                str(context.get("node_type")),
+                str(context.get("node_value"))[:100],
+            )
+        case _:
+            return error
+
+
+def _unsupported_child_error(
+    builder_qualname: str, node_type: str, node_value: str
+) -> StarioError:
+    return StarioError(
+        f"@baked {builder_qualname}: unsupported static child type {node_type}",
+        context={
+            "function": builder_qualname,
+            "node_type": node_type,
+            "node_value": node_value,
+        },
+        help_text=(
+            "Only str, int, float, SafeString, lists, elements built by "
+            "h.*, and parameters may appear in a @baked builder."
+        ),
+        example=("@baked\ndef row(label):\n    return h.Li(label)"),
+    )
 
 
 def _frozen_segment_plan(
@@ -213,32 +258,6 @@ def _frozen_segment_plan(
     if pending:
         segments.append(SafeString("".join(pending)))
     return tuple(segments)
-
-
-def _splice_attribute(key: str, value: Any) -> str:
-    """Render one whole-value attribute slot."""
-    fragment = wire_scalar_attr_fragment(key, value)
-    return fragment or ""
-
-
-def _splice_child(value: Any) -> str:
-    """Render one child slot using the same value ladder as `render`."""
-    value_obj: object = value
-    value_type = type(value_obj)
-
-    if value is None:
-        return ""
-
-    if value_type is str:
-        return escape_text(cast(str, value))
-
-    if value_type is SafeString:
-        return cast(SafeString, value).rendered
-
-    if value_type is int or value_type is float:
-        return str(value)
-
-    return render_nodes_to_string((value,), root_count=1)
 
 
 def _raw_text(value: Any) -> str:
@@ -279,8 +298,8 @@ def _generate_splice_function(
     """Compile per-call splicing with the builder's exact signature."""
     namespace: dict[str, Any] = {
         "__stario_SafeString": SafeString,
-        "__stario_attr": _splice_attribute,
-        "__stario_child": _splice_child,
+        "__stario_attr": splice_attribute,
+        "__stario_child": splice_child,
         "__stario_raw": _splice_raw,
     }
 
@@ -340,9 +359,10 @@ def _generate_splice_function(
         elif len(expr_parts) == 1:
             body.append(f"    return __stario_SafeString({expr_parts[0]})")
         else:
-            body.append(
-                f"    return __stario_SafeString(''.join(({', '.join(expr_parts)})))"
-            )
+            # An f-string builds the result in one BUILD_STRING step: no
+            # tuple, no join call. Every part is already a str.
+            fields = "".join("{" + part + "}" for part in expr_parts)
+            body.append(f'    return __stario_SafeString(f"{fields}")')
 
     function_name = (
         builder.__name__ if builder.__name__.isidentifier() else "_baked_splice"
@@ -409,8 +429,11 @@ def baked[**P](
                 f"@baked: cannot call {builder.__qualname__!r} with placeholders: {error}",
                 context={"function": builder.__qualname__},
             ) from error
-        except StarioError:
-            raise
+        except StarioError as error:
+            wrapped = _capture_child_error(builder.__qualname__, error)
+            if wrapped is error:
+                raise
+            raise wrapped from error
         except Exception as error:
             raise StarioError(
                 f"@baked: building {builder.__qualname__!r} failed: {type(error).__name__}: {error}",
