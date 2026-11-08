@@ -13,6 +13,12 @@ CVE-2026-111497 fix (1.0.10+, 1.1.1+, or 1.2.1+; `STARIO_ALLOW_OLD_BROTLI=1`
 only when the distro backports that fix without a version bump), and zstd
 development packages (`libnghttp2-dev libbrotli-dev libzstd-dev` on
 Debian/Ubuntu, `brew install pkg-config nghttp2 brotli zstd` on macOS).
+On Windows, `scripts/build-native-deps.ps1` (PowerShell 7) builds nghttp2,
+Brotli, zstd, zlib, and pkgconf with vcpkg pinned to one commit, as static
+libraries on the dynamic CRT, and prints the `PKG_CONFIG` and
+`PKG_CONFIG_PATH` values `setup.py` reads; the build then needs only MSVC
+(Visual Studio Build Tools). `PKG_CONFIG` names the pkg-config binary on
+every platform.
 `scripts/build-native-deps.sh` always builds Brotli 1.2.1 (pass `brotli`
 to build only that library). Gzip links system zlib (`-lz`). Published
 wheels bundle nghttp2, Brotli 1.2.1, and zstd. Python `CompressionConfig` /
@@ -203,4 +209,5 @@ nghttp2's `nghttp2_ssize` API (`nghttp2_session_mem_send2`, `mem_recv2`,
 error codes): no security or performance change, and the `ssize_t` API is
 deprecated but kept. Migrating would break `STARIO_ALLOW_OLD_NGHTTP2=1`
 source builds on distros that ship 1.59 (Ubuntu 24.04). Revisit when
-nghttp2 announces removal, or for a Windows port.
+nghttp2 announces removal. MSVC has no `ssize_t`, so `nghttp2.pxd`
+defines it from `SSIZE_T` before including `nghttp2.h`.

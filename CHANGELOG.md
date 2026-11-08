@@ -4,6 +4,32 @@ All notable changes to Stario are documented in this file.
 
 The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Added
+
+- Windows support (x86-64, Python 3.12-3.14 and 3.14t). PyPI gets
+  `win_amd64` wheels with nghttp2, Brotli 1.2.1, zstd, and zlib linked
+  statically. A source build needs MSVC plus
+  `scripts/build-native-deps.ps1`, which builds those libraries with vcpkg
+  pinned to one commit and prints the `PKG_CONFIG` / `PKG_CONFIG_PATH`
+  values for `setup.py`; `PKG_CONFIG` now names the pkg-config binary on
+  every platform. On Windows:
+  - The server runs one event loop on the stdlib proactor loop: there is no
+    `SO_REUSEPORT`, so `STARIO_THREADS` stays at 1. Unix sockets and uvloop
+    are unavailable (the `uvloop` extra installs nothing there).
+  - Ctrl+Break (`SIGBREAK`) starts a graceful shutdown like Ctrl+C, since
+    Windows never delivers `SIGTERM` to a console process.
+  - `reuse_addr` is ignored: `SO_REUSEADDR` there lets a second socket bind
+    the same port instead of rebinding past `TIME_WAIT`.
+  - `Files` opens files in binary mode, treats directory junctions as
+    symlinks, and answers 404 for names Win32 would not open as written:
+    reserved characters (`<>:"|?*`, controls), a drive or NTFS stream
+    colon (`C:x`, `a.txt::$DATA`), a trailing dot or space (`app.py.` would
+    open `app.py`), and device names (`CON`, `NUL.txt`, `COM1`). With
+    `include_hidden=False` the resolved path is checked again, so an 8.3
+    short name (`GIT~1`) cannot reach a dot directory.
+
 ## 5.5.0 - 2026-11-06
 
 ### Fixed

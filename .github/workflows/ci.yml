@@ -75,4 +75,10 @@ jobs:
         if: matrix.python-version == '3.14t'
         run: |
           uv run python -c "import sys, stario_cython.exchange, stario_cython.protocol, stario_cython.markup, stario_cython.codecs, stario_cython.xxh64; assert not sys._is_gil_enabled(), 'an extension re-enabled the GIL'"
-      - run: uv run pytest
+      - name: Run uv run pytest
+        shell: pwsh
+        run: |
+          # Windows' own curl.exe has no HTTP/2; Git for Windows ships one that does.
+          $env:PATH = "C:\Program Files\Git\mingw64\bin;$env:PATH"
+          curl --version
+          uv run pytest

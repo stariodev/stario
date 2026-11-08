@@ -1,11 +1,16 @@
 """Tests for live `Files` and fingerprinted `Assets` URLs."""
 
 import asyncio
+import ctypes
+import importlib
 import os
 import random
+import stat
+import sys
 import threading
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -334,7 +339,8 @@ class TestServing:
         assert unsatisfied.status_code == 416
         assert len(descriptors) == 4
         for fd in descriptors:
-            with pytest.raises(OSError, match="Bad file descriptor"):
+            # POSIX EBADF; Windows ERROR_INVALID_HANDLE.
+            with pytest.raises(OSError, match=r"Bad file descriptor|handle is invalid"):
                 os.fstat(fd)
 
     async def test_range_on_loaded_file_is_uncompressed(self, tmp_path: Path) -> None:
@@ -1003,7 +1009,8 @@ class TestAssets:
         assert unsatisfied.status_code == 416
         assert len(descriptors) == 3
         for fd in descriptors:
-            with pytest.raises(OSError, match="Bad file descriptor"):
+            # POSIX EBADF; Windows ERROR_INVALID_HANDLE.
+            with pytest.raises(OSError, match=r"Bad file descriptor|handle is invalid"):
                 os.fstat(fd)
 
     @pytest.mark.asyncio
@@ -1270,5 +1277,136 @@ class TestOpenOffLoop:
 
         assert descriptors, "the gated open never ran"
         for fd in descriptors:
-            with pytest.raises(OSError, match="Bad file descriptor"):
+            # POSIX EBADF; Windows ERROR_INVALID_HANDLE.
+            with pytest.raises(OSError, match=r"Bad file descriptor|handle is invalid"):
                 os.fstat(fd)
+
+
+class TestWindowsNames:
+    """Win32 name rules for `Files`. The pure checks run on every platform."""
+
+    @pytest.mark.parametrize(
+        "segment",
+        [
+            "a.txt::$DATA",
+            "C:x",
+            "app.py.",
+            "app.py ",
+            "NUL",
+            "nul.txt",
+            "CON .txt",
+            "COM1",
+            "lpt9.log",
+            "COM¹",
+            "CONIN$",
+            "a?b",
+            "a*b",
+            'a"b',
+            "a|b",
+            "a<b",
+            "a>b",
+            "tab\there",
+        ],
+    )
+    def test_unsafe_segments(self, segment: str) -> None:
+        assert filesystem._windows_unsafe(segment)
+
+    @pytest.mark.parametrize(
+        "segment",
+        ["app.py", "console.txt", "nullable", "COM10", "LPT", ".well-known", "v1.2"],
+    )
+    def test_ordinary_segments(self, segment: str) -> None:
+        assert not filesystem._windows_unsafe(segment)
+
+    def test_rules_apply_only_on_windows(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(filesystem, "WINDOWS", True)
+        assert not filesystem._is_relative("css/NUL")
+        assert not filesystem._is_relative("app.py.")
+        assert filesystem._is_relative("css/app.css")
+        monkeypatch.setattr(filesystem, "WINDOWS", False)
+        assert filesystem._is_relative("css/NUL")
+
+    def test_junction_counts_as_link(self) -> None:
+        junction = SimpleNamespace(
+            st_mode=stat.S_IFDIR,
+            st_reparse_tag=filesystem.IO_REPARSE_TAG_MOUNT_POINT,
+        )
+        directory = SimpleNamespace(st_mode=stat.S_IFDIR, st_reparse_tag=0)
+        assert filesystem._is_link(cast(Any, junction))
+        assert not filesystem._is_link(cast(Any, directory))
+
+    async def test_streamed_bytes_are_unchanged(self, tmp_path: Path) -> None:
+        # Text-mode reads on Windows would rewrite CRLF and stop at ^Z.
+        payload = b"line\r\nnext\x1arest\r\n" * 1000
+        (tmp_path / "blob.bin").write_bytes(payload)
+
+        async with TestClient(_app(Files(tmp_path))) as client:
+            full = await client.get("/data/blob.bin")
+            part = await client.get("/data/blob.bin", headers={"Range": "bytes=4-13"})
+
+        assert full.content == payload
+        assert part.content == payload[4:14]
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Win32 name rules")
+    async def test_win32_aliases_are_not_served(self, tmp_path: Path) -> None:
+        (tmp_path / "app.py").write_text("secret = 1")
+        aliases = (
+            "/data/app.py.",
+            "/data/app.py%20",
+            "/data/app.py::$DATA",
+            "/data/NUL",
+            "/data/con.txt",
+            "/data/a%3Fb",
+            "/data/a%2Ab",
+        )
+
+        async with TestClient(_app(Files(tmp_path))) as client:
+            plain = await client.get("/data/app.py")
+            statuses = [(await client.get(alias)).status_code for alias in aliases]
+
+        assert plain.status_code == 200
+        assert statuses == [404] * len(aliases)
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="directory junctions")
+    async def test_junction_is_followed_only_with_follow_symlinks(
+        self, tmp_path: Path
+    ) -> None:
+        winapi: Any = importlib.import_module("_winapi")
+        root = tmp_path / "root"
+        (root / "real").mkdir(parents=True)
+        (root / "real" / "file.txt").write_text("inside")
+        winapi.CreateJunction(str(root / "real"), str(root / "via"))
+
+        unfollowed = Files(root)
+        await unfollowed.load()
+        async with TestClient(_app(unfollowed)) as client:
+            blocked = await client.get("/data/via/file.txt")
+        async with TestClient(_app(Files(root, follow_symlinks=True))) as client:
+            followed = await client.get("/data/via/file.txt")
+
+        assert list(unfollowed._cache) == ["real/file.txt"]
+        assert blocked.status_code == 404
+        assert (followed.status_code, followed.content) == (200, b"inside")
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="8.3 short names")
+    async def test_short_name_cannot_reach_a_hidden_directory(
+        self, tmp_path: Path
+    ) -> None:
+        hidden = tmp_path / ".secrets"
+        hidden.mkdir()
+        (hidden / "key.txt").write_text("key")
+        buffer = ctypes.create_unicode_buffer(260)
+        kernel32 = ctypes.windll.kernel32  # pyrefly: ignore[missing-attribute]
+        if not kernel32.GetShortPathNameW(str(hidden), buffer, 260):
+            pytest.skip("GetShortPathNameW failed")
+        short = Path(buffer.value).name
+        if short.startswith("."):
+            pytest.skip("8.3 names are disabled on this volume")
+
+        async with TestClient(_app(Files(tmp_path))) as client:
+            blocked = await client.get(f"/data/{short}/key.txt")
+        async with TestClient(_app(Files(tmp_path, include_hidden=True))) as client:
+            allowed = await client.get(f"/data/{short}/key.txt")
+
+        assert blocked.status_code == 404
+        assert (allowed.status_code, allowed.content) == (200, b"key")

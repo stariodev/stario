@@ -721,7 +721,13 @@ class _Mount:
                         if not follow and (entry.is_symlink() or entry.is_junction()):
                             continue
                         try:
-                            file_stat = entry.stat(follow_symlinks=follow)
+                            if WINDOWS:
+                                # DirEntry.stat() leaves st_ino and st_dev 0
+                                # there: no identity, and every directory
+                                # would look visited.
+                                file_stat = os.stat(entry.path, follow_symlinks=follow)
+                            else:
+                                file_stat = entry.stat(follow_symlinks=follow)
                             path = Path(entry.path)
                             if follow:
                                 path = path.resolve(strict=True)

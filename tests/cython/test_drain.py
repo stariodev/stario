@@ -156,9 +156,13 @@ async def test_h2_drain_waits_for_the_stream_window() -> None:
             h2.pack_frame(h2.TYPE_WINDOW_UPDATE, 0, 0, grant)
             + h2.pack_frame(h2.TYPE_WINDOW_UPDATE, 0, 1, grant)
         )
+        # Read while waiting: drain needs the bytes to leave the transport,
+        # and how much the kernel buffers for a client that is not reading
+        # differs by platform (Windows takes far less than Linux).
+        reading = asyncio.create_task(h2.read_stream(reader, buf, 1, timeout=5))
         async with asyncio.timeout(2):
             await drained.wait()
-        frames, buf = await h2.read_stream(reader, buf, 1, timeout=5)
+        frames, buf = await reading
         writer.close()
     assert h2.stream_data(frames, 1) == payload
 

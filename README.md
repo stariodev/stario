@@ -27,7 +27,9 @@ Stario is an asyncio-native HTTP stack: you write async handlers and register ro
 
 ## Requirements
 
-Python 3.12 or newer is required, on Linux (glibc) or macOS. The HTTP server is compiled: PyPI ships wheels for Linux x86_64/aarch64 and macOS arm64 with nghttp2, Brotli 1.2.1, and zstd bundled. Elsewhere `pip` builds from source and needs a C compiler, `pkg-config`, nghttp2 1.66+, Brotli with the CVE-2026-111497 fix (1.0.10+, 1.1.1+, or 1.2.1+), and the zstd development packages. Windows is not supported.
+Python 3.12 or newer is required, on Linux (glibc), macOS, or Windows. The HTTP server is compiled: PyPI ships wheels for Linux x86_64/aarch64, macOS arm64, and Windows x86-64 with nghttp2, Brotli 1.2.1, and zstd bundled. Elsewhere `pip` builds from source and needs a C compiler, `pkg-config`, nghttp2 1.66+, Brotli with the CVE-2026-111497 fix (1.0.10+, 1.1.1+, or 1.2.1+), and the zstd development packages; on Windows, MSVC and [`scripts/build-native-deps.ps1`](scripts/build-native-deps.ps1), which builds those libraries with vcpkg and prints the `PKG_CONFIG` and `PKG_CONFIG_PATH` to set.
+
+**Windows:** the server runs on the stdlib proactor loop with one event loop per process (`STARIO_THREADS` stays at 1 without `SO_REUSEPORT`), and has no Unix domain sockets. Ctrl+C or Ctrl+Break (`SIGBREAK`) starts a graceful shutdown; Windows never delivers `SIGTERM`. `reuse_addr` is ignored there, because `SO_REUSEADDR` on Windows lets another socket bind the same port.
 
 **uvloop (optional):** Stario runs on whatever loop you start. For a faster event loop on Linux/macOS, install the optional extra and call `uvloop.run(serve(bootstrap))` instead of `asyncio.run(...)`:
 
@@ -36,7 +38,7 @@ uv add "stario[uvloop]"
 # or: pip install "stario[uvloop]"
 ```
 
-uvloop is not supported on Windows. `STARIO_THREADS=N` is N full servers on one TCP port (`SO_REUSEPORT`); each worker thread creates the same loop class as the loop running `serve()`. Without `SO_REUSEPORT` the process stays at one thread.
+uvloop is not supported on Windows (the extra installs nothing there). `STARIO_THREADS=N` is N full servers on one TCP port (`SO_REUSEPORT`); each worker thread creates the same loop class as the loop running `serve()`. Without `SO_REUSEPORT` the process stays at one thread.
 
 **Free-threaded workers (optional):** on Python 3.14t, `STARIO_THREADS=N` runs N event loops in one process so handler CPU can use more cores while `Relay` stays in-process. See [`docs/free-threading.md`](docs/free-threading.md).
 

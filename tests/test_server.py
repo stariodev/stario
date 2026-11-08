@@ -13,10 +13,11 @@ from typing import Any
 
 import pytest
 
+import stario.http.server as server_module
 from stario import App, Route
 from stario.exceptions import StarioError
 from stario.http.config import RequestPolicy, ServerConfig
-from stario.http.server import Server
+from stario.http.server import SHUTDOWN_SIGNALS, Server
 from stario.telemetry.json import JsonTracer
 from tests.helpers import make_context
 
@@ -145,24 +146,59 @@ async def _connect_with_retry(
                 await asyncio.sleep(0.005)
 
 
+class _ListenTarget:
+    """Where a lifecycle test's server listens: a Unix socket where the
+    platform has them, else loopback TCP (Windows), so drain runs on both."""
+
+    def __init__(self, unix_path: str | None, port: int = 0) -> None:
+        self.unix_path = unix_path
+        self.port = port
+
+    def config(self, **kwargs: Any) -> ServerConfig:
+        if self.unix_path is not None:
+            return ServerConfig(unix_socket=self.unix_path, **kwargs)
+        return ServerConfig(host="127.0.0.1", port=self.port, **kwargs)
+
+    async def connect(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        if self.unix_path is not None:
+            return await _connect_with_retry(self.unix_path)
+        # Windows takes ~2 s to refuse a loopback connect, so allow retries.
+        async with asyncio.timeout(10.0):
+            while True:
+                try:
+                    return await asyncio.open_connection("127.0.0.1", self.port)
+                except ConnectionRefusedError:
+                    await asyncio.sleep(0.005)
+
+    def released(self) -> bool:
+        """The listener is gone: a Unix socket path is unlinked on shutdown."""
+        return self.unix_path is None or not os.path.exists(self.unix_path)
+
+
+def _free_tcp_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
 @pytest.fixture
-def short_socket_path():
-    """AF_UNIX paths are limited to ~104 bytes on macOS; pytest's tmp_path is too long."""
+def listen_target():
     if not hasattr(socket, "AF_UNIX"):
-        pytest.skip("no Unix domain sockets on this platform")
+        yield _ListenTarget(None, _free_tcp_port())
+        return
+    # AF_UNIX paths are limited to ~104 bytes on macOS; pytest's tmp_path is too long.
     path = os.path.join(
         tempfile.gettempdir(), f"stario-test-{os.getpid()}-{os.urandom(3).hex()}.sock"
     )
-    yield path
+    yield _ListenTarget(path)
     if os.path.exists(path):
         os.unlink(path)
 
 
 class TestServerRunLifecycle:
     async def test_run_serves_requests_and_shuts_down_gracefully(
-        self, short_socket_path
+        self, listen_target
     ) -> None:
-        socket_path = short_socket_path
         output = StringIO()
         tracer = JsonTracer(output)
         apps: list[App] = []
@@ -179,12 +215,12 @@ class TestServerRunLifecycle:
         server = Server(
             serve_bootstrap,
             tracer,
-            config=ServerConfig(unix_socket=socket_path, graceful_shutdown_timeout=0.5),
+            config=listen_target.config(graceful_shutdown_timeout=0.5),
         )
 
         run_task = asyncio.create_task(_serve(server))
         try:
-            reader, writer = await _connect_with_retry(socket_path)
+            reader, writer = await listen_target.connect()
             writer.write(b"GET / HTTP/1.1\r\nHost: t\r\n\r\n")
             await writer.drain()
             status, body = await _read_http_response(reader)
@@ -198,7 +234,7 @@ class TestServerRunLifecycle:
             async with asyncio.timeout(2.0):
                 await run_task
 
-        assert not os.path.exists(socket_path)
+        assert listen_target.released()
 
         spans = [json.loads(line) for line in output.getvalue().splitlines()]
         names = [s["name"] for s in spans]
@@ -238,10 +274,33 @@ class TestServerRunLifecycle:
         assert startup["error"] == "boot failed"
         assert not any(s["name"] == "server.shutdown" for s in spans)
 
-    async def test_shutdown_closes_unstarted_idle_connections(
-        self, short_socket_path
+    @pytest.mark.parametrize("sig", SHUTDOWN_SIGNALS, ids=lambda sig: sig.name)
+    async def test_shutdown_signal_drains_and_stops(
+        self, listen_target, sig: signal.Signals
     ) -> None:
-        socket_path = short_socket_path
+        """SIGINT and SIGTERM everywhere, SIGBREAK (Ctrl+Break) on Windows."""
+        output = StringIO()
+        server = Server(
+            bootstrap,
+            JsonTracer(output),
+            config=listen_target.config(graceful_shutdown_timeout=0.5),
+        )
+
+        run_task = asyncio.create_task(_serve(server))
+        _reader, writer = await listen_target.connect()
+        writer.close()
+        signal.raise_signal(sig)
+        async with asyncio.timeout(2.0):
+            await run_task
+
+        spans = [json.loads(line) for line in output.getvalue().splitlines()]
+        shutdown_span = next(s for s in spans if s["name"] == "server.shutdown")
+        assert shutdown_span["status"] == "ok"
+        assert shutdown_span["attributes"]["server.shutdown.trigger"] == "expected_stop"
+
+    async def test_shutdown_closes_unstarted_idle_connections(
+        self, listen_target
+    ) -> None:
         output = StringIO()
         tracer = JsonTracer(output)
         apps: list[App] = []
@@ -253,13 +312,11 @@ class TestServerRunLifecycle:
         server = Server(
             capture_bootstrap,
             tracer,
-            config=ServerConfig(
-                unix_socket=socket_path, graceful_shutdown_timeout=0.05
-            ),
+            config=listen_target.config(graceful_shutdown_timeout=0.05),
         )
 
         run_task = asyncio.create_task(_serve(server))
-        reader, writer = await _connect_with_retry(socket_path)
+        reader, writer = await listen_target.connect()
         try:
             # Idle connection: never sends a request; drain closes it immediately.
             apps[0].signal_shutdown()
@@ -281,9 +338,8 @@ class TestServerRunLifecycle:
         assert attrs["server.shutdown.cancelled_tasks"] == 0
 
     async def test_shutdown_closes_idle_keep_alive_after_request(
-        self, short_socket_path
+        self, listen_target
     ) -> None:
-        socket_path = short_socket_path
         output = StringIO()
         tracer = JsonTracer(output)
         apps: list[App] = []
@@ -300,11 +356,11 @@ class TestServerRunLifecycle:
         server = Server(
             serve_bootstrap,
             tracer,
-            config=ServerConfig(unix_socket=socket_path, graceful_shutdown_timeout=0.5),
+            config=listen_target.config(graceful_shutdown_timeout=0.5),
         )
 
         run_task = asyncio.create_task(_serve(server))
-        reader, writer = await _connect_with_retry(socket_path)
+        reader, writer = await listen_target.connect()
         try:
             writer.write(b"GET / HTTP/1.1\r\nHost: t\r\nConnection: keep-alive\r\n\r\n")
             await writer.drain()
@@ -327,9 +383,8 @@ class TestServerRunLifecycle:
         assert shutdown_span["attributes"]["server.shutdown.idle_closed"] == 1
 
     async def test_second_shutdown_signal_forces_drain_without_failed_span(
-        self, short_socket_path
+        self, listen_target
     ) -> None:
-        socket_path = short_socket_path
         output = StringIO()
         tracer = JsonTracer(output)
         apps: list[App] = []
@@ -348,11 +403,11 @@ class TestServerRunLifecycle:
         server = Server(
             serve_bootstrap,
             tracer,
-            config=ServerConfig(unix_socket=socket_path, graceful_shutdown_timeout=5.0),
+            config=listen_target.config(graceful_shutdown_timeout=5.0),
         )
 
         run_task = asyncio.create_task(_serve(server))
-        reader, writer = await _connect_with_retry(socket_path)
+        reader, writer = await listen_target.connect()
         try:
             writer.write(b"GET / HTTP/1.1\r\nHost: t\r\n\r\n")
             await writer.drain()
@@ -379,9 +434,8 @@ class TestServerRunLifecycle:
         )
         assert event["attributes"]["task.name"].endswith("<locals>.slow")
 
-    async def test_shutdown_names_each_cancelled_task(self, short_socket_path) -> None:
+    async def test_shutdown_names_each_cancelled_task(self, listen_target) -> None:
         """A loop that ignores shutdown shows up by name on the shutdown span."""
-        socket_path = short_socket_path
         output = StringIO()
         tracer = JsonTracer(output)
         apps: list[App] = []
@@ -399,13 +453,11 @@ class TestServerRunLifecycle:
         server = Server(
             deaf_bootstrap,
             tracer,
-            config=ServerConfig(
-                unix_socket=socket_path, graceful_shutdown_timeout=0.05
-            ),
+            config=listen_target.config(graceful_shutdown_timeout=0.05),
         )
 
         run_task = asyncio.create_task(_serve(server))
-        _reader, writer = await _connect_with_retry(socket_path)
+        _reader, writer = await listen_target.connect()
         writer.close()
         apps[0].signal_shutdown()
         async with asyncio.timeout(2.0):
@@ -424,12 +476,9 @@ class TestServerRunLifecycle:
             "ticker",
         ]
 
-    async def test_shutdown_aborts_write_blocked_transport(
-        self, short_socket_path
-    ) -> None:
+    async def test_shutdown_aborts_write_blocked_transport(self, listen_target) -> None:
         """A client that never reads must not stall wait_closed(): the drain
         aborts transports that close() would flush forever."""
-        socket_path = short_socket_path
         output = StringIO()
         tracer = JsonTracer(output)
         apps: list[App] = []
@@ -449,15 +498,14 @@ class TestServerRunLifecycle:
         server = Server(
             serve_bootstrap,
             tracer,
-            config=ServerConfig(
-                unix_socket=socket_path,
+            config=listen_target.config(
                 requests=RequestPolicy(write_timeout=60.0),
                 graceful_shutdown_timeout=0.1,
             ),
         )
 
         run_task = asyncio.create_task(_serve(server))
-        reader, writer = await _connect_with_retry(socket_path)
+        reader, writer = await listen_target.connect()
         try:
             writer.write(b"GET /big HTTP/1.1\r\nHost: t\r\n\r\n")
             await writer.drain()
@@ -478,11 +526,10 @@ class TestServerRunLifecycle:
         assert shutdown_span["attributes"]["server.shutdown.aborted"] >= 1
 
     async def test_shutdown_delivers_response_to_steady_reader(
-        self, short_socket_path
+        self, listen_target
     ) -> None:
         """A close()d transport gets the whole force-close budget to flush;
         a client that keeps reading must see the complete body, not an abort."""
-        socket_path = short_socket_path
         output = StringIO()
         tracer = JsonTracer(output)
         apps: list[App] = []
@@ -503,15 +550,14 @@ class TestServerRunLifecycle:
         server = Server(
             serve_bootstrap,
             tracer,
-            config=ServerConfig(
-                unix_socket=socket_path,
+            config=listen_target.config(
                 requests=RequestPolicy(write_timeout=60.0),
                 graceful_shutdown_timeout=0.5,
             ),
         )
 
         run_task = asyncio.create_task(_serve(server))
-        reader, writer = await _connect_with_retry(socket_path)
+        reader, writer = await listen_target.connect()
         try:
             writer.write(b"GET /big HTTP/1.1\r\nHost: t\r\n\r\n")
             await writer.drain()
@@ -539,10 +585,9 @@ class TestServerRunLifecycle:
         assert shutdown_span["attributes"]["server.shutdown.aborted"] == 0
 
     async def test_shutdown_span_survives_second_sigint_after_stop_requested(
-        self, short_socket_path
+        self, listen_target
     ) -> None:
         """Mimic watch Ctrl+C: stop requested, then a second SIGINT during teardown."""
-        socket_path = short_socket_path
         output = StringIO()
         tracer = JsonTracer(output)
         apps: list[App] = []
@@ -559,11 +604,11 @@ class TestServerRunLifecycle:
         server = Server(
             serve_bootstrap,
             tracer,
-            config=ServerConfig(unix_socket=socket_path, graceful_shutdown_timeout=0.5),
+            config=listen_target.config(graceful_shutdown_timeout=0.5),
         )
 
         run_task = asyncio.create_task(_serve(server))
-        reader, writer = await _connect_with_retry(socket_path)
+        reader, writer = await listen_target.connect()
         try:
             writer.write(b"GET / HTTP/1.1\r\nHost: t\r\nConnection: keep-alive\r\n\r\n")
             await writer.drain()
@@ -583,6 +628,7 @@ class TestServerRunLifecycle:
         assert shutdown_span["status"] == "ok"
 
 
+@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="no Unix domain sockets")
 def test_create_unix_socket_uses_hardened_default_mode() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         path = os.path.join(tmpdir, "stario.sock")
@@ -598,6 +644,7 @@ def test_create_unix_socket_uses_hardened_default_mode() -> None:
             assert mode == 0o660
 
 
+@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="no Unix domain sockets")
 def test_unix_socket_cleanup_only_unlinks_owned_socket() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         path = os.path.join(tmpdir, "stario.sock")
@@ -618,3 +665,14 @@ def test_unix_socket_cleanup_only_unlinks_owned_socket() -> None:
             replacement.close()
             if os.path.exists(path):
                 os.unlink(path)
+
+
+def test_reuse_addr_is_ignored_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SO_REUSEADDR on Windows lets a second socket bind the same port."""
+    server = Server(
+        bootstrap, JsonTracer(StringIO()), config=ServerConfig(reuse_addr=True)
+    )
+    monkeypatch.setattr(server_module, "WINDOWS", True)
+    assert server._reuse_addr() is False
+    monkeypatch.setattr(server_module, "WINDOWS", False)
+    assert server._reuse_addr() is True

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import sys
 
 import pytest
 
@@ -28,7 +29,8 @@ async def _closed_within(reader: asyncio.StreamReader, seconds: float) -> bool:
                 pass
     except TimeoutError:
         return False
-    except ConnectionResetError:
+    except (ConnectionResetError, ConnectionAbortedError):
+        # Windows reports a write after the server's close as aborted.
         pass
     return True
 
@@ -268,11 +270,16 @@ async def _drain_socket(sock: socket.socket, timeout: float) -> int:
         async with asyncio.timeout(timeout):
             while chunk := await loop.sock_recv(sock, 1 << 20):
                 total += len(chunk)
-    except ConnectionResetError:
+    except (ConnectionResetError, ConnectionAbortedError):
         pass
     return total
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows loopback takes the whole 32 MiB write while the client is "
+    "not reading (resume_writing arrives), so the output never stalls",
+)
 @pytest.mark.asyncio
 async def test_client_that_stops_reading_is_aborted_after_write_timeout() -> None:
     app = App()
@@ -296,6 +303,11 @@ async def test_client_that_stops_reading_is_aborted_after_write_timeout() -> Non
     assert received < _BIG
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows loopback takes the whole 32 MiB write while the client is "
+    "not reading (resume_writing arrives), so the output never stalls",
+)
 @pytest.mark.asyncio
 async def test_pipelined_requests_wait_while_the_client_is_not_reading() -> None:
     app = App()
