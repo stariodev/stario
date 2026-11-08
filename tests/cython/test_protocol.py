@@ -1592,3 +1592,18 @@ async def test_host_routing_normalizes_host_header() -> None:
     finally:
         server.close()
         await server.wait_closed()
+
+
+def test_date_line_follows_the_wall_clock() -> None:
+    """The real clock path (time()/gmtime_s on Windows, clock_gettime/gmtime_r
+    elsewhere); every other test pins the Date header."""
+    from datetime import UTC, datetime
+    from email.utils import parsedate_to_datetime
+
+    from stario_cython.protocol import Connections
+
+    line = Connections().date_line
+    assert line.startswith(b"date: ")
+    assert line.endswith(b" GMT\r\n")
+    when = parsedate_to_datetime(line[len(b"date: ") : -2].decode("ascii"))
+    assert abs((when - datetime.now(UTC)).total_seconds()) < 5

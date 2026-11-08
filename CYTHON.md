@@ -13,14 +13,17 @@ CVE-2026-111497 fix (1.0.10+, 1.1.1+, or 1.2.1+; `STARIO_ALLOW_OLD_BROTLI=1`
 only when the distro backports that fix without a version bump), and zstd
 development packages (`libnghttp2-dev libbrotli-dev libzstd-dev` on
 Debian/Ubuntu, `brew install pkg-config nghttp2 brotli zstd` on macOS).
-On Windows, `scripts/build-native-deps.ps1` (PowerShell 7) builds nghttp2,
-Brotli, zstd, zlib, and pkgconf with vcpkg pinned to one commit, as static
-libraries on the dynamic CRT, and prints the `PKG_CONFIG` and
-`PKG_CONFIG_PATH` values `setup.py` reads; the build then needs only MSVC
-(Visual Studio Build Tools). `PKG_CONFIG` names the pkg-config binary on
-every platform.
+On Windows, `scripts/build-native-deps.ps1` (PowerShell 7, `git` on PATH,
+network access for vcpkg's downloads) builds nghttp2, Brotli, zstd, zlib,
+and pkgconf with vcpkg pinned to one commit, as static libraries on the
+dynamic CRT, and prints the `$env:PKG_CONFIG` and `$env:PKG_CONFIG_PATH`
+assignments `setup.py` reads; the extension build then needs MSVC (Visual
+Studio Build Tools). Windows wheels bundle nghttp2 1.71.0 from that pin;
+Linux and macOS wheels bundle 1.70.0 from `build-native-deps.sh`.
+`PKG_CONFIG` names the pkg-config binary on every platform.
 `scripts/build-native-deps.sh` always builds Brotli 1.2.1 (pass `brotli`
-to build only that library). Gzip links system zlib (`-lz`). Published
+to build only that library). Gzip links system zlib (`-lz`; on Windows,
+vcpkg's static zlib). Published
 wheels bundle nghttp2, Brotli 1.2.1, and zstd. Python `CompressionConfig` /
 `Files` use the same libs through `stario_cython.codecs`.
 

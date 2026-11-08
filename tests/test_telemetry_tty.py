@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import TextIO
 from uuid import UUID, uuid4
 
+import pytest
+
 from stario.telemetry.noop import NoOpTracer
 from stario.telemetry.spans import RecordedEvent, RecordedLink, RecordingSpan
 from stario.telemetry.tty import (
@@ -1393,3 +1395,14 @@ class TestHelpers:
         assert _cut("alpha beta gamma", 12) == ("alpha beta", "gamma")
         assert _cut("/srv/yard/apps/data", 12) == ("/srv/yard/", "apps/data")
         assert _cut("abcdefghij", 4) == ("abcd", "efghij")
+
+
+def test_home_folds_with_either_separator(monkeypatch: pytest.MonkeyPatch) -> None:
+    from stario.telemetry import tty
+
+    monkeypatch.setattr(tty.os, "sep", "\\")
+    monkeypatch.setattr(tty.os, "altsep", "/")
+    home = "C:\\Users\\dev"
+    assert tty._fmt_value("dir", home + "\\data", home) == "~\\data"
+    assert tty._fmt_value("dir", home + "/data", home) == "~/data"
+    assert tty._fmt_value("dir", "C:\\Users\\devops", home) == "C:\\Users\\devops"

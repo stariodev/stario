@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import os
 import shutil
 import subprocess
 import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 
@@ -81,31 +82,49 @@ async def _run_client(cmd: list[str]) -> subprocess.CompletedProcess[str]:
             del loop.idle_grace
 
 
+def _tool(name: str) -> str | None:
+    """Absolute path of an external client: ``STARIO_TEST_<NAME>``, else PATH.
+
+    Always run the absolute path: Windows' CreateProcess searches System32
+    before PATH, so a bare ``curl`` can start a different curl than which().
+    """
+    return os.environ.get(f"STARIO_TEST_{name.upper()}") or shutil.which(name)
+
+
 @functools.cache
-def _curl_has_http2() -> bool:
+def _curl_has_http2(curl: str) -> bool:
     version = subprocess.run(
-        ["curl", "--version"], check=False, capture_output=True, text=True
+        [curl, "--version"], check=False, capture_output=True, text=True
     )
     return "HTTP2" in version.stdout.split()
 
 
+def _no_curl(reason: str) -> NoReturn:
+    # CI sets this so a curl without HTTP/2 cannot silently skip these tests.
+    if os.environ.get("STARIO_TEST_REQUIRE_HTTP2_CURL") == "1":
+        pytest.fail(f"{reason} (STARIO_TEST_REQUIRE_HTTP2_CURL=1)")
+    pytest.skip(reason)
+
+
 async def _curl(*args: str) -> subprocess.CompletedProcess[str]:
-    if shutil.which("curl") is None:
-        pytest.skip("curl not installed")
-    if any(arg.startswith("--http2") for arg in args) and not _curl_has_http2():
+    curl = _tool("curl")
+    if curl is None:
+        _no_curl("curl not installed")
+    if any(arg.startswith("--http2") for arg in args) and not _curl_has_http2(curl):
         # Windows' own curl.exe is built without nghttp2.
-        pytest.skip("curl built without HTTP/2")
-    return await _run_client(["curl", "-sS", "--max-time", "5", *args])
+        _no_curl(f"{curl} is built without HTTP/2")
+    return await _run_client([curl, "-sS", "--max-time", "5", *args])
 
 
 def _make_self_signed(dir_path: Path) -> tuple[Path, Path]:
-    if shutil.which("openssl") is None:
+    openssl = _tool("openssl")
+    if openssl is None:
         pytest.skip("openssl not installed")
     cert = dir_path / "cert.pem"
     key = dir_path / "key.pem"
     subprocess.run(
         [
-            "openssl",
+            openssl,
             "req",
             "-x509",
             "-newkey",
@@ -289,7 +308,8 @@ async def test_h2_keep_alive_returns_window_credit() -> None:
     (2MiB for a 4MiB connection). A client that only has ~1MiB of send
     credit then deadlocks. Credit must be submitted, not merely consumed.
     """
-    if shutil.which("h2load") is None:
+    h2load = _tool("h2load")
+    if h2load is None:
         pytest.skip("h2load not installed")
     payload = b"x" * 256
     app = App()
@@ -313,7 +333,7 @@ async def test_h2_keep_alive_returns_window_credit() -> None:
             tmp.flush()
             result = await _run_client(
                 [
-                    "h2load",
+                    h2load,
                     "-n",
                     str(nreq),
                     "-c",

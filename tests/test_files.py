@@ -5,6 +5,7 @@ import ctypes
 import importlib
 import os
 import random
+import shutil
 import stat
 import sys
 import threading
@@ -25,6 +26,16 @@ def _app(files: Assets | Files, **kwargs: Any) -> App:
     app = App()
     files.register(app, **kwargs)
     return app
+
+
+def _symlink(link: Path, target: Path) -> None:
+    """`link.symlink_to(target)`, or skip where symlinks need privilege (Windows)."""
+    try:
+        link.symlink_to(target, target_is_directory=target.is_dir())
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:  # ERROR_PRIVILEGE_NOT_HELD
+            pytest.skip("creating symlinks needs admin rights or Developer Mode")
+        raise
 
 
 async def _loaded(files: Assets | Files, **kwargs: Any) -> App:
@@ -155,10 +166,10 @@ class TestServing:
         root = tmp_path / "root"
         root.mkdir()
         (root / "target.txt").write_text("target")
-        (root / "inside.txt").symlink_to(root / "target.txt")
+        _symlink(root / "inside.txt", root / "target.txt")
         outside = tmp_path / "outside.txt"
         outside.write_text("secret")
-        (root / "outside.txt").symlink_to(outside)
+        _symlink(root / "outside.txt", outside)
         followed = Files(root, follow_symlinks=True)
 
         assert followed.href("outside.txt") == "/data/outside.txt"
@@ -178,7 +189,7 @@ class TestServing:
         outside = tmp_path / "outside"
         outside.mkdir()
         (outside / "secret.txt").write_text("leak")
-        (root / "via").symlink_to(outside)
+        _symlink(root / "via", outside)
         files = Files(root, follow_symlinks=True)
 
         async with TestClient(_app(files)) as client:
@@ -214,13 +225,13 @@ class TestServing:
             (tmp_path / release).mkdir()
             (tmp_path / release / "x.txt").write_text(release)
         current = tmp_path / "current"
-        current.symlink_to(tmp_path / "one")
+        _symlink(current, tmp_path / "one")
         files = Files(current)
 
         async with TestClient(_app(files)) as client:
             first = await client.get("/data/x.txt")
             current.unlink()
-            current.symlink_to(tmp_path / "two")
+            _symlink(current, tmp_path / "two")
             second = await client.get("/data/x.txt")
 
         assert first.content == b"one"
@@ -732,6 +743,18 @@ class TestServing:
         assert ranged.status_code == 206
         assert ranged.headers.get("etag") == identity.headers.get("etag")
 
+    async def test_load_walks_every_sibling_directory(self, tmp_path: Path) -> None:
+        # Windows DirEntry.stat() reports inode 0 for every directory; a walk
+        # that keyed visited directories on it would stop after the first.
+        for name in ("css", "img", "js"):
+            (tmp_path / name).mkdir()
+            (tmp_path / name / f"x.{name}").write_text(name)
+        files = Files(tmp_path)
+        files.register(App())
+        await files.load()
+
+        assert sorted(files._cache) == ["css/x.css", "img/x.img", "js/x.js"]
+
     async def test_load_budget_is_deterministic(self, tmp_path: Path) -> None:
         (tmp_path / "c.txt").write_bytes(b"c")
         (tmp_path / "b.txt").write_bytes(b"bbbb")
@@ -969,10 +992,10 @@ class TestAssets:
         hidden = root / ".skip"
         hidden.mkdir()
         (hidden / "x.css").write_text("x{}")
-        (root / "link.css").symlink_to(root / "a.css")
+        _symlink(root / "link.css", root / "a.css")
         outside = tmp_path / "out.css"
         outside.write_text("o{}")
-        (root / "escape.css").symlink_to(outside)
+        _symlink(root / "escape.css", outside)
 
         files = Assets(root)
         files.register(App())
@@ -1444,3 +1467,133 @@ class TestWindowsNames:
 
         assert blocked.status_code == 404
         assert (allowed.status_code, allowed.content) == (200, b"key")
+
+
+class TestPathHardening:
+    def test_alias_shaped_segments_must_be_listed(self, tmp_path: Path) -> None:
+        (tmp_path / ".git").mkdir()
+        (tmp_path / "data~1.txt").write_text("real")
+        (tmp_path / "css").mkdir()
+
+        assert filesystem._short_name_alias(tmp_path, "GIT~1/config")
+        assert filesystem._short_name_alias(tmp_path, "css/APP~1.CSS")
+        assert not filesystem._short_name_alias(tmp_path, "data~1.txt")
+        assert not filesystem._short_name_alias(tmp_path, "css/app.css")
+
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="Windows checks the resolved long name"
+    )
+    async def test_short_name_alias_cannot_reach_a_hidden_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An NTFS volume mounted on Linux answers to GIT~1 for .git, but its
+        listing shows only the long name; emulate that listing."""
+        (tmp_path / "GIT~1").mkdir()
+        (tmp_path / "GIT~1" / "config").write_text("secret")
+        real_listdir = os.listdir
+
+        def ntfs_listdir(path: Any) -> list[str]:
+            return [".git" if name == "GIT~1" else name for name in real_listdir(path)]
+
+        monkeypatch.setattr(os, "listdir", ntfs_listdir)
+        async with TestClient(_app(Files(tmp_path))) as client:
+            hidden = await client.get("/data/GIT~1/config")
+        async with TestClient(_app(Files(tmp_path, include_hidden=True))) as client:
+            allowed = await client.get("/data/GIT~1/config")
+
+        assert hidden.status_code == 404
+        assert (allowed.status_code, allowed.content) == (200, b"secret")
+
+    async def test_overlong_names_are_404(self, tmp_path: Path) -> None:
+        (tmp_path / "ok.txt").write_text("ok")
+        overlong = (
+            "/data/" + "a" * 300,  # a segment no filesystem stores
+            "/data/" + "%C3%A9" * 200,  # 200 characters, 400 UTF-8 bytes
+            "/data/" + "/".join(["d"] * 2100),  # past PATH_MAX
+        )
+
+        async with TestClient(_app(Files(tmp_path))) as client:
+            ok = await client.get("/data/ok.txt")
+            statuses = [(await client.get(path)).status_code for path in overlong]
+
+        assert ok.status_code == 200
+        assert statuses == [404] * len(overlong)
+
+    async def test_directory_swapped_for_a_link_after_resolve_is_404(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A local user who can write the tree swaps a directory for a link
+        between the checks and the open; the opened file's own path shows it."""
+        root = tmp_path / "root"
+        (root / "sub").mkdir(parents=True)
+        (root / "sub" / "f.txt").write_text("public")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "f.txt").write_text("secret")
+        real_resolve = Path.resolve
+        swapped = False
+
+        def racing_resolve(self: Path, strict: bool = False) -> Path:
+            nonlocal swapped
+            resolved = real_resolve(self, strict=strict)
+            if not swapped and resolved.name == "f.txt":
+                swapped = True
+                shutil.rmtree(root / "sub")
+                _symlink(root / "sub", outside)
+            return resolved
+
+        monkeypatch.setattr(Path, "resolve", racing_resolve)
+        async with TestClient(_app(Files(root))) as client:
+            response = await client.get("/data/sub/f.txt")
+
+        assert swapped
+        assert response.status_code == 404
+        assert b"secret" not in response.content
+
+    async def test_cancelled_stream_closes_its_fd_after_the_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A handler cancelled mid-read (a client reset) closes the fd only
+        once the worker thread's read has returned, never under it."""
+        (tmp_path / "big.bin").write_bytes(b"x" * (3 * 1024 * 1024))
+        app = _app(Files(tmp_path))
+        started = threading.Event()
+        gate = threading.Event()
+        events: list[str] = []
+        streamed: set[int] = set()
+        real_pread = filesystem._pread
+        real_close = os.close
+
+        def gated_pread(fd: int, size: int, offset: int) -> bytes:
+            streamed.add(fd)
+            started.set()
+            assert gate.wait(5)
+            data = real_pread(fd, size, offset)
+            events.append("read-end")
+            return data
+
+        def tracking_close(fd: int) -> None:
+            if fd in streamed:
+                events.append("close")
+            real_close(fd)
+
+        monkeypatch.setattr(filesystem, "_pread", gated_pread)
+        monkeypatch.setattr(os, "close", tracking_close)
+        async with TestClient(app) as client:
+            request = asyncio.ensure_future(client.get("/data/big.bin"))
+            for _ in range(200):
+                if started.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            assert started.is_set(), "the stream never started reading"
+            handler_task = next(iter(app.tasks))
+            handler_task.cancel()
+            await asyncio.sleep(0.05)
+            assert "close" not in events  # still waiting for the read
+            gate.set()
+            with pytest.raises(asyncio.CancelledError):
+                await handler_task
+            request.cancel()
+            await asyncio.gather(request, return_exceptions=True)
+
+        assert events[:2] == ["read-end", "close"]

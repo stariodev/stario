@@ -26,6 +26,8 @@ jobs:
       # that copy before the distro one (same soname, libbrotlidec.so.1).
       PKG_CONFIG_PATH: /usr/local/lib/pkgconfig
       LD_LIBRARY_PATH: /usr/local/lib
+      # The h2 tests that drive a real curl must run, not skip.
+      STARIO_TEST_REQUIRE_HTTP2_CURL: "1"
     steps:
       - uses: actions/checkout@v4
       - name: Native build dependencies
@@ -56,6 +58,7 @@ jobs:
     timeout-minutes: 45
     env:
       VCPKG_DEFAULT_BINARY_CACHE: C:\vcpkg-binary-cache
+      STARIO_TEST_REQUIRE_HTTP2_CURL: "1"
     steps:
       - uses: actions/checkout@v4
       # A new runner image (MSVC) changes vcpkg's ABI hashes: key on it so the
@@ -82,10 +85,14 @@ jobs:
         if: matrix.python-version == '3.14t'
         run: |
           uv run python -c "import sys, stario_cython.exchange, stario_cython.protocol, stario_cython.markup, stario_cython.codecs, stario_cython.xxh64; assert not sys._is_gil_enabled(), 'an extension re-enabled the GIL'"
-      - name: Run uv run pytest
+      # Windows' own curl.exe has no HTTP/2 (nghttp2); the curl.se build does.
+      # The tests run STARIO_TEST_CURL by absolute path: CreateProcess would
+      # find System32's curl before anything on PATH.
+      - name: curl with HTTP/2
         shell: pwsh
         run: |
-          # Windows' own curl.exe has no HTTP/2; Git for Windows ships one that does.
-          $env:PATH = "C:\Program Files\Git\mingw64\bin;$env:PATH"
-          curl --version
-          uv run pytest
+          choco install curl --no-progress -y
+          $curl = Join-Path $env:ChocolateyInstall "bin\curl.exe"
+          & $curl --version
+          Add-Content -Path $env:GITHUB_ENV -Value "STARIO_TEST_CURL=$curl"
+      - run: uv run pytest

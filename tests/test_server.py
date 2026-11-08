@@ -163,8 +163,12 @@ class _ListenTarget:
     async def connect(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         if self.unix_path is not None:
             return await _connect_with_retry(self.unix_path)
-        # Windows takes ~2 s to refuse a loopback connect, so allow retries.
         async with asyncio.timeout(10.0):
+            # Windows takes ~2 s to refuse a loopback connect: wait for the
+            # listener first. The probe binds and closes between awaits, so
+            # it cannot hold the port while the server binds.
+            while not self._port_taken():
+                await asyncio.sleep(0.005)
             while True:
                 try:
                     return await asyncio.open_connection("127.0.0.1", self.port)
@@ -172,8 +176,24 @@ class _ListenTarget:
                     await asyncio.sleep(0.005)
 
     def released(self) -> bool:
-        """The listener is gone: a Unix socket path is unlinked on shutdown."""
-        return self.unix_path is None or not os.path.exists(self.unix_path)
+        """The listener is gone: a Unix socket path is unlinked on shutdown;
+        a TCP port can be bound again (on Windows without SO_REUSEADDR, past
+        the TIME_WAIT the drain leaves, as ServerConfig documents)."""
+        if self.unix_path is not None:
+            return not os.path.exists(self.unix_path)
+        return not self._port_taken()
+
+    def _port_taken(self) -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            if sys.platform != "win32":
+                # POSIX: rebind past TIME_WAIT, still refused by a listener.
+                # Windows: SO_REUSEADDR would let the probe share the port.
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                probe.bind(("127.0.0.1", self.port))
+            except OSError:
+                return True
+            return False
 
 
 def _free_tcp_port() -> int:
@@ -531,6 +551,54 @@ class TestServerRunLifecycle:
         shutdown_span = next(s for s in spans if s["name"] == "server.shutdown")
         assert shutdown_span["attributes"]["server.shutdown.aborted"] >= 1
 
+    async def test_shutdown_aborts_a_drain_paced_writer(self, listen_target) -> None:
+        """A handler that drains between writes, to a client that stopped
+        reading, is aborted by the drain too. Unlike one big write, this
+        stalls on Windows as well: Winsock takes one send whole, then blocks."""
+        output = StringIO()
+        apps: list[App] = []
+
+        async def serve_bootstrap(app: App, span: Any):
+            apps.append(app)
+
+            async def paced(_c, w) -> None:
+                w.write_headers(200)
+                for _ in range(1024):  # up to 64 MiB; stalls long before
+                    w.write(b"z" * 65536)
+                    await w.drain()
+                w.end()
+
+            app.add(Route("GET /paced"), paced)
+            yield
+
+        server = Server(
+            serve_bootstrap,
+            JsonTracer(output),
+            config=listen_target.config(
+                requests=RequestPolicy(write_timeout=60.0),
+                graceful_shutdown_timeout=0.1,
+            ),
+        )
+
+        run_task = asyncio.create_task(_serve(server))
+        reader, writer = await listen_target.connect()
+        try:
+            writer.write(b"GET /paced HTTP/1.1\r\nHost: t\r\n\r\n")
+            await writer.drain()
+            await reader.read(1)  # response bytes are flowing
+            await asyncio.sleep(0.3)  # the client stops reading; output stalls
+            t0 = time.monotonic()
+            apps[0].signal_shutdown()
+            async with asyncio.timeout(4.0):
+                await run_task
+            assert time.monotonic() - t0 < 3.0
+        finally:
+            writer.close()
+
+        spans = [json.loads(line) for line in output.getvalue().splitlines()]
+        shutdown_span = next(s for s in spans if s["name"] == "server.shutdown")
+        assert shutdown_span["attributes"]["server.shutdown.aborted"] >= 1
+
     async def test_shutdown_delivers_response_to_steady_reader(
         self, listen_target
     ) -> None:
@@ -682,3 +750,71 @@ def test_reuse_addr_is_ignored_on_windows(monkeypatch: pytest.MonkeyPatch) -> No
     assert server._reuse_addr() is False
     monkeypatch.setattr(server_module, "WINDOWS", False)
     assert server._reuse_addr() is True
+
+
+_SIGNAL_SERVER = """
+import asyncio
+import sys
+
+from stario import serve
+from stario.http.config import ServerConfig
+from stario.telemetry.json import JsonTracer
+
+
+async def bootstrap(app, span):
+    yield
+
+
+async def main():
+    tracer = JsonTracer(sys.stdout)
+    with tracer:
+        config = ServerConfig(host="127.0.0.1", port=int(sys.argv[1]))
+        await serve(bootstrap, config=config, tracer=tracer)
+
+
+asyncio.run(main())
+"""
+
+
+@pytest.mark.timeout(90)
+def test_os_signal_stops_a_server_process_gracefully(tmp_path: Any) -> None:
+    """The real delivery path: Ctrl+Break (CTRL_BREAK_EVENT to the process
+    group) on Windows, SIGTERM elsewhere, arriving while the loop is blocked
+    in its selector or IOCP wait. raise_signal() in-process cannot show this."""
+    import subprocess
+
+    script = tmp_path / "serve.py"
+    script.write_text(_SIGNAL_SERVER)
+    port = _free_tcp_port()
+    if sys.platform == "win32":
+        flags, stop = subprocess.CREATE_NEW_PROCESS_GROUP, signal.CTRL_BREAK_EVENT
+    else:
+        flags, stop = 0, signal.SIGTERM
+    proc = subprocess.Popen(
+        [sys.executable, str(script), str(port)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        creationflags=flags,
+    )
+    try:
+        deadline = time.monotonic() + 60
+        while True:
+            assert proc.poll() is None, proc.communicate()[1]
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=1).close()
+                break
+            except OSError:
+                assert time.monotonic() < deadline, "server never listened"
+                time.sleep(0.05)
+        proc.send_signal(stop)
+        out, err = proc.communicate(timeout=30)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+
+    assert proc.returncode == 0, err
+    spans = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
+    shutdown_span = next(s for s in spans if s["name"] == "server.shutdown")
+    assert shutdown_span["status"] == "ok"

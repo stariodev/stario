@@ -173,7 +173,7 @@ debug_build = os.environ.get("STARIO_DEBUG_BUILD") == "1"
 def _compiler_args(*, msvc: bool, sse42: bool) -> tuple[list[str], list[str]]:
     """Compile and link flags for one extension, by compiler family."""
     if msvc:
-        # setuptools already passes /Ox /MD /DNDEBUG, and MSVC does no
+        # setuptools already passes /O2 /GL /MD /DNDEBUG, and MSVC does no
         # type-based alias analysis, so nothing mirrors -fno-strict-aliasing.
         # llhttp's SSE 4.2 path keys on __SSE4_2__, which MSVC never defines.
         return (["/Zi"], ["/DEBUG"]) if debug_build else ([], [])

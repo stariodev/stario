@@ -327,7 +327,7 @@ cdef class RequestExchange:
     cdef double _stall_deadline
     cdef uint64_t _stall_touch
     cdef uint64_t _stall_seen
-    cdef int _total_read
+    cdef Py_ssize_t _total_read
     cdef int _max_size
     cdef Py_ssize_t _read_max_size
     cdef double _timeout
