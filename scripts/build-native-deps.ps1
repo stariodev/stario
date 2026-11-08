@@ -39,11 +39,19 @@ function Invoke-Checked {
 New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
 $vcpkgRoot = Join-Path $Prefix "vcpkg"
 $vcpkg = Join-Path $vcpkgRoot "vcpkg.exe"
-if (-not (Test-Path $vcpkg)) {
+$current = ""
+if (Test-Path (Join-Path $vcpkgRoot ".git")) {
+    $current = (& git -C $vcpkgRoot rev-parse HEAD 2>$null | Out-String).Trim()
+} else {
     Invoke-Checked git @("init", "-q", $vcpkgRoot)
+}
+# A checkout from an earlier VcpkgCommit is moved, so a bump takes effect.
+if ($current -ne $VcpkgCommit) {
     Invoke-Checked git @("-C", $vcpkgRoot, "fetch", "-q", "--depth", "1",
         "https://github.com/microsoft/vcpkg", $VcpkgCommit)
-    Invoke-Checked git @("-C", $vcpkgRoot, "checkout", "-q", "FETCH_HEAD")
+    Invoke-Checked git @("-C", $vcpkgRoot, "checkout", "-q", "--force", "FETCH_HEAD")
+}
+if ($current -ne $VcpkgCommit -or -not (Test-Path $vcpkg)) {
     Invoke-Checked (Join-Path $vcpkgRoot "bootstrap-vcpkg.bat") @("-disableMetrics")
 }
 

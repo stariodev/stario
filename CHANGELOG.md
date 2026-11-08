@@ -22,6 +22,12 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
     Windows never delivers `SIGTERM` to a console process.
   - `reuse_addr` is ignored: `SO_REUSEADDR` there lets a second socket bind
     the same port instead of rebinding past `TIME_WAIT`.
+  - Winsock takes a whole send into kernel memory while the send buffer has
+    room, however large: a big one-shot `respond()` to a client that is not
+    reading is held by the kernel rather than aborted after `write_timeout`.
+    Streamed bodies (`w.write` + `await w.drain()`, `Files`) stay bounded.
+    `Files` opens files without delete sharing, so replacing a file while it
+    is streamed fails until the response ends.
   - `Files` opens files in binary mode, treats directory junctions as
     symlinks, and answers 404 for names Win32 would not open as written:
     reserved characters (`<>:"|?*`, controls), a drive or NTFS stream
@@ -29,6 +35,14 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
     open `app.py`), and device names (`CON`, `NUL.txt`, `COM1`). With
     `include_hidden=False` the resolved path is checked again, so an 8.3
     short name (`GIT~1`) cannot reach a dot directory.
+
+### Security
+
+- `Files` checks that the file it opened is the one path resolution vetted
+  (same device and inode). On a mismatch it resolves once more, so an atomic
+  replace still serves the new file, but a symlink swapped in between the
+  checks and the open is a 404. Windows has no `O_NOFOLLOW`, and on any
+  platform an intermediate directory could be replaced in that window.
 
 ## 5.5.0 - 2026-11-06
 

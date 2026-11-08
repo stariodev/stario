@@ -479,8 +479,8 @@ class TestServerRunLifecycle:
 
     @pytest.mark.skipif(
         sys.platform == "win32",
-        reason="Windows loopback takes the whole 10 MiB while the client is not "
-        "reading, so close() flushes and nothing is left to abort",
+        reason="Winsock takes a whole send into the kernel while the send buffer "
+        "has room (KB214397): the 10 MiB flushes and nothing is left to abort",
     )
     async def test_shutdown_aborts_write_blocked_transport(self, listen_target) -> None:
         """A client that never reads must not stall wait_closed(): the drain

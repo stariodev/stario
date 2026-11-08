@@ -304,6 +304,32 @@ class TestServing:
         assert response.status_code == 404
         assert response.content == b"Not Found"
 
+    async def test_file_swapped_after_resolve_is_not_served(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "public.txt").write_text("public")
+        elsewhere = tmp_path.parent / f"{tmp_path.name}-secret.txt"
+        elsewhere.write_text("secret")
+        original = filesystem._open_regular
+        opened: list[int] = []
+
+        def swapped(path: Path | str) -> tuple[int, os.stat_result] | None:
+            # The vetted path now names another file (a symlink swapped in).
+            result = original(elsewhere)
+            if result is not None:
+                opened.append(result[0])
+            return result
+
+        monkeypatch.setattr(filesystem, "_open_regular", swapped)
+        async with TestClient(_app(Files(tmp_path))) as client:
+            response = await client.get("/data/public.txt")
+
+        assert response.status_code == 404
+        assert b"secret" not in response.content
+        for fd in opened:  # closed, not leaked
+            with pytest.raises(OSError, match=r"Bad file descriptor|handle is invalid"):
+                os.fstat(fd)
+
     async def test_request_file_descriptors_are_closed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

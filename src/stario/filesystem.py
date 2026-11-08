@@ -1185,16 +1185,26 @@ class Files(_Mount):
         self.stats = stats
 
     def _resolve_open(self, path: str) -> tuple[int, Path, stat_result] | None:
-        """Resolve then open in one worker-thread hop; fd first for cleanup."""
-        found = self.resolve(path)
-        if found is None:
-            return None
-        source, _ = found
-        opened = _open_regular(source)
-        if opened is None:
-            return None
-        fd, file_stat = opened
-        return fd, source, file_stat
+        """Resolve then open in one worker-thread hop; fd first for cleanup.
+
+        The opened file must be the one resolve() vetted: Windows has no
+        O_NOFOLLOW, and nothing guards intermediate directories. A mismatch
+        resolves once more, so an atomic replace (a deploy) serves the new
+        file, while a swap that persists is a 404.
+        """
+        for _attempt in range(2):
+            found = self.resolve(path)
+            if found is None:
+                return None
+            source, vetted = found
+            opened = _open_regular(source)
+            if opened is None:
+                return None
+            fd, file_stat = opened
+            if (file_stat.st_dev, file_stat.st_ino) == (vetted.st_dev, vetted.st_ino):
+                return fd, source, file_stat
+            os.close(fd)
+        return None
 
     async def __call__(self, context: Context, writer: Writer) -> None:
         path = context.match.params.get("path", "")

@@ -38,13 +38,6 @@ _MIN_NGHTTP2 = (1, 66)
 _PKG_CONFIG = os.environ.get("PKG_CONFIG") or "pkg-config"
 
 
-def _split_flags(text: str) -> list[str]:
-    if not WINDOWS:
-        return shlex.split(text)
-    # POSIX rules would eat the backslashes of a Windows path.
-    return [part.replace('"', "") for part in shlex.split(text, posix=False)]
-
-
 def _pkg_config(option: str) -> list[str]:
     try:
         result = subprocess.run(
@@ -63,7 +56,8 @@ def _pkg_config(option: str) -> list[str]:
             "then set PKG_CONFIG and PKG_CONFIG_PATH as it prints). "
             f"pkg-config detail: {detail.strip()}"
         ) from exc
-    return _split_flags(result.stdout)
+    # POSIX rules on Windows too: pkgconf escapes `\\` and spaces in paths.
+    return shlex.split(result.stdout)
 
 
 def _version_tuple(raw: str) -> tuple[int, ...]:

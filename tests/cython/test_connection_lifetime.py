@@ -295,7 +295,7 @@ class _BackedUpTransport(RecordingTransport):
 @pytest.mark.asyncio
 async def test_stalled_output_is_aborted_after_write_timeout() -> None:
     """The write-stall abort without a real socket, so it runs on every
-    platform (Windows loopback buffers too much to stall a real one)."""
+    platform (one large send never stalls a real Windows socket)."""
     app = App()
 
     async def page(_c, w) -> None:
@@ -328,8 +328,8 @@ async def test_stalled_output_is_aborted_after_write_timeout() -> None:
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="Windows loopback takes the whole 32 MiB write while the client is "
-    "not reading (resume_writing arrives), so the output never stalls",
+    reason="Winsock takes a whole send into the kernel while the send buffer "
+    "has room (KB214397): the 32 MiB leaves the transport and never stalls",
 )
 @pytest.mark.asyncio
 async def test_client_that_stops_reading_is_aborted_after_write_timeout() -> None:
@@ -356,8 +356,8 @@ async def test_client_that_stops_reading_is_aborted_after_write_timeout() -> Non
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="Windows loopback takes the whole 32 MiB write while the client is "
-    "not reading (resume_writing arrives), so the output never stalls",
+    reason="Winsock takes a whole send into the kernel while the send buffer "
+    "has room (KB214397): the 32 MiB leaves the transport and never stalls",
 )
 @pytest.mark.asyncio
 async def test_pipelined_requests_wait_while_the_client_is_not_reading() -> None:
