@@ -74,12 +74,27 @@ if [[ ! -w "$(dirname "$PREFIX")" && "$(id -u)" != 0 ]]; then
 fi
 $SUDO mkdir -p "$PREFIX"
 
+# Download with retries: GitHub release and archive downloads time out, 504,
+# or break mid-transfer now and then. A loop rather than curl's
+# --retry-all-errors, which the manylinux container's curl (7.61) lacks.
+fetch() {
+  local out="$1" url="$2" attempt
+  for attempt in 1 2 3 4 5; do
+    if curl -fsSL --retry 2 --retry-delay 5 -o "$out" "$url"; then
+      return 0
+    fi
+    echo "build-native-deps.sh: download failed (attempt $attempt of 5): $url" >&2
+    sleep $((attempt * 5))
+  done
+  return 1
+}
+
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 cd "$work"
 
 if want nghttp2; then
-  curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o nghttp2.tar.xz \
+  fetch nghttp2.tar.xz \
     "https://github.com/nghttp2/nghttp2/releases/download/v${NGHTTP2_VERSION}/nghttp2-${NGHTTP2_VERSION}.tar.xz"
   verify_sha256 nghttp2.tar.xz "$NGHTTP2_SHA256"
   tar xf nghttp2.tar.xz
@@ -93,7 +108,7 @@ if want nghttp2; then
 fi
 
 if want brotli; then
-  curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o brotli.tar.gz \
+  fetch brotli.tar.gz \
     "https://github.com/google/brotli/archive/refs/tags/v${BROTLI_VERSION}.tar.gz"
   verify_sha256 brotli.tar.gz "$BROTLI_SHA256"
   tar xf brotli.tar.gz
@@ -107,7 +122,7 @@ if want brotli; then
 fi
 
 if want zstd; then
-  curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o zstd.tar.gz \
+  fetch zstd.tar.gz \
     "https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSION}/zstd-${ZSTD_VERSION}.tar.gz"
   verify_sha256 zstd.tar.gz "$ZSTD_SHA256"
   tar xf zstd.tar.gz
