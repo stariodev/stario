@@ -33,10 +33,17 @@ if (-not $Triplet) {
 }
 
 function Invoke-Checked {
-    param([string]$Exe, [string[]]$Arguments)
-    & $Exe @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Exe $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
+    param([string]$Exe, [string[]]$Arguments, [int]$Attempts = 1)
+    for ($attempt = 1; ; $attempt++) {
+        & $Exe @Arguments
+        if ($LASTEXITCODE -eq 0) {
+            return
+        }
+        if ($attempt -ge $Attempts) {
+            throw "$Exe $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
+        }
+        Write-Warning "$Exe failed (exit $LASTEXITCODE); retry $attempt of $($Attempts - 1)"
+        Start-Sleep -Seconds (10 * $attempt)
     }
 }
 
@@ -56,7 +63,7 @@ if (Test-Path (Join-Path $vcpkgRoot ".git")) {
 # without this a bump would leave the old versions in place.
 if ($current -ne $VcpkgCommit) {
     Invoke-Checked git @("-C", $vcpkgRoot, "fetch", "-q", "--depth", "1",
-        "https://github.com/microsoft/vcpkg", $VcpkgCommit)
+        "https://github.com/microsoft/vcpkg", $VcpkgCommit) -Attempts 3
     Invoke-Checked git @("-C", $vcpkgRoot, "checkout", "-q", "--force", "FETCH_HEAD")
     $stale = Join-Path $vcpkgRoot "installed"
     if ($current -and (Test-Path $stale)) {
@@ -64,7 +71,8 @@ if ($current -ne $VcpkgCommit) {
     }
 }
 if ($current -ne $VcpkgCommit -or -not (Test-Path $vcpkg)) {
-    Invoke-Checked (Join-Path $vcpkgRoot "bootstrap-vcpkg.bat") @("-disableMetrics")
+    # Downloads vcpkg.exe from GitHub: retried, as GitHub downloads flake.
+    Invoke-Checked (Join-Path $vcpkgRoot "bootstrap-vcpkg.bat") @("-disableMetrics") -Attempts 3
 }
 
 # Same triplet, release only: the extensions never link the debug builds.
@@ -85,7 +93,7 @@ Set-Content -Encoding ascii -Path (Join-Path $overlay "$Triplet.cmake") -Value @
 
 Invoke-Checked $vcpkg @("install", "--triplet", $Triplet,
     "--overlay-triplets", $overlay, "--disable-metrics",
-    "nghttp2", "brotli", "zstd", "zlib", "pkgconf")
+    "nghttp2", "brotli", "zstd", "zlib", "pkgconf") -Attempts 3
 
 $installed = Join-Path $vcpkgRoot "installed\$Triplet"
 $pkgConfig = Join-Path $installed "tools\pkgconf\pkgconf.exe"
