@@ -58,6 +58,7 @@ jobs:
           - os: ubuntu-latest
           - os: ubuntu-24.04-arm
           - os: macos-15
+          - os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -91,6 +92,7 @@ jobs:
           ls dist/stario-${version}-cp314-cp314-manylinux*_x86_64.whl
           ls dist/stario-${version}-cp314-cp314-manylinux*_aarch64.whl
           ls dist/stario-${version}-cp314-cp314-macosx_*_arm64.whl
+          ls dist/stario-${version}-cp314-cp314-win_amd64.whl
       - uses: pypa/gh-action-pypi-publish@release/v1
 
   github:

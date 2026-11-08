@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import sys
 
 import pytest
 
@@ -28,7 +29,8 @@ async def _closed_within(reader: asyncio.StreamReader, seconds: float) -> bool:
                 pass
     except TimeoutError:
         return False
-    except ConnectionResetError:
+    except (ConnectionResetError, ConnectionAbortedError):
+        # Windows reports a write after the server's close as aborted.
         pass
     return True
 
@@ -268,11 +270,67 @@ async def _drain_socket(sock: socket.socket, timeout: float) -> int:
         async with asyncio.timeout(timeout):
             while chunk := await loop.sock_recv(sock, 1 << 20):
                 total += len(chunk)
-    except ConnectionResetError:
+    except (ConnectionResetError, ConnectionAbortedError):
         pass
     return total
 
 
+class _BackedUpTransport(RecordingTransport):
+    """Output the peer is not reading: the buffer only shrinks when told to."""
+
+    def __init__(self, protocol) -> None:
+        super().__init__(protocol)
+        self.aborted = False
+        self.buffered = 1 << 20
+
+    def abort(self) -> None:
+        self.aborted = True
+        self._closing = True
+        self._protocol.connection_lost(None)
+
+    def get_write_buffer_size(self) -> int:
+        return 0 if self.aborted else self.buffered
+
+
+@pytest.mark.asyncio
+async def test_stalled_output_is_aborted_after_write_timeout() -> None:
+    """The write-stall abort without a real socket, so it runs on every
+    platform (one large send never stalls a real Windows socket)."""
+    app = App()
+
+    async def page(_c, w) -> None:
+        w.text("ok")
+
+    app.add(Route("GET /"), page)
+    proto = make_protocol(asyncio.get_running_loop(), app, write_timeout=1.0)
+    transport = _BackedUpTransport(proto)
+    proto.connection_made(transport)
+    try:
+        proto.data_received(b"GET / HTTP/1.1\r\nHost: t\r\n\r\n")
+        await app.drain_tasks()
+        assert response_statuses(transport.writes) == [200]
+        proto.pause_writing()
+
+        proto.check_timeouts(100.0)  # arms the stall deadline
+        proto.check_timeouts(100.9)
+        assert not transport.aborted
+        transport.buffered -= 1  # the peer read a little: deadline re-arms
+        proto.check_timeouts(101.0)
+        proto.check_timeouts(101.9)
+        assert not transport.aborted
+        proto.check_timeouts(102.0)
+        assert transport.aborted
+    finally:
+        if not transport.is_closing():
+            transport.close()
+        await app.drain_tasks()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Winsock takes a whole send into the kernel while the send buffer "
+    "has room (KB214397): the 32 MiB leaves the transport and never stalls",
+)
 @pytest.mark.asyncio
 async def test_client_that_stops_reading_is_aborted_after_write_timeout() -> None:
     app = App()
@@ -296,6 +354,11 @@ async def test_client_that_stops_reading_is_aborted_after_write_timeout() -> Non
     assert received < _BIG
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Winsock takes a whole send into the kernel while the send buffer "
+    "has room (KB214397): the 32 MiB leaves the transport and never stalls",
+)
 @pytest.mark.asyncio
 async def test_pipelined_requests_wait_while_the_client_is_not_reading() -> None:
     app = App()

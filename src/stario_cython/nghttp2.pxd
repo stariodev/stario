@@ -2,7 +2,16 @@ from libc.stddef cimport size_t
 from libc.stdint cimport int32_t, uint8_t, uint32_t, uint64_t
 
 cdef extern from *:
-    ctypedef long ssize_t
+    """
+    /* nghttp2.h uses ssize_t, which MSVC does not define (POSIX type), and
+       Python.h defines only Py_ssize_t there. Must precede nghttp2.h. */
+    #if defined(_MSC_VER)
+    #include <BaseTsd.h>
+    typedef SSIZE_T ssize_t;
+    #endif
+    """
+    # Pointer-sized and signed everywhere; ``long`` is 32 bits on Win64.
+    ctypedef Py_ssize_t ssize_t
 
 cdef extern from "nghttp2/nghttp2.h":
     cdef enum:

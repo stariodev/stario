@@ -20,6 +20,7 @@ import asyncio
 import errno
 import os
 import stat as stat_module
+import sys
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -75,9 +76,44 @@ CONTENT_TYPES: Final = {
 # Precompressed variants a static file can be served as, best first: br wins
 # ties because these bytes are encoded once at load, so only wire size counts.
 CODECS: Final = (b"br", b"zstd", b"gzip")
-PATH_ERRNOS: Final = frozenset((errno.EACCES, errno.ENOENT, errno.ENOTDIR, errno.ELOOP))
+WINDOWS: Final = sys.platform == "win32"
+# EINVAL: Win32 refuses a name it cannot parse; that is a missing file too.
+PATH_ERRNOS: Final = frozenset(
+    (
+        errno.EACCES,
+        errno.ENOENT,
+        errno.ENOTDIR,
+        errno.ELOOP,
+        *((errno.EINVAL,) if WINDOWS else ()),
+    )
+)
+# O_BINARY: without it Windows translates CRLF and stops reading at ^Z.
 OPEN_FLAGS: Final = (
-    os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    os.O_RDONLY
+    | getattr(os, "O_BINARY", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+)
+# A directory junction redirects a path like a symlink, but S_ISLNK is false.
+IO_REPARSE_TAG_MOUNT_POINT: Final = 0xA0000003
+# Win32 rejects these in a name: `:` also selects a drive (`C:x`) or an NTFS
+# stream (`a.txt::$DATA`).
+WINDOWS_RESERVED_CHARS: Final = frozenset('<>:"|?*' + "".join(map(chr, range(32))))
+# Names that open a device in every directory, with or without an extension.
+WINDOWS_DEVICES: Final = frozenset(
+    (
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        "CONIN$",
+        "CONOUT$",
+        *(
+            f"{base}{n}"
+            for base in ("COM", "LPT")
+            for n in "123456789\u00b9\u00b2\u00b3"
+        ),
+    )
 )
 if hasattr(os, "pread"):
     _pread = os.pread
@@ -154,6 +190,25 @@ def _is_relative(path: object) -> TypeGuard[str]:
         and "\\" not in path
         and not path.startswith("/")
         and not any(part in {"", ".", ".."} for part in path.split("/"))
+        and not (WINDOWS and any(map(_windows_unsafe, path.split("/"))))
+    )
+
+
+def _windows_unsafe(part: str) -> bool:
+    """True for a segment Win32 would not open as the name it spells.
+
+    Besides reserved characters and device names, Win32 strips trailing dots
+    and spaces, so `app.py.` would open `app.py`.
+    """
+    if part[-1] in ". " or not WINDOWS_RESERVED_CHARS.isdisjoint(part):
+        return True
+    return part.split(".", 1)[0].rstrip(" ").upper() in WINDOWS_DEVICES
+
+
+def _is_link(file_stat: stat_result) -> bool:
+    """A symlink, or (Windows) a directory junction."""
+    return stat_module.S_ISLNK(file_stat.st_mode) or (
+        getattr(file_stat, "st_reparse_tag", 0) == IO_REPARSE_TAG_MOUNT_POINT
     )
 
 
@@ -617,7 +672,7 @@ class _Mount:
                 current = self.directory
                 for part in parts.parts:
                     current /= part
-                    if stat_module.S_ISLNK(current.lstat().st_mode):
+                    if _is_link(current.lstat()):
                         return None
             resolved = self.directory.joinpath(parts).resolve(strict=True)
             root = self._root
@@ -627,6 +682,14 @@ class _Mount:
                 root = self._root = self.directory.resolve(strict=True)
                 if not resolved.is_relative_to(root):
                     return None
+            if (
+                WINDOWS
+                and not self.include_hidden
+                and _is_hidden(resolved.relative_to(root).as_posix())
+            ):
+                # An 8.3 short name (`GIT~1` for `.git`) has no leading dot;
+                # resolve() expands it to the long name.
+                return None
             file_stat = resolved.stat()
         except FileNotFoundError:
             return None
@@ -655,10 +718,16 @@ class _Mount:
                         if not self.include_hidden and name.startswith("."):
                             continue
                         relative = f"{prefix}/{name}" if prefix else name
-                        if not follow and entry.is_symlink():
+                        if not follow and (entry.is_symlink() or entry.is_junction()):
                             continue
                         try:
-                            file_stat = entry.stat(follow_symlinks=follow)
+                            if WINDOWS:
+                                # DirEntry.stat() leaves st_ino and st_dev 0
+                                # there: no identity, and every directory
+                                # would look visited.
+                                file_stat = os.stat(entry.path, follow_symlinks=follow)
+                            else:
+                                file_stat = entry.stat(follow_symlinks=follow)
                             path = Path(entry.path)
                             if follow:
                                 path = path.resolve(strict=True)
@@ -1116,16 +1185,26 @@ class Files(_Mount):
         self.stats = stats
 
     def _resolve_open(self, path: str) -> tuple[int, Path, stat_result] | None:
-        """Resolve then open in one worker-thread hop; fd first for cleanup."""
-        found = self.resolve(path)
-        if found is None:
-            return None
-        source, _ = found
-        opened = _open_regular(source)
-        if opened is None:
-            return None
-        fd, file_stat = opened
-        return fd, source, file_stat
+        """Resolve then open in one worker-thread hop; fd first for cleanup.
+
+        The opened file must be the one resolve() vetted: Windows has no
+        O_NOFOLLOW, and nothing guards intermediate directories. A mismatch
+        resolves once more, so an atomic replace (a deploy) serves the new
+        file, while a swap that persists is a 404.
+        """
+        for _attempt in range(2):
+            found = self.resolve(path)
+            if found is None:
+                return None
+            source, vetted = found
+            opened = _open_regular(source)
+            if opened is None:
+                return None
+            fd, file_stat = opened
+            if (file_stat.st_dev, file_stat.st_ino) == (vetted.st_dev, vetted.st_ino):
+                return fd, source, file_stat
+            os.close(fd)
+        return None
 
     async def __call__(self, context: Context, writer: Writer) -> None:
         path = context.match.params.get("path", "")

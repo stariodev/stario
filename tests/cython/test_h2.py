@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import shutil
 import subprocess
 import tempfile
@@ -80,9 +81,20 @@ async def _run_client(cmd: list[str]) -> subprocess.CompletedProcess[str]:
             del loop.idle_grace
 
 
+@functools.cache
+def _curl_has_http2() -> bool:
+    version = subprocess.run(
+        ["curl", "--version"], check=False, capture_output=True, text=True
+    )
+    return "HTTP2" in version.stdout.split()
+
+
 async def _curl(*args: str) -> subprocess.CompletedProcess[str]:
     if shutil.which("curl") is None:
         pytest.skip("curl not installed")
+    if any(arg.startswith("--http2") for arg in args) and not _curl_has_http2():
+        # Windows' own curl.exe is built without nghttp2.
+        pytest.skip("curl built without HTTP/2")
     return await _run_client(["curl", "-sS", "--max-time", "5", *args])
 
 

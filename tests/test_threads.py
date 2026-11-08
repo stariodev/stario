@@ -68,6 +68,8 @@ def _run_server(
 @pytest.fixture
 def short_socket_path():
     """AF_UNIX paths are limited to ~104 bytes on macOS; pytest's tmp_path is too long."""
+    if not hasattr(socket, "AF_UNIX"):
+        pytest.skip("no Unix domain sockets on this platform")
     path = os.path.join(
         tempfile.gettempdir(), f"stario-thr-{os.getpid()}-{os.urandom(3).hex()}.sock"
     )

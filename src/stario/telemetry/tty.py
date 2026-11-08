@@ -342,7 +342,11 @@ def _fmt_value(key: str, value: object, home: str | None) -> str:
     if (
         home
         and isinstance(value, str)
-        and (text == home or text.startswith(home + os.sep))
+        and (
+            text == home
+            or text.startswith(home + os.sep)
+            or (os.altsep is not None and text.startswith(home + os.altsep))
+        )
     ):
         return "~" + text[len(home) :]
     return text
