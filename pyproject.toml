@@ -1,6 +1,6 @@
 [project]
 name = "stario"
-version = "5.6.1"
+version = "5.7.0"
 description = "Craft realtime hypermedia apps that are a joy to write and ship."
 readme = "README.md"
 license = "MIT"
