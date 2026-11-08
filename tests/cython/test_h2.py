@@ -199,7 +199,7 @@ async def test_h2_trailing_slash_redirects() -> None:
             "-D",
             "-",
             "-o",
-            "/dev/null",
+            os.devnull,  # NUL on Windows
             f"http://127.0.0.1:{port}/search/?q=1",
         )
         assert result.returncode == 0, result.stderr
@@ -264,9 +264,11 @@ async def test_h2_post_large_body() -> None:
         port,
     )
     try:
-        with tempfile.NamedTemporaryFile() as tmp:
+        # Closed before the client opens it: Windows refuses a second open of
+        # a file NamedTemporaryFile still holds; deleted when the block ends.
+        with tempfile.NamedTemporaryFile(delete_on_close=False) as tmp:
             tmp.write(payload)
-            tmp.flush()
+            tmp.close()
             result = await _curl(
                 "--http2-prior-knowledge",
                 "-X",
@@ -328,9 +330,11 @@ async def test_h2_keep_alive_returns_window_credit() -> None:
     )
     nreq = 20_000
     try:
-        with tempfile.NamedTemporaryFile() as tmp:
+        # Closed before the client opens it: Windows refuses a second open of
+        # a file NamedTemporaryFile still holds; deleted when the block ends.
+        with tempfile.NamedTemporaryFile(delete_on_close=False) as tmp:
             tmp.write(payload)
-            tmp.flush()
+            tmp.close()
             result = await _run_client(
                 [
                     h2load,
@@ -588,7 +592,7 @@ async def test_h2_header_over_limit_returns_431_without_dispatch() -> None:
             "-D",
             "-",
             "-o",
-            "/dev/null",
+            os.devnull,  # NUL on Windows
             "-H",
             "X-Pad: " + ("x" * 600),
             f"http://127.0.0.1:{port}/",
@@ -729,7 +733,7 @@ async def test_h2_declared_body_over_limit_returns_413() -> None:
             "-D",
             "-",
             "-o",
-            "/dev/null",
+            os.devnull,  # NUL on Windows
             "-X",
             "POST",
             "-d",
