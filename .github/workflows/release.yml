@@ -60,6 +60,8 @@ jobs:
           - os: macos-15
           - os: windows-latest
     runs-on: ${{ matrix.os }}
+    # Four Pythons per platform, each built and tested; a hang stops here.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: pypa/cibuildwheel@v4.2.0

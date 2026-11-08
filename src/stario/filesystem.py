@@ -18,9 +18,12 @@ The `Assets` directory must exist at construction.
 
 import asyncio
 import errno
+import functools
 import os
+import re
 import stat as stat_module
 import sys
+import unicodedata
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -84,9 +87,16 @@ PATH_ERRNOS: Final = frozenset(
         errno.ENOENT,
         errno.ENOTDIR,
         errno.ELOOP,
+        errno.ENAMETOOLONG,
         *((errno.EINVAL,) if WINDOWS else ()),
     )
 )
+# No filesystem stores a longer name or path, so longer ones are a 404 without
+# a syscall (Linux NAME_MAX and PATH_MAX; NTFS allows 255 UTF-16 units).
+MAX_SEGMENT_CHARS: Final = 255
+MAX_PATH_CHARS: Final = 4096
+# An NTFS/FAT 8.3 alias such as `GIT~1` (for `.git`) or `REPORT~2.HTM`.
+SHORT_NAME: Final = re.compile(r"[^.~]{0,6}~[0-9]{1,6}(?:\.[^.]{0,3})?")
 # O_BINARY: without it Windows translates CRLF and stops reading at ^Z.
 OPEN_FLAGS: Final = (
     os.O_RDONLY
@@ -94,8 +104,11 @@ OPEN_FLAGS: Final = (
     | getattr(os, "O_CLOEXEC", 0)
     | getattr(os, "O_NOFOLLOW", 0)
 )
-# A directory junction redirects a path like a symlink, but S_ISLNK is false.
+# Windows reparse tags with the name-surrogate bit redirect a path to another
+# name, like a symlink (symlinks, junctions, WSL and container links); S_ISLNK
+# is true only for symlinks. Cloud placeholders and AppExecLinks lack the bit.
 IO_REPARSE_TAG_MOUNT_POINT: Final = 0xA0000003
+REPARSE_TAG_NAME_SURROGATE: Final = 0x20000000
 # Win32 rejects these in a name: `:` also selects a drive (`C:x`) or an NTFS
 # stream (`a.txt::$DATA`).
 WINDOWS_RESERVED_CHARS: Final = frozenset('<>:"|?*' + "".join(map(chr, range(32))))
@@ -117,7 +130,8 @@ WINDOWS_DEVICES: Final = frozenset(
 )
 if hasattr(os, "pread"):
     _pread = os.pread
-else:  # Windows has no os.pread; each fd here is exclusive to one response.
+else:  # Windows has no os.pread; each fd here is exclusive to one response
+    # (and `_read_span` never lets it close while a read is in flight).
 
     def _pread(fd: int, size: int, offset: int, /) -> bytes:
         os.lseek(fd, offset, os.SEEK_SET)
@@ -186,10 +200,14 @@ def _is_relative(path: object) -> TypeGuard[str]:
     return (
         type(path) is str
         and bool(path)
+        and len(path) <= MAX_PATH_CHARS
         and "\0" not in path
         and "\\" not in path
         and not path.startswith("/")
-        and not any(part in {"", ".", ".."} for part in path.split("/"))
+        and not any(
+            part in {"", ".", ".."} or len(part) > MAX_SEGMENT_CHARS
+            for part in path.split("/")
+        )
         and not (WINDOWS and any(map(_windows_unsafe, path.split("/"))))
     )
 
@@ -206,10 +224,126 @@ def _windows_unsafe(part: str) -> bool:
 
 
 def _is_link(file_stat: stat_result) -> bool:
-    """A symlink, or (Windows) a directory junction."""
-    return stat_module.S_ISLNK(file_stat.st_mode) or (
-        getattr(file_stat, "st_reparse_tag", 0) == IO_REPARSE_TAG_MOUNT_POINT
+    """A symlink, or (Windows) a junction or other name-surrogate reparse point."""
+    return stat_module.S_ISLNK(file_stat.st_mode) or bool(
+        getattr(file_stat, "st_reparse_tag", 0) & REPARSE_TAG_NAME_SURROGATE
     )
+
+
+def _short_name_alias(directory: Path, path: str) -> bool:
+    """True when a segment of `path` names a file only through an 8.3 alias.
+
+    NTFS and FAT also answer to short names (`GIT~1` for `.git`), and a Linux
+    or macOS host serving such a volume (ntfs-3g, vfat, an SMB share, WSL's
+    `/mnt/c`) resolves them too; realpath() there never expands them. A
+    segment shaped like one must appear verbatim in its directory listing.
+    Windows expands aliases in resolve(), and `Files` checks that path instead.
+    """
+    current = directory
+    for part in path.split("/"):
+        if SHORT_NAME.fullmatch(part):
+            try:
+                if part not in os.listdir(current):
+                    return True
+            except OSError:
+                return True
+        current = current / part
+    return False
+
+
+def _opened_path(fd: int) -> str | None:
+    """The path the OS reports for an open fd, or None where it cannot say."""
+    if WINDOWS:
+        return _windows_final_path(fd)
+    if sys.platform == "darwin":
+        import fcntl
+
+        try:
+            raw = fcntl.fcntl(fd, getattr(fcntl, "F_GETPATH", 50), bytes(1024))
+        except OSError:
+            return None
+        return os.fsdecode(raw.split(b"\0", 1)[0])
+    try:
+        return os.readlink(f"/proc/self/fd/{fd}")
+    except OSError:  # no /proc (a minimal container, a BSD)
+        return None
+
+
+@functools.cache
+def _final_path_api() -> Any:
+    """kernel32.GetFinalPathNameByHandleW with its signature set; None if absent."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32")  # pyrefly: ignore[missing-attribute]
+        api = kernel32.GetFinalPathNameByHandleW
+    except (ImportError, AttributeError, OSError):
+        return None
+    api.argtypes = (wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD)
+    api.restype = wintypes.DWORD
+    return api
+
+
+def _windows_final_path(fd: int) -> str | None:
+    """The normalized DOS path of an open fd; None when Windows cannot say."""
+    api = _final_path_api()
+    if api is None:
+        return None
+    try:
+        import ctypes
+        import msvcrt
+
+        handle = msvcrt.get_osfhandle(fd)  # pyrefly: ignore[missing-attribute]
+    except (ImportError, OSError):
+        return None
+    size = 1024
+    while True:
+        buffer = ctypes.create_unicode_buffer(size)
+        length = api(handle, buffer, size, 0)  # FILE_NAME_NORMALIZED | VOLUME_NAME_DOS
+        if not length:
+            return None
+        if length < size:
+            return buffer.value
+        size = length + 1  # too small: `length` is the size it needs
+
+
+def _same_path(opened: str, vetted: str) -> bool:
+    """Compare paths the way the platform's filesystems compare names."""
+    if WINDOWS:
+        return _strip_win_prefix(opened).lower() == _strip_win_prefix(vetted).lower()
+    if sys.platform == "darwin":  # APFS/HFS+: case- and normalization-insensitive
+        return _fold(opened) == _fold(vetted)
+    return opened == vetted
+
+
+def _strip_win_prefix(path: str) -> str:
+    if path.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + path[8:]
+    if path.startswith("\\\\?\\"):
+        return path[4:]
+    return path
+
+
+def _fold(path: str) -> str:
+    return unicodedata.normalize("NFC", path).casefold()
+
+
+def _opened_is_vetted(
+    fd: int, file_stat: stat_result, source: Path, vetted: stat_result
+) -> bool:
+    """True when the open fd is the file resolve() vetted at `source`.
+
+    The OS's own path for the fd (Linux /proc, macOS F_GETPATH, Windows
+    GetFinalPathNameByHandleW) changes if a link was swapped into any
+    component between resolve() and the open. Where the OS cannot say, the
+    device and inode resolve() saw stand in, which a swap of the last
+    component still changes.
+    """
+    opened = _opened_path(fd)
+    if opened is not None:
+        return _same_path(opened, os.fspath(source))
+    return (file_stat.st_dev, file_stat.st_ino) == (vetted.st_dev, vetted.st_ino)
 
 
 def _is_hidden(path: str) -> bool:
@@ -425,6 +559,26 @@ def _tally(stats: dict[str, int], entry: _Cached) -> None:
         stats["compressed_files"] += 1
 
 
+async def _read_span(fd: int, size: int, offset: int) -> bytes:
+    """One `_pread` in a worker thread that never outlives its caller.
+
+    The caller closes `fd` once this returns or raises. A read left running
+    after a cancel (a client reset) would race that close: on Windows the
+    close blocks the event loop on the CRT's fd lock, and the reused fd
+    number could hand the lseek/read fallback another response's file.
+    """
+    read = asyncio.ensure_future(asyncio.to_thread(_pread, fd, size, offset))
+    try:
+        return await asyncio.shield(read)
+    except asyncio.CancelledError:
+        while not read.done():
+            try:
+                await asyncio.wait((read,))
+            except asyncio.CancelledError:
+                continue
+        raise
+
+
 async def _stream(writer: Writer, fd: int, start: int, length: int) -> None:
     """Send `length` bytes from `start` in an already-open fd. Caller closes it.
 
@@ -434,7 +588,7 @@ async def _stream(writer: Writer, fd: int, start: int, length: int) -> None:
     offset = start
     remaining = length
     while remaining:
-        chunk = await asyncio.to_thread(_pread, fd, min(STREAM_SPAN, remaining), offset)
+        chunk = await _read_span(fd, min(STREAM_SPAN, remaining), offset)
         if not chunk:
             break
         offset += len(chunk)
@@ -666,6 +820,12 @@ class _Mount:
             return None
         if not self.include_hidden and _is_hidden(path):
             return None
+        if (
+            not self.include_hidden
+            and not WINDOWS
+            and _short_name_alias(self.directory, path)
+        ):
+            return None
         parts = Path(*path.split("/"))
         try:
             if not self.follow_symlinks:
@@ -693,6 +853,8 @@ class _Mount:
             file_stat = resolved.stat()
         except FileNotFoundError:
             return None
+        except ValueError:  # a name the OS cannot represent
+            return None
         except OSError as exc:
             if exc.errno in PATH_ERRNOS:
                 return None
@@ -718,7 +880,11 @@ class _Mount:
                         if not self.include_hidden and name.startswith("."):
                             continue
                         relative = f"{prefix}/{name}" if prefix else name
-                        if not follow and (entry.is_symlink() or entry.is_junction()):
+                        if not follow and (
+                            entry.is_symlink()
+                            # Junctions and other name surrogates; cached by scandir.
+                            or (WINDOWS and _is_link(entry.stat(follow_symlinks=False)))
+                        ):
                             continue
                         try:
                             if WINDOWS:
@@ -1187,10 +1353,11 @@ class Files(_Mount):
     def _resolve_open(self, path: str) -> tuple[int, Path, stat_result] | None:
         """Resolve then open in one worker-thread hop; fd first for cleanup.
 
-        The opened file must be the one resolve() vetted: Windows has no
-        O_NOFOLLOW, and nothing guards intermediate directories. A mismatch
-        resolves once more, so an atomic replace (a deploy) serves the new
-        file, while a swap that persists is a 404.
+        The opened file must be the one resolve() vetted (see
+        `_opened_is_vetted`): Windows has no O_NOFOLLOW, and nothing guards
+        intermediate directories. A mismatch resolves once more, so a deploy
+        that replaces files serves the new file, while a swap that persists
+        is a 404.
         """
         for _attempt in range(2):
             found = self.resolve(path)
@@ -1201,7 +1368,7 @@ class Files(_Mount):
             if opened is None:
                 return None
             fd, file_stat = opened
-            if (file_stat.st_dev, file_stat.st_ino) == (vetted.st_dev, vetted.st_ino):
+            if _opened_is_vetted(fd, file_stat, source, vetted):
                 return fd, source, file_stat
             os.close(fd)
         return None

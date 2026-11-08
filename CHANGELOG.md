@@ -38,11 +38,34 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ### Security
 
-- `Files` checks that the file it opened is the one path resolution vetted
-  (same device and inode). On a mismatch it resolves once more, so an atomic
-  replace still serves the new file, but a symlink swapped in between the
-  checks and the open is a 404. Windows has no `O_NOFOLLOW`, and on any
-  platform an intermediate directory could be replaced in that window.
+- `Files` checks that the file it opened is the one path resolution vetted:
+  the OS's own path for the open file (Linux `/proc/self/fd`, macOS
+  `F_GETPATH`, Windows `GetFinalPathNameByHandleW`) must equal the vetted
+  path, so a link swapped into any component between the checks and the
+  open (by a local user who can write the served tree) is a 404. Where the
+  OS cannot say, the device and inode stand in. On a mismatch it resolves
+  once more, so a deploy that replaces files still serves the new file.
+- With `include_hidden=False`, `Files` refuses a path segment that names a
+  file only through an NTFS/FAT 8.3 alias (`GIT~1` for `.git`) on Linux and
+  macOS too, where an ntfs-3g, vfat, or SMB mount (or WSL's `/mnt/c`)
+  answers to short names that `realpath()` never expands. A segment shaped
+  like an alias must appear verbatim in its directory listing.
+- On Windows, any name-surrogate reparse point (junction, WSL or container
+  link), not only a symlink or junction, counts as a link for
+  `follow_symlinks=False`.
+
+### Fixed
+
+- `Files` answers 404, not 500, for a path segment longer than 255
+  characters, a path longer than 4096, or a name the filesystem rejects as
+  too long (`ENAMETOOLONG`, or a name Windows cannot represent).
+- A `Files` or `Assets` stream cancelled mid-read (a client reset) closes
+  its file only after the worker thread's read returns. On Windows the
+  close used to block the event loop on the CRT's descriptor lock, and the
+  `lseek` + `read` fallback could read from a reused descriptor.
+- The request body byte counter is `Py_ssize_t`, like the limits it is
+  compared with; as an `int` it wrapped after 2 GiB of discarded HTTP/2
+  `DATA`.
 
 ## 5.6.1 - 2026-11-07
 

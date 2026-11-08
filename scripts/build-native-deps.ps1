@@ -10,9 +10,13 @@
 # The triplet is static libraries on the dynamic CRT (/MD, as CPython is
 # built): the extensions carry the libraries, so the wheel needs no DLLs.
 #
+# Needs PowerShell 7, git on PATH, and network access (github.com and the
+# mirrors vcpkg downloads its tools and sources from).
+#
 # Usage: build-native-deps.ps1 [-Prefix C:\stario-deps] [-Triplet <triplet>]
-# Prints PKG_CONFIG and PKG_CONFIG_PATH for setup.py, and appends them to
-# $GITHUB_ENV under GitHub Actions.
+# Prints the PKG_CONFIG and PKG_CONFIG_PATH assignments for setup.py, and
+# appends them to $GITHUB_ENV under GitHub Actions.
+#Requires -Version 7.0
 param(
     [string]$Prefix = "C:\stario-deps",
     [string]$Triplet = ""
@@ -29,14 +33,23 @@ if (-not $Triplet) {
 }
 
 function Invoke-Checked {
-    param([string]$Exe, [string[]]$Arguments)
-    & $Exe @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Exe $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
+    param([string]$Exe, [string[]]$Arguments, [int]$Attempts = 1)
+    for ($attempt = 1; ; $attempt++) {
+        & $Exe @Arguments
+        if ($LASTEXITCODE -eq 0) {
+            return
+        }
+        if ($attempt -ge $Attempts) {
+            throw "$Exe $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
+        }
+        Write-Warning "$Exe failed (exit $LASTEXITCODE); retry $attempt of $($Attempts - 1)"
+        Start-Sleep -Seconds (10 * $attempt)
     }
 }
 
 New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
+# Absolute: the printed paths must work from pip's temporary build directory.
+$Prefix = (Resolve-Path -LiteralPath $Prefix).Path
 $vcpkgRoot = Join-Path $Prefix "vcpkg"
 $vcpkg = Join-Path $vcpkgRoot "vcpkg.exe"
 $current = ""
@@ -45,20 +58,34 @@ if (Test-Path (Join-Path $vcpkgRoot ".git")) {
 } else {
     Invoke-Checked git @("init", "-q", $vcpkgRoot)
 }
-# A checkout from an earlier VcpkgCommit is moved, so a bump takes effect.
+# A checkout from an earlier VcpkgCommit is moved, and its installed ports
+# dropped: classic-mode `vcpkg install` keeps an installed port as it is, so
+# without this a bump would leave the old versions in place.
 if ($current -ne $VcpkgCommit) {
     Invoke-Checked git @("-C", $vcpkgRoot, "fetch", "-q", "--depth", "1",
-        "https://github.com/microsoft/vcpkg", $VcpkgCommit)
+        "https://github.com/microsoft/vcpkg", $VcpkgCommit) -Attempts 3
     Invoke-Checked git @("-C", $vcpkgRoot, "checkout", "-q", "--force", "FETCH_HEAD")
+    $stale = Join-Path $vcpkgRoot "installed"
+    if ($current -and (Test-Path $stale)) {
+        Remove-Item -Recurse -Force $stale
+    }
 }
 if ($current -ne $VcpkgCommit -or -not (Test-Path $vcpkg)) {
-    Invoke-Checked (Join-Path $vcpkgRoot "bootstrap-vcpkg.bat") @("-disableMetrics")
+    # Downloads vcpkg.exe from GitHub: retried, as GitHub downloads flake.
+    Invoke-Checked (Join-Path $vcpkgRoot "bootstrap-vcpkg.bat") @("-disableMetrics") -Attempts 3
 }
 
 # Same triplet, release only: the extensions never link the debug builds.
 $overlay = Join-Path $Prefix "triplets"
 New-Item -ItemType Directory -Force -Path $overlay | Out-Null
-$baseTriplet = (Join-Path $vcpkgRoot "triplets\$Triplet.cmake").Replace("\", "/")
+$baseTriplet = Join-Path $vcpkgRoot "triplets\$Triplet.cmake"
+if (-not (Test-Path $baseTriplet)) {
+    $baseTriplet = Join-Path $vcpkgRoot "triplets\community\$Triplet.cmake"
+}
+if (-not (Test-Path $baseTriplet)) {
+    throw "vcpkg has no triplet named $Triplet"
+}
+$baseTriplet = $baseTriplet.Replace("\", "/")
 Set-Content -Encoding ascii -Path (Join-Path $overlay "$Triplet.cmake") -Value @(
     "include(`"$baseTriplet`")",
     "set(VCPKG_BUILD_TYPE release)"
@@ -66,7 +93,7 @@ Set-Content -Encoding ascii -Path (Join-Path $overlay "$Triplet.cmake") -Value @
 
 Invoke-Checked $vcpkg @("install", "--triplet", $Triplet,
     "--overlay-triplets", $overlay, "--disable-metrics",
-    "nghttp2", "brotli", "zstd", "zlib", "pkgconf")
+    "nghttp2", "brotli", "zstd", "zlib", "pkgconf") -Attempts 3
 
 $installed = Join-Path $vcpkgRoot "installed\$Triplet"
 $pkgConfig = Join-Path $installed "tools\pkgconf\pkgconf.exe"
@@ -78,8 +105,9 @@ $env:PKG_CONFIG_PATH = $pkgConfigPath
 Invoke-Checked $pkgConfig @("--modversion", "libnghttp2", "libbrotlienc",
     "libbrotlidec", "libzstd", "zlib")
 
-Write-Output "PKG_CONFIG=$pkgConfig"
-Write-Output "PKG_CONFIG_PATH=$pkgConfigPath"
+# PowerShell assignments, ready to paste before `pip install .` / `uv sync`.
+Write-Output "`$env:PKG_CONFIG = `"$pkgConfig`""
+Write-Output "`$env:PKG_CONFIG_PATH = `"$pkgConfigPath`""
 if ($env:GITHUB_ENV) {
     Add-Content -Encoding utf8 -Path $env:GITHUB_ENV -Value @(
         "PKG_CONFIG=$pkgConfig",
