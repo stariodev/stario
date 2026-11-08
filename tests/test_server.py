@@ -148,6 +148,8 @@ async def _connect_with_retry(
 @pytest.fixture
 def short_socket_path():
     """AF_UNIX paths are limited to ~104 bytes on macOS; pytest's tmp_path is too long."""
+    if not hasattr(socket, "AF_UNIX"):
+        pytest.skip("no Unix domain sockets on this platform")
     path = os.path.join(
         tempfile.gettempdir(), f"stario-test-{os.getpid()}-{os.urandom(3).hex()}.sock"
     )
@@ -569,7 +571,7 @@ class TestServerRunLifecycle:
 
             apps[0].signal_shutdown()
             await asyncio.sleep(0.01)
-            os.kill(os.getpid(), signal.SIGINT)
+            signal.raise_signal(signal.SIGINT)
 
             async with asyncio.timeout(2.0):
                 await run_task

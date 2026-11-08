@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import socket
 import tempfile
 from io import StringIO
 from typing import Any
@@ -156,6 +157,8 @@ async def test_serve_creates_default_json_tracer(
 
 @pytest.fixture
 def short_socket_path():
+    if not hasattr(socket, "AF_UNIX"):
+        pytest.skip("no Unix domain sockets on this platform")
     path = os.path.join(
         tempfile.gettempdir(), f"stario-serve-{os.getpid()}-{os.urandom(3).hex()}.sock"
     )

@@ -15,6 +15,7 @@ classifiers = [
     "Framework :: AsyncIO",
     "Intended Audience :: Developers",
     "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Cython",
     "Programming Language :: Python :: 3",
@@ -34,7 +35,8 @@ Changelog = "https://github.com/stariodev/stario/blob/main/CHANGELOG.md"
 Issues = "https://github.com/stariodev/stario/issues"
 
 [project.optional-dependencies]
-uvloop = ["uvloop>=0.21.0,<1"]
+# uvloop has no Windows build; the extra is empty there.
+uvloop = ["uvloop>=0.21.0,<1; sys_platform != 'win32'"]
 
 [build-system]
 requires = ["setuptools>=77", "Cython>=3.1,<4"]
@@ -51,7 +53,8 @@ include = ["stario", "stario.*", "stario_cython"]
 stario_cython = ["*.c", "*.pxd", "*.pxi", "*.pyx"]
 
 # Wheels bundle nghttp2, Brotli 1.2.1, and zstd built by scripts/build-native-deps.sh
-# (manylinux ships an nghttp2 that predates the CONTINUATION flood fix).
+# (manylinux ships an nghttp2 that predates the CONTINUATION flood fix), or by
+# scripts/build-native-deps.ps1 (vcpkg, static, plus zlib) on Windows.
 [tool.cibuildwheel]
 build = ["cp312-*", "cp313-*", "cp314-*", "cp314t-*"]
 skip = ["*-musllinux_*"]
@@ -70,6 +73,13 @@ before-all = "bash scripts/build-native-deps.sh /tmp/stario-deps"
 # delocate rewrites each dylib path to a longer @loader_path one. The Xcode 16
 # linker on macos-15 leaves no room for that without the header padding.
 environment = { PKG_CONFIG_PATH = "/tmp/stario-deps/lib/pkgconfig", DYLD_LIBRARY_PATH = "/tmp/stario-deps/lib", LDFLAGS = "-Wl,-headerpad_max_install_names" }
+
+[tool.cibuildwheel.windows]
+# 64-bit x86 only: vcpkg builds one triplet per job.
+archs = ["AMD64"]
+before-all = "pwsh -NoProfile -File scripts/build-native-deps.ps1 -Prefix C:/stario-deps"
+# Static libraries: nothing for delvewheel to bundle.
+environment = { PKG_CONFIG = "C:/stario-deps/vcpkg/installed/x64-windows-static-md/tools/pkgconf/pkgconf.exe", PKG_CONFIG_PATH = "C:/stario-deps/vcpkg/installed/x64-windows-static-md/lib/pkgconfig" }
 
 [dependency-groups]
 test = [

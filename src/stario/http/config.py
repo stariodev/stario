@@ -157,6 +157,9 @@ class ServerConfig:
     When `unix_socket` is set, `host`, `port`, and `reuse_addr` are ignored; only
     `backlog` and `unix_socket_mode` apply to the Unix listener.
 
+    `reuse_addr` is ignored on Windows: there SO_REUSEADDR lets a second socket
+    bind the same port, and a listener can rebind past TIME_WAIT without it.
+
     Nested `requests` and `compression` objects are stored by reference; treat
     as immutable after construction.
 

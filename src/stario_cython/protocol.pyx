@@ -82,26 +82,38 @@ cdef extern from *:
     #include <time.h>
 
     /* Wall-clock second for the Date header. The coarse clock is a few ns
-       (no syscall); macOS has no coarse variant, and the plain one is ~30 ns. */
-    static long stario_wall_second(void) {
+       (no syscall); macOS has no coarse variant, and the plain one is ~30 ns.
+       Windows has no clock_gettime; time() reads the system time without a
+       kernel transition. ``long long``: Windows ``long`` is 32 bits. */
+    static long long stario_wall_second(void) {
+    #if defined(_WIN32)
+        return (long long)time(NULL);
+    #else
         struct timespec ts;
     #if defined(CLOCK_REALTIME_COARSE)
         clock_gettime(CLOCK_REALTIME_COARSE, &ts);
     #else
         clock_gettime(CLOCK_REALTIME, &ts);
     #endif
-        return (long)ts.tv_sec;
+        return (long long)ts.tv_sec;
+    #endif
     }
 
     /* ``date: Tue, 18 Aug 2026 00:00:00 GMT\\r\\n`` (RFC 9110 IMF-fixdate). */
-    static int stario_date_line(long second, char* out, size_t cap) {
+    static int stario_date_line(long long second, char* out, size_t cap) {
         static const char days[] = "SunMonTueWedThuFriSat";
         static const char months[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
         struct tm parts;
         time_t t = (time_t)second;
+    #if defined(_WIN32)
+        if (gmtime_s(&parts, &t) != 0) {
+            return -1;
+        }
+    #else
         if (gmtime_r(&t, &parts) == NULL) {
             return -1;
         }
+    #endif
         return snprintf(
             out, cap, "date: %.3s, %02d %.3s %04d %02d:%02d:%02d GMT\\r\\n",
             days + parts.tm_wday * 3, parts.tm_mday, months + parts.tm_mon * 3,
@@ -130,8 +142,8 @@ cdef extern from *:
     #endif
     """
     void stario_malloc_tune() noexcept
-    long stario_wall_second() noexcept nogil
-    int stario_date_line(long second, char* out, size_t cap) noexcept nogil
+    long long stario_wall_second() noexcept nogil
+    int stario_date_line(long long second, char* out, size_t cap) noexcept nogil
 from stario_cython.llhttp cimport *
 from stario_cython.nghttp2 cimport (
     ssize_t,
@@ -678,7 +690,7 @@ cdef class Connections:
     # ``loop.time()`` at the last tick, for anything that wants a cheap,
     # slightly stale clock.
     cdef public double now
-    cdef long _date_second
+    cdef long long _date_second
     cdef object _date_line
     cdef bint _date_fixed
     # 0 means unlimited; `rejected` counts connections refused at the cap.
@@ -723,7 +735,7 @@ cdef class Connections:
         self._date_fixed = True
 
     cdef inline object c_date(self):
-        cdef long second
+        cdef long long second
         if self._date_fixed:
             return self._date_line
         second = stario_wall_second()
@@ -731,7 +743,7 @@ cdef class Connections:
             self._refresh_date(second)
         return self._date_line
 
-    cdef void _refresh_date(self, long second):
+    cdef void _refresh_date(self, long long second):
         cdef char buf[48]
         cdef int n = stario_date_line(second, buf, sizeof(buf))
         if n > 0 and n < <int>sizeof(buf):

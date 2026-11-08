@@ -45,3 +45,34 @@ jobs:
       - run: uv run ruff format --check src tests setup.py
       - run: uv run pyrefly check
       - run: uv run pytest
+
+  test-windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14", "3.14t"]
+    runs-on: windows-latest
+    # The first vcpkg build of the native libraries takes several minutes.
+    timeout-minutes: 45
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: C:\vcpkg-binary-cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: C:\vcpkg-binary-cache
+          key: vcpkg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-native-deps.ps1') }}
+      - name: Native build dependencies
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          ./scripts/build-native-deps.ps1
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --all-extras
+      - name: GIL is off on the free-threaded build
+        if: matrix.python-version == '3.14t'
+        run: |
+          uv run python -c "import sys, stario_cython.exchange, stario_cython.protocol, stario_cython.markup, stario_cython.codecs, stario_cython.xxh64; assert not sys._is_gil_enabled(), 'an extension re-enabled the GIL'"
+      - run: uv run pytest

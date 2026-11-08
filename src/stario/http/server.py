@@ -74,6 +74,14 @@ def _make_http_protocol(
 type SignalHandler = Callable[[int, FrameType | None], object]
 type PreviousSignalHandler = signal.Handlers | int | SignalHandler | None
 
+WINDOWS = sys.platform == "win32"
+# Windows never delivers SIGTERM to a console process; Ctrl+Break (or
+# GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT) from a supervisor) is SIGBREAK.
+if sys.platform == "win32":
+    SHUTDOWN_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGBREAK)
+else:
+    SHUTDOWN_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+
 type EventLoopKind = Literal["asyncio", "uvloop"]
 
 # Upper bound on the force-close loop after the graceful wait (see _drain_listener).
@@ -436,7 +444,7 @@ class Server:
             self.config.host,
             self.config.port,
             backlog=self.config.backlog,
-            reuse_address=self.config.reuse_addr,
+            reuse_address=self._reuse_addr(),
             reuse_port=reuse_port,
             **tls,
         )
@@ -572,6 +580,11 @@ class Server:
     def _pending_tasks(self, tasks: set[asyncio.Task[Any]]) -> list[asyncio.Task[Any]]:
         return [task for task in tasks if not task.done()]
 
+    def _reuse_addr(self) -> bool:
+        """`reuse_addr`, except on Windows, where SO_REUSEADDR does not mean
+        "rebind past TIME_WAIT" but "let another socket bind this port too"."""
+        return self.config.reuse_addr and not WINDOWS
+
     def _effective_threads(self) -> int:
         """`STARIO_THREADS` if SO_REUSEPORT can share the listen address, else 1."""
         requested = self.config.threads
@@ -684,7 +697,7 @@ class Server:
         self,
         app: App,
     ) -> Generator[None]:
-        """Install SIGINT/SIGTERM handlers for graceful shutdown.
+        """Install SIGINT/SIGTERM (and Windows SIGBREAK) handlers for graceful shutdown.
 
         Contract:
           - 1st signal → `app.signal_shutdown()` and start drain
@@ -701,7 +714,7 @@ class Server:
             app.signal_shutdown()
 
         previous_handlers: dict[signal.Signals, PreviousSignalHandler] = {}
-        for sig in (signal.SIGINT, signal.SIGTERM):
+        for sig in SHUTDOWN_SIGNALS:
             try:
                 previous_handlers[sig] = signal.getsignal(sig)
 
@@ -976,7 +989,7 @@ class Server:
             attrs["server.listen_mode"] = "tcp"
             attrs["server.host"] = self.config.host
             attrs["server.port"] = self.config.port
-            attrs["server.reuse_addr"] = self.config.reuse_addr
+            attrs["server.reuse_addr"] = self._reuse_addr()
         attrs["server.limits.max_request_header_bytes"] = (
             self.config.requests.max_header_bytes
         )
