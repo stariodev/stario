@@ -1,49 +1,32 @@
-"""HTML types and small helpers."""
+"""HTML types and small helpers.
+
+`SafeString`, `Attrs`, and `Element` are final types in `stario_cython.markup`:
+immutable, and `Element` has no public constructor (only a `Tag` call makes
+one). This module re-exports them and keeps the type aliases.
+"""
 
 from collections.abc import Mapping
-from dataclasses import dataclass
 from typing import Any, Literal
 
 from stario.exceptions import StarioError
+from stario_cython.markup import Attrs, Element, SafeString
 
 from .escape import escape_text
 
-
-@dataclass(frozen=True, slots=True)
-class SafeString:
-    """Markup inserted verbatim into rendered HTML (no escaping)."""
-
-    rendered: str
-
-    def __repr__(self) -> str:
-        return f"SafeString({self.rendered!r})"
-
-
-@dataclass(frozen=True, slots=True)
-class Attrs:
-    """Trusted/pre-rendered opening-tag attributes, including leading spaces."""
-
-    rendered: str
-
-    def __repr__(self) -> str:
-        return f"Attrs({self.rendered!r})"
-
-
-class Element(tuple[str, "str | list[Any] | None", "list[Any] | None", str]):
-    """One built element: `(tag_start, attrs, children, tail)`.
-
-    Only `Tag.__call__` makes these. The render walk and the `@baked`
-    flattener dispatch on this exact type, so a plain tuple in child position
-    (a database row, say) is never mistaken for markup and never emitted
-    unescaped.
-
-    - `tag_start`: `"<name"` without `>`, or `"<name>"` when `attrs` is None
-    - `attrs`: None, a joined str, or `list[str | AttrSlot]` at bake time
-    - `children`: list of child nodes, or None when `tail` closes an empty element
-    - `tail`: `"</name>"` with children, else `"/>"` or `"></name>"`
-    """
-
-    __slots__ = ()
+__all__ = [
+    "AttributeValue",
+    "Attrs",
+    "ClassInput",
+    "Comment",
+    "Element",
+    "HtmlElement",
+    "HtmlElementTuple",
+    "Omitted",
+    "SafeString",
+    "StyleDeclarations",
+    "StyleValue",
+    "TagAttributes",
+]
 
 
 # Attribute values

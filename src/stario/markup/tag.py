@@ -7,8 +7,8 @@ module keeps the public name and the type aliases.
 
 from typing import Literal
 
-from stario_cython.markup import Tag
+from stario_cython.markup import Tag, VoidTag
 
 type EmptyMode = Literal["normal", "void", "self_closing_when_empty"]
 
-__all__ = ["EmptyMode", "Tag"]
+__all__ = ["EmptyMode", "Tag", "VoidTag"]

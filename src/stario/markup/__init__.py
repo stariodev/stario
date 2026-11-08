@@ -21,7 +21,10 @@ from stario.markup import (
 
 **Constructors:** `Comment` — safe HTML comments.
 
-**Types:** `HtmlElement`, `SafeString`, `Attrs`, `Tag` (custom elements when catalogs omit a name).
+**Types:** `HtmlElement`, `Element`, `SafeString`, `Attrs`, `Tag` (custom elements when
+catalogs omit a name), `VoidTag` (custom void elements: attributes only).
+
+**Bytes:** `render_bytes` — the same markup as `render`, UTF-8 encoded in one pass.
 
 **Advanced types** (annotations): `from stario.markup.types import TagAttributes, AttributeValue`.
 
@@ -40,22 +43,25 @@ Lighter import paths when you do not need the full package:
 from . import html, svg
 from .attributes import aria, classes, data, styles
 from .baked import baked
-from .render import render
-from .tag import Tag
-from .types import Attrs, Comment, HtmlElement, SafeString
+from .render import render, render_bytes
+from .tag import Tag, VoidTag
+from .types import Attrs, Comment, Element, HtmlElement, SafeString
 
 __all__ = [
     "Attrs",
     "Comment",
+    "Element",
     "HtmlElement",
     "SafeString",
     "Tag",
+    "VoidTag",
     "aria",
     "baked",
     "classes",
     "data",
     "html",
     "render",
+    "render_bytes",
     "styles",
     "svg",
 ]

@@ -1,6 +1,5 @@
 """Tests for stario.markup — HTML generation and rendering."""
 
-import dataclasses
 from typing import Any, cast
 
 import pytest
@@ -235,7 +234,7 @@ class TestSafeString:
 
     def test_safestring_is_frozen(self):
         s = SafeString("x")
-        with pytest.raises(dataclasses.FrozenInstanceError):
+        with pytest.raises(AttributeError):
             s.rendered = "y"  # type: ignore[misc]
 
     def test_safestring_not_escaped(self):
@@ -251,7 +250,7 @@ class TestSafeString:
 class TestAttrs:
     def test_attrs_is_frozen(self):
         attrs = Attrs(' class="x"')
-        with pytest.raises(dataclasses.FrozenInstanceError):
+        with pytest.raises(AttributeError):
             attrs.rendered = ""  # type: ignore[misc]
 
     def test_attrs_fragment_is_inserted_in_opening_tag(self):
@@ -476,14 +475,19 @@ class TestRender:
             "<li>&lt;img src=x onerror=alert(1)&gt; onclick=evilabc</li>"
         )
 
-    def test_elements_are_tuples_built_only_by_tags(self):
+    def test_elements_are_built_only_by_tags(self):
         from stario.markup.types import Element
 
         element = h.P({"id": "x"}, "hi")
         assert type(element) is Element
-        assert isinstance(element, tuple)
-        assert len(element) == 4
+        assert not isinstance(element, tuple)
         assert render(element) == '<p id="x">hi</p>'
+        with pytest.raises(TypeError):
+            Element()  # type: ignore[call-arg]
+        with pytest.raises(TypeError):
+            Element.__new__(Element)
+        with pytest.raises(TypeError):
+            object.__new__(Element)
 
 
 class TestHtmlTags:
@@ -496,9 +500,9 @@ class TestHtmlTags:
 
     def test_void_elements_reject_children(self):
         with pytest.raises(StarioError, match="void element and cannot have children"):
-            h.Br("text")
+            h.Br(cast(Any, "text"))
         with pytest.raises(StarioError, match="void element and cannot have children"):
-            h.Img({"src": "a.png"}, "caption")
+            h.Img({"src": "a.png"}, cast(Any, "caption"))
 
 
 class TestBakedDecorator:

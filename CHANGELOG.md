@@ -44,6 +44,95 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
   checks and the open is a 404. Windows has no `O_NOFOLLOW`, and on any
   platform an intermediate directory could be replaced in that window.
 
+## 5.6.1 - 2026-11-07
+
+### Fixed
+
+- `Tag`, `VoidTag`, `Tag.__init__` and `Tag.__call__` have signatures for
+  `inspect.signature` again. `Tag` became a Cython type in 5.5.0, and its
+  slot methods lost their signatures, so doc tools showed `Tag` without
+  arguments.
+- The `prefixed()` docstring names its import path again
+  (`from stario.markup.attributes import prefixed`); 5.6.0 dropped it.
+
+## 5.6.0 - 2026-11-07
+
+### Changed
+
+- `Element` is a sealed Cython type. A tag call (`h.Div(...)`) returns an
+  immutable `Element` with read-only fields (`tag`, `name`, `attrs`,
+  `children`) instead of a `tuple` subclass. Python code cannot create one
+  (`Element(...)`, `Element.__new__` and `object.__new__` raise
+  `TypeError`), subclass it, pickle it, or treat it as a sequence: `el[0]`,
+  `len(el)`, iteration and unpacking raise. Elements compare by identity, so
+  tests should compare `render()` output. `h.Div()` with no arguments
+  returns the tag's cached empty `Element`, not a `SafeString`.
+- `SafeString` and `Attrs` are final Cython types instead of frozen
+  dataclasses. Setting a field raises `AttributeError` (was
+  `FrozenInstanceError`), and `dataclasses.replace` no longer applies. Both
+  take a `str` only: a `str` subclass such as `markupsafe.Markup` is copied
+  to a plain `str`, and `SafeString(5)` raises `TypeError` at once. `Attrs`
+  must be empty or start with whitespace: `Attrs('id="x"')` rendered
+  `<divid="x">`.
+- A bad child (`True`, a tuple, an uncalled `Tag`, any other object) raises
+  `StarioError` at the tag call that receives it, not later at render. The
+  context names the receiving tag (`parent`). Items inside a list are still
+  checked at render. In `@baked`, a static enum member child is now refused,
+  as it already was outside `@baked`.
+- Void elements (`h.Br`, `h.Img`, `h.Input`, ...) are `VoidTag` instances,
+  so a type checker rejects children (`h.Br("x")`). The runtime check stays.
+- Raw-text elements (`h.Script`, `h.Style`) refuse element children,
+  because the browser reads their content as text. Numbers join the text
+  around them for the early-end check.
+- `render()` raises `StarioError` for a lone surrogate (U+D800 to U+DFFF).
+  Before, `render()` returned it and the UTF-8 encode in `w.html` failed.
+
+### Added
+
+- The `Element` read API: `el.tag`, `el.name`, `el.attrs`, `el.children`,
+  `el["href"]`, `el.get("href")`, `"href" in el`, and
+  `el.with_attrs({...})`, which returns a copy with attributes set or
+  removed (`None` / `False`). A value reads back decoded, as a browser reads
+  it. `with_attrs` copies every attribute it does not change byte for byte.
+- `render_bytes(*nodes)`: the markup of `render`, UTF-8 encoded in the same
+  pass. `w.html` and the Datastar SSE patch helpers use it.
+- `stario.markup` exports `Element`, `VoidTag` and `render_bytes`.
+- `benchmarks/html/compare_versions.py` and `page_versions.py` time two
+  stario builds side by side and refuse builds that render different
+  markup. `compare.py` checks that every library renders the same page.
+
+### Fixed
+
+- A `None` or an empty `SafeString` between two text pieces of `h.Script`
+  or `h.Style` split the early-end check, so
+  `h.Script("</scr", None, "ipt><img src=x onerror=...>")` ended the script
+  and sent the rest as HTML. Children that put nothing on the wire no longer
+  split the check, inside lists and `@baked` builders too.
+- Raw-text children in a list that contains itself crashed the process
+  (unbounded C recursion). Past 1000 levels they raise `StarioError`.
+- A custom raw-text tag with an upper-case name
+  (`Tag("STYLE", raw_text=True)`) never matched `</style` in its check.
+- A tag call read the keys and values of an attribute mapping through
+  borrowed pointers while the attribute-name validator ran Python code.
+  Another thread that changed the dict then could make the call write freed
+  memory into the page, or crash; `data()` and `aria()` had the same flaw.
+  Mappings are now walked with strong references, and a mapping that
+  changes during the call raises `RuntimeError`. Under free threading,
+  render reads lists the same way, and the attribute caches read with
+  `PyDict_GetItemRef` and never replace an entry.
+
+### Performance
+
+- `classes()`, `data()`, `aria()` and `prefixed()` run in Cython, and
+  `classes()` also caches calls with `None` or `False` tokens. A tag call
+  writes its attributes into one string and keeps its own argument tuple as
+  the children. Render writes UTF-8 straight into one buffer. On the
+  50-row page of `benchmarks/html/compare.py` (Python 3.14), a tree built
+  per request takes 44 µs, down from 101 µs (Jinja2: 118 µs), and the
+  `@baked` version takes 22 µs, down from 39 µs. A 100-row page builds and
+  renders to bytes in 133 µs, down from 223 µs (on 3.14t: 146 µs, down from
+  252 µs).
+
 ## 5.5.0 - 2026-11-06
 
 ### Fixed
