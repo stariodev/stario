@@ -767,7 +767,11 @@ class TestServing:
             compression=CompressionConfig(min_size=1),
         )
         target.write_text("changed" * 200)
-        os.utime(target, ns=(target.stat().st_atime_ns, target.stat().st_mtime_ns + 1))
+        # 1 ms: NTFS keeps 100 ns ticks, so a 1 ns bump can round away.
+        os.utime(
+            target,
+            ns=(target.stat().st_atime_ns, target.stat().st_mtime_ns + 1_000_000),
+        )
 
         async with TestClient(app) as client:
             response = await client.get(
@@ -783,7 +787,11 @@ class TestServing:
         files = Files(tmp_path)
         app = await _loaded(files, precompress=())
         target.write_text("b" * 1000)
-        os.utime(target, ns=(target.stat().st_atime_ns, target.stat().st_mtime_ns + 1))
+        # 1 ms: NTFS keeps 100 ns ticks, so a 1 ns bump can round away.
+        os.utime(
+            target,
+            ns=(target.stat().st_atime_ns, target.stat().st_mtime_ns + 1_000_000),
+        )
 
         class Evicted(dict[str, Any]):
             """Another event-loop thread drops the stale entry right after `get`."""

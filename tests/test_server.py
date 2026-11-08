@@ -6,6 +6,7 @@ import os
 import signal
 import socket
 import stat
+import sys
 import tempfile
 import time
 from io import StringIO
@@ -476,6 +477,11 @@ class TestServerRunLifecycle:
             "ticker",
         ]
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Windows loopback takes the whole 10 MiB while the client is not "
+        "reading, so close() flushes and nothing is left to abort",
+    )
     async def test_shutdown_aborts_write_blocked_transport(self, listen_target) -> None:
         """A client that never reads must not stall wait_closed(): the drain
         aborts transports that close() would flush forever."""
