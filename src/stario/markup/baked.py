@@ -16,6 +16,8 @@ from stario.exceptions import StarioError
 from stario_cython.markup import (
     check_raw_text,
     element_parts,
+    shared_safe_string,
+    shared_str,
     splice_attribute,
     splice_child,
 )
@@ -295,7 +297,13 @@ def _generate_splice_function(
     frozen_plan: tuple[PlanSegment, ...],
     static_result: SafeString | None,
 ) -> Callable[..., Any]:
-    """Compile per-call splicing with the builder's exact signature."""
+    """Compile per-call splicing with the builder's exact signature.
+
+    Static text goes into the generated function's globals through
+    ``shared_str``: on free-threaded builds an immortal (interned) copy, so
+    threads loading it write no refcount. Such a template is never freed
+    there, so bake at import, not per call.
+    """
     namespace: dict[str, Any] = {
         "__stario_SafeString": SafeString,
         "__stario_attr": splice_attribute,
@@ -324,7 +332,7 @@ def _generate_splice_function(
 
     body: list[str] = []
     if static_result is not None:
-        namespace["__stario_static"] = static_result
+        namespace["__stario_static"] = shared_safe_string(static_result.rendered)
         body.append("    return __stario_static")
     else:
         expr_parts: list[str] = []
@@ -332,7 +340,7 @@ def _generate_splice_function(
             segment_type = type(segment)
             if segment_type is SafeString:
                 static_name = f"__stario_static_{plan_index}"
-                namespace[static_name] = cast(SafeString, segment).rendered
+                namespace[static_name] = shared_str(cast(SafeString, segment).rendered)
                 expr_parts.append(static_name)
             elif segment_type is AttrSlot:
                 attr_slot = cast(AttrSlot, segment)
@@ -345,7 +353,7 @@ def _generate_splice_function(
                         parts_src.append(slot_name(part))
                     else:
                         literal_name = f"__stario_raw_{plan_index}_{part_index}"
-                        namespace[literal_name] = part
+                        namespace[literal_name] = shared_str(cast(str, part))
                         parts_src.append(literal_name)
                 expr_parts.append(
                     f"__stario_raw({raw_slot.tag!r}, ({', '.join(parts_src)},))"

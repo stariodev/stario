@@ -4,7 +4,6 @@ The hot path is deliberately small: `Tag` renders plain mappings as
 `key=value` pairs and accepts pre-rendered `Attrs` fragments.
 """
 
-import re
 from typing import Any, cast
 
 from stario.exceptions import StarioError
@@ -19,9 +18,6 @@ from .escape import escape_attribute_value
 from .slots import BakeSlot, slot_name
 from .types import Attrs, StyleDeclarations
 
-# A property name or value that could start another declaration or block.
-_STYLE_KEY_BAD = re.compile(r"[:;{}\\]")
-_STYLE_VALUE_BAD = re.compile(r"[;{}\\]")
 # `classes()` runs in `stario_cython.markup`. Its cache holds rendered
 # `class="..."` fragments for all-str token tuples (Tailwind lists repeat),
 # bounded by refusing new entries past the cap, never by clearing: a clear in
@@ -55,7 +51,11 @@ def styles(declarations: StyleDeclarations) -> Attrs:
                 example='h.Div(styles({"color": "red"}))',
             )
 
-        if _STYLE_KEY_BAD.search(key) is not None:
+        # A property name or value that could start another declaration or
+        # block. Literal checks, not a module-level regex: free-threaded
+        # CPython increfs a module global (a compiled pattern) on every load,
+        # from every thread, and string constants are immortal.
+        if ":" in key or ";" in key or "{" in key or "}" in key or "\\" in key:
             raise StarioError(
                 f"Invalid CSS property name: {key!r}",
                 context={"property": key},
@@ -80,7 +80,12 @@ def styles(declarations: StyleDeclarations) -> Attrs:
         value_type = type(value)
         if value_type is str:
             rendered_value = escape_attribute_value(cast(str, value))
-            if _STYLE_VALUE_BAD.search(rendered_value) is not None:
+            if (
+                ";" in rendered_value
+                or "{" in rendered_value
+                or "}" in rendered_value
+                or "\\" in rendered_value
+            ):
                 raise StarioError(
                     f"Invalid CSS value for property '{rendered_key}'",
                     context={"property": rendered_key, "value": rendered_value[:100]},

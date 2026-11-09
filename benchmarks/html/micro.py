@@ -4,18 +4,27 @@ Microbenchmarks for stario.markup hot paths.
 Run from the project root:
 
     uv run benchmarks/html/micro.py
-    uv run benchmarks/html/micro.py --attrs   # per-token vs batch-at-end
+    uv run benchmarks/html/micro.py --attrs     # per-token vs batch-at-end
+    uv run benchmarks/html/micro.py --threads   # thread scaling only
 
 Use these to catch regressions when touching `tag.py`, `attributes.py`,
 `baked.py`, or `render.py`. Times are best-of-N microseconds per call.
+
+The last section runs only on a free-threaded build (GIL off): each thread
+builds and renders its own tree from its own rows, and it prints aggregate
+throughput at 1 and 2 threads. Pin it to two idle CPUs
+(`taskset -c 0,1 uv run ...`); below 1.7x, something every thread touches is
+being written again (a refcount on a shared Tag, string, or cache).
 """
 
+import os
 import sys
+import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, cast
 
-from stario.markup import baked, classes, data, render, styles
+from stario.markup import baked, classes, data, render, render_bytes, styles
 from stario import h
 from stario.markup.escape import escape_attribute_value, escape_text
 from stario.markup.types import Attrs
@@ -174,7 +183,136 @@ def main() -> None:
         lambda: ("<div>", None, _CHILDREN, "</div>"),
         n=500000,
     )
+    _threads_main()
     print()
+
+
+# --- thread scaling (free-threaded builds) -----------------------------------
+
+SCALING_MIN = 1.7
+
+
+def _rows(seed: int) -> list[dict[str, Any]]:
+    return [
+        {"i": i, "name": f"item-{seed}-{i}", "price": f"{i * 1.5:.2f}"}
+        for i in range(50)
+    ]
+
+
+def _table(rows: list[dict[str, Any]]) -> bytes:
+    return render_bytes(
+        h.Table(h.Tbody(*[h.Tr(h.Td(r["name"]), h.Td(r["price"])) for r in rows]))
+    )
+
+
+def _page(rows: list[dict[str, Any]]) -> bytes:
+    return render_bytes(
+        h.Div(
+            classes("wrap", "p-4"),
+            h.Table(
+                classes("table"),
+                h.Tbody(
+                    *[
+                        h.Tr(
+                            h.Td(classes("px-3", "py-2"), r["name"]),
+                            h.Td({"data-i": r["i"]}, r["price"]),
+                            h.Td(
+                                h.A(
+                                    {"href": f"/items/{r['i']}"},
+                                    classes("link"),
+                                    "open",
+                                )
+                            ),
+                        )
+                        for r in rows
+                    ]
+                ),
+            ),
+        )
+    )
+
+
+@baked
+def _icon():
+    # Static markup that every thread puts in its tree: a parameterless
+    # @baked fragment is one immortal SafeString on free-threaded builds (a
+    # module-level element would have its refcount written on every use).
+    return h.Span({"class": "icon"}, h.I("*"))
+
+
+def _shared_fragment(rows: list[dict[str, Any]]) -> bytes:
+    return render_bytes(
+        h.Table(h.Tbody(*[h.Tr(h.Td(r["name"]), h.Td(_icon())) for r in rows]))
+    )
+
+
+def _throughput(fn: Callable[[list[dict[str, Any]]], bytes], threads: int) -> float:
+    """Calls per second summed over `threads` threads, each on its own rows."""
+    counts = [0] * threads
+    errors: list[BaseException] = []
+    ready = threading.Barrier(threads + 1)
+    stop = False
+
+    def worker(slot: int, fn: Callable[[list[dict[str, Any]]], bytes]) -> None:
+        try:
+            rows = _rows(slot)
+            for _ in range(200):
+                fn(rows)
+            ready.wait()
+            n = 0
+            while not stop:
+                for _ in range(20):
+                    fn(rows)
+                n += 20
+            counts[slot] = n
+        except BaseException as error:
+            errors.append(error)
+            ready.abort()  # the main thread is waiting on it
+
+    workers = [
+        threading.Thread(target=worker, args=(slot, fn)) for slot in range(threads)
+    ]
+    for t in workers:
+        t.start()
+    try:
+        ready.wait()
+    except threading.BrokenBarrierError:
+        for t in workers:
+            t.join()
+        raise errors[0] from None
+    t0 = time.perf_counter()
+    time.sleep(0.5)
+    stop = True
+    for t in workers:
+        t.join()
+    if errors:
+        raise errors[0]
+    return sum(counts) / (time.perf_counter() - t0)
+
+
+def _threads_main() -> None:
+    print("\nthread scaling (build + render_bytes, private rows per thread):")
+    if getattr(sys, "_is_gil_enabled", lambda: True)():
+        print("  skipped: the GIL is on (run on a free-threaded build, e.g. 3.14t)")
+        return
+    if hasattr(os, "sched_getaffinity"):
+        cpus = len(os.sched_getaffinity(0))
+    else:
+        cpus = os.cpu_count() or 1
+    if cpus < 2:
+        print("  skipped: fewer than 2 CPUs available")
+        return
+    cases = (
+        ("50-row table, text cells", _table),
+        ("50-row table, classes + attrs", _page),
+        ("50-row table, shared @baked", _shared_fragment),
+    )
+    for name, fn in cases:
+        one = max(_throughput(fn, 1) for _ in range(5))
+        two = max(_throughput(fn, 2) for _ in range(5))
+        scale = two / one
+        flag = "" if scale >= SCALING_MIN else f"   << below {SCALING_MIN}x"
+        print(f"  {name:<32} 1T {one:8.0f}/s  2T {two:8.0f}/s  {scale:5.2f}x{flag}")
 
 
 @baked
@@ -195,5 +333,8 @@ _STATIC_TREE = h.Div(
 if __name__ == "__main__":
     if "--attrs" in sys.argv:
         _attrs_main()
+    elif "--threads" in sys.argv:
+        _threads_main()
+        print()
     else:
         main()
