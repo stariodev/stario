@@ -4,7 +4,7 @@ All notable changes to Stario are documented in this file.
 
 The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 5.8.0 - 2026-11-09
 
 ### Performance
 
