@@ -1,14 +1,49 @@
 # pyright: reportMissingImports=false
 
+import asyncio
+import contextlib
+import os
+
 import ujson
 from fastapi import FastAPI
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import (
+    HTMLResponse,
+    PlainTextResponse,
+    Response,
+    StreamingResponse,
+)
 from pydantic import BaseModel, Field
 
-HELLO = "Hello, World!"
-JSON_MEDIA_TYPE = "application/json"
+from apps.common import (
+    COMPRESS,
+    HELLO,
+    Hub,
+    datastar_event,
+    jinja_page,
+    sse_fragment,
+    ticker,
+)
 
-app = FastAPI()
+JSON_MEDIA_TYPE = "application/json"
+hub = Hub()
+render_page = jinja_page()
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app):
+    task = asyncio.create_task(ticker(hub.publish))
+    yield
+    task.cancel()
+
+
+app = FastAPI(lifespan=lifespan)
+if COMPRESS:
+    from starlette.middleware.gzip import GZipMiddleware
+
+    # Starlette's default compresslevel is 9; BENCH_GZIP_LEVEL overrides it.
+    app.add_middleware(
+        GZipMiddleware, compresslevel=int(os.environ.get("BENCH_GZIP_LEVEL", "9"))
+    )
 
 
 class UserInput(BaseModel):
@@ -42,3 +77,25 @@ async def get_user(user_id: str) -> Response:
 @app.post("/validate")
 async def validate(body: UserInput) -> Response:
     return json_response({"name": body.name, "age": body.age, "valid": True})
+
+
+@app.get("/page")
+async def page() -> HTMLResponse:
+    return HTMLResponse(render_page())
+
+
+@app.get("/sse")
+async def sse() -> StreamingResponse:
+    queue = hub.subscribe()
+
+    async def events():
+        try:
+            while True:
+                tick, ts = await queue.get()
+                yield datastar_event(sse_fragment(tick, ts))
+        finally:
+            hub.unsubscribe(queue)
+
+    return StreamingResponse(
+        events(), media_type="text/event-stream", headers={"cache-control": "no-cache"}
+    )

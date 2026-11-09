@@ -1,10 +1,15 @@
 # pyright: reportMissingImports=false
 
-import ujson
-import falcon.asgi
+import asyncio
 
-HELLO = "Hello, World!"
+import falcon.asgi
+import ujson
+
+from apps.common import HELLO, Hub, datastar_event, jinja_page, sse_fragment, ticker
+
 JSON_MEDIA_TYPE = falcon.MEDIA_JSON
+hub = Hub()
+render_page = jinja_page()
 
 
 def json_body(resp, value, status=falcon.HTTP_200):
@@ -48,8 +53,38 @@ class ValidateResource:
         json_body(resp, {"name": name, "age": age, "valid": True})
 
 
-app = falcon.asgi.App()
+class PageResource:
+    async def on_get(self, req, resp):
+        resp.content_type = falcon.MEDIA_HTML
+        resp.text = render_page()
+
+
+class SseResource:
+    async def on_get(self, req, resp):
+        queue = hub.subscribe()
+
+        async def events():
+            try:
+                while True:
+                    tick, ts = await queue.get()
+                    yield datastar_event(sse_fragment(tick, ts))
+            finally:
+                hub.unsubscribe(queue)
+
+        resp.content_type = "text/event-stream"
+        resp.set_header("cache-control", "no-cache")
+        resp.stream = events()
+
+
+class Ticker:
+    async def process_startup(self, scope, event):
+        self.task = asyncio.create_task(ticker(hub.publish))
+
+
+app = falcon.asgi.App(middleware=[Ticker()])
 app.add_route("/plaintext", Plaintext())
 app.add_route("/json", JsonResource())
 app.add_route("/user/{user_id}", UserResource())
 app.add_route("/validate", ValidateResource())
+app.add_route("/page", PageResource())
+app.add_route("/sse", SseResource())

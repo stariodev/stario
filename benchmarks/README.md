@@ -14,23 +14,38 @@ machine and compare repeated runs before drawing conclusions.
 
 ### Comparison: `html/compare.py`
 
-Renders the same 50-row product page (autoescaping on everywhere) with:
+Renders the same product page (autoescaping on everywhere) with:
 
 - `stario @baked` — precompiled layout, slots spliced per call
 - `stario` naive — full tree built per call
 - `jinja2` — compiled template, autoescape
+- `mako` — compiled template, `h` (HTML-escape) default filter
 - `htpy`
+- `fastcore.xml` — FastHTML's FT components, `to_xml(indent=False)`
 - `dominate`
 - `tdom` — Python 3.14 t-strings ([tdom](https://github.com/t-strings/tdom));
   naive inline template and Page/Row component functions
+- `f-string + markupsafe` and `f-string + html.escape` — no library, just
+  escape and join: baselines to measure the libraries against
 
-Times are best-of-N microseconds per full page render; lower is better.
-Install competitor packages on demand, or run from a virtual environment that
-already has them:
+Two categories are being compared, and both are fair fights: template
+engines compile once and fill values per call (jinja2, mako, and
+`stario @baked`), builders construct a tree per call (htpy, dominate,
+fastcore, tdom, and stario naive).
+
+Every contender's output is checked against stario's before timing
+(doctype and inter-tag whitespace stripped, entities decoded, since
+escapers spell `"` differently). Times are best-of-7 microseconds per full
+page; lower is better.
+
+- `--rows N` (default 50) changes the row count.
+- `--escape` puts `<>&"'` in every row's name, so escaping does real work
+  instead of scanning clean ASCII.
 
 ```bash
 cd projects/stario
-uv run --with dominate --with htpy --with jinja2 --with tdom benchmarks/html/compare.py
+uv run --with dominate --with htpy --with jinja2 --with tdom --with mako \
+  --with fastcore --with markupsafe benchmarks/html/compare.py --rows 50 --escape
 ```
 
 ### Microbenchmarks: `html/micro.py`
@@ -77,110 +92,108 @@ in a change that touches the request path or the markup builder.
 
 ## HTTP server (`server/`)
 
-Compares the current Stario checkout with a few Python web framework/server
-combinations. The route mix follows Cemrehan Çavdar's framework comparison:
-https://cemrehancavdar.com/2026/02/10/framework-benchmark/
-
-The runner keeps the setup explicit: one process per target, one load
-generator, dedicated virtual environments, and separate ports so a stale
-server cannot be reused by accident.
-
-Targets:
-
-- `stario` — this checkout with no-op tracing
-- `fastapi` — FastAPI on one Uvicorn worker
-- `blacksheep-uvicorn` — BlackSheep on one Uvicorn worker
-- `blacksheep-granian` — BlackSheep on one Granian worker
-- `sanic` — Sanic in one process
-- `falcon` — Falcon ASGI on one Uvicorn worker
-- `robyn` — Robyn on one process and one worker thread
-
-### Benchmark shape
-
-- One worker/process per framework.
-- Same paths: `/plaintext`, `/json`, `/user/42`, and `POST /validate`.
-- Same `wrk` settings for every run.
-- Stario response compression disabled with negative codec levels.
-- JSON response bodies use `ujson` for Stario and FastAPI to match Sanic's
-  `ujson` dependency more closely.
-- Stario runs with `STARIO_TRACER=noop`; FastAPI, BlackSheep/Uvicorn,
-  BlackSheep/Granian, Falcon, and Sanic run with access logging disabled.
-- Robyn runs with `--processes 1 --workers 1 --log-level WARN
-  --disable-openapi` (no per-request access log middleware; OpenAPI routes off).
-  Handlers are sync, static GET routes use `const=True`, and handlers return bare
-  `str`/`dict` so Robyn's Rust executor can serve them (manual `Response` objects
-  force a slower Python path). JSON on the fast path uses Robyn's native orjson
-  serialization; validate still parses with `ujson` for parity with other targets.
-
-FastAPI uses Pydantic validation, matching the referenced benchmark. Stario,
-BlackSheep, Falcon, Robyn, and Sanic validate the JSON body manually because
-they do not bundle a Pydantic-style request validation layer.
-
-### Requirements
-
-- `uv`
-- `wrk`
-- Python compatible with Stario (3.12+)
-
-All targets run on `uvloop`: Stario starts its server with `uvloop.run`,
-FastAPI/Uvicorn uses `--loop uvloop`, and Sanic uses its uvloop-backed
-default when installed.
-
-The runner creates dedicated virtual environments under
-`benchmarks/server/.venvs/` with `uv venv` and `uv pip install`, then starts
-each server from its own environment. The Stario target installs this checkout
-as `stario @ file://...`. Use `REFRESH_ENVS=1` after changing dependencies or
-upgrading framework versions.
-
-### Run
+`server/bench.py` compares the current Stario checkout with other Python
+frameworks over real sockets. It sets up one virtual environment per target
+under `server/.venvs/`, starts one server at a time, checks it, loads it, and
+writes `results/<timestamp>/summary.md` plus `results.json`. Standard library
+only; it needs `uv`, `wrk`, and `taskset` (util-linux), and Linux for the CPU
+pinning and `/proc` sampling.
 
 ```bash
 cd projects/stario
-benchmarks/server/run.sh
+python3 benchmarks/server/bench.py                          # every phase, every target (~1 h)
+python3 benchmarks/server/bench.py stario fastapi           # some targets
+python3 benchmarks/server/bench.py --phases throughput,mixed
+benchmarks/server/run.sh                                    # throughput phase only (~15 min)
 ```
 
-The default run is the standard comparison shape:
+Targets (one worker each unless the phase says otherwise):
 
-- `DURATION=10s`
-- `THREADS=2`
-- `CONNECTIONS=128`
-- `PORT=3000` as the base port
-- one process or worker per target
+| Target | Server |
+| --- | --- |
+| `stario` | this checkout, `uvloop.run(serve(...))`, `STARIO_TRACER=noop` |
+| `fastapi` | FastAPI + Pydantic on Uvicorn (`httptools`, `uvloop`) |
+| `blacksheep-uvicorn` | BlackSheep on Uvicorn |
+| `blacksheep-granian` | BlackSheep on Granian (`--runtime-threads 1`) |
+| `sanic` | Sanic, single process |
+| `falcon` | Falcon ASGI on Uvicorn |
+| `robyn` | Robyn, one process, one worker |
+| `stario-ft` | free-threaded 3.14t build, `STARIO_THREADS=N` (multicore phase only) |
+| `stario-mp` | N GIL Stario processes sharing the port with `SO_REUSEPORT`, via the benchmark launcher `apps/stario_mp.py` (multicore phase only; Stario ships no multi-process mode, and each process has its own `Relay`) |
 
-Use those defaults when you want numbers that are easiest to compare with
-other local runs. The generated `config.txt` records the exact settings for
-that run.
+The Stario target installs `stario @ file://<checkout>` (a source build:
+needs the native libraries in [`CYTHON.md`](../CYTHON.md)). To benchmark a
+released wheel instead, set `STARIO_SPEC` (and `STARIO_FT_SPEC` for the
+free-threaded target) to a path or requirement, e.g.
+`STARIO_SPEC=/path/to/stario-5.7.0-cp314-...whl`. `--refresh-envs`
+rebuilds the environments.
 
-Common options:
+### Fairness rules
 
-```bash
-DURATION=30s THREADS=2 CONNECTIONS=128 benchmarks/server/run.sh
-benchmarks/server/run.sh stario blacksheep-granian
-PORT=3999 benchmarks/server/run.sh
-REFRESH_ENVS=1 benchmarks/server/run.sh
-KEEP_RAW=1 benchmarks/server/run.sh
-```
+- **Same CPU budget.** Each server is pinned to `SERVER_CPUS` (default CPU 0)
+  with `taskset`, including any helper threads Granian or Robyn start in
+  Rust; `wrk` and the helper clients are pinned to `CLIENT_CPUS` (default
+  2,3), so the load generator never steals the server's core. The
+  throughput table reports server CPU per run; every target should be at
+  ~1.00, i.e. the server, not the client, is the bottleneck.
+- **Same answers.** Before measuring, every endpoint of every target is
+  fetched and checked (status, JSON body, an invalid POST rejected), and
+  every target's `/page` must match Stario's document. A run with
+  socket errors or non-2xx responses prints them next to the number.
+- **Handlers run per request.** Robyn's `const=True` caches a route's first
+  response in Rust and never calls the handler again; no other target can do
+  that, so it is off (`BENCH_ROBYN_CONST=1` turns it on).
+- **JSON** goes through `ujson` explicitly where a framework allows it
+  (Stario, FastAPI, BlackSheep, Falcon); Sanic uses its default (`ujson` when
+  installed); Robyn serializes dicts with its built-in orjson.
+- **Validation:** FastAPI validates `POST /validate` with Pydantic, as its
+  users would; the others check the two fields by hand.
+- **HTML:** Stario builds `/page` with `h.*` per request (the naive tree, what
+  most handlers do). Every other target renders the same page with a compiled
+  Jinja2 template with autoescape, the renderer their docs reach for. Stario
+  also serves `/page-baked`, the same bytes through `@baked`, reported as an
+  extra line.
+- **Compression** is off in the main phases (`wrk` sends no
+  `Accept-Encoding` anyway; Stario's codecs are also disabled with negative
+  levels). The `compress` phase restarts each target with its built-in
+  compression: Stario's codecs at their defaults (zstd 3, brotli 4, gzip 1),
+  Starlette's `GZipMiddleware` (level 9), BlackSheep's `GzipMiddleware`
+  (level 5). Sanic, Falcon, and Robyn have no built-in response compression
+  and are left out of that phase. `--gzip-level N` forces one gzip level in
+  every framework for a like-for-like codec comparison.
+- **Median of `--repeat` runs** (default 3) of `--duration` seconds each
+  (default 10), after a warm-up. Each reported metric (req/s, p50,
+  p99, CPU) is its own median across the runs; errors are summed.
 
-`PORT` is a base port, not a shared port. The runner assigns fixed offsets per
-target (`stario` on `PORT`, `fastapi` on `PORT+1`, and so on) and checks each
-port before starting a server.
+### Phases
 
-Each run writes a timestamped directory under `benchmarks/server/results/`:
+| Phase | What it measures |
+| --- | --- |
+| `throughput` | `/plaintext`, `/json`, `/user/42`, `POST /validate`, `/page` at 128 connections: req/s, p50/p99, server CPU, bytes per response |
+| `sweep` | `/page` at 8, 64, 256, 1024 connections: how latency grows with load |
+| `mixed` | `mixed.lua`: 40% page, 30% path-param JSON, 20% JSON, 10% POST, every request with a real browser's header set and cookies |
+| `compress` | `/page` with a browser's `Accept-Encoding` (and gzip-only, brotli-only for Stario), and the mix: req/s and bytes on the wire |
+| `sse` | `sse_client.py`: 1,000 and 5,000 clients hold a Datastar SSE stream; the server broadcasts an HTML fragment every 0.5 s. Delivery latency (send to receive, same clock), share of events delivered, server CPU, peak RSS |
+| `conns` | `conn_client.py`: 2,000 and 10,000 keep-alive clients each `GET /page` every 2 s (1,000 and 5,000 req/s offered): achieved req/s, latency, errors, reconnects, peak RSS |
+| `multicore` | `MC_WORKERS` (2) workers on `MC_CPUS` (0,1): Stario free-threaded with N loop threads, Stario as N GIL processes, and multi-process FastAPI, Granian, Sanic, Robyn. The Stario targets also run with one worker as a same-run reference. For drift, run it several times with the targets in a different order each time and take medians |
 
-- `summary.md` — markdown tables suitable for copying into notes or docs.
-- `config.txt` — run settings.
+The `sse` and `conns` clients are asyncio programs that split connections
+across one process per client CPU. At 5,000 SSE clients they handle 10,000
+events per second, so part of the delivery latency at that size can come
+from the client, but it is the same client for every target.
 
-Successful runs keep only `summary.md` and `config.txt` by default. Use
-`KEEP_RAW=1` to keep the per-endpoint `wrk` output and server logs. Failed
-runs leave the logs in place so startup issues can be inspected.
+`mixed.lua` sets `Host` by hand: `wrk.format()` with a custom header table
+does not add one, and Stario (correctly, per RFC 9112) answers a Host-less
+HTTP/1.1 request with 400 where the other servers accept it.
 
-The `POST /validate` benchmark uses `benchmarks/server/validate.lua` so every
-endpoint runs through `wrk`.
+Knobs (flags, or the environment variable in brackets): `--duration`
+(`DURATION`), `--repeat` (`REPEAT`), `--connections` (`CONNECTIONS`),
+`--threads` (`THREADS`), `--sweep` (`SWEEP`), `--sse-clients`,
+`--conn-clients`, `--server-cpus` (`SERVER_CPUS`), `--client-cpus`
+(`CLIENT_CPUS`), `--port` (`PORT`, base port; targets use fixed offsets),
+`--python` (`PYTHON`, default 3.14). `python3 benchmarks/server/bench.py -h`
+lists them all.
 
-The Lua file is intentionally small:
-
-```lua
-wrk.method = "POST"
-wrk.body = '{"name":"Ada","age":42}'
-wrk.headers["Content-Type"] = "application/json"
-```
+The numbers are local signal, not lab-grade: run on a quiet machine with at
+least four CPUs, and compare repeated runs before drawing conclusions.
+[`RESULTS.md`](RESULTS.md) has the latest full run and what it says.
