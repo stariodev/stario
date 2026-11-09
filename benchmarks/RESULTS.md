@@ -1,4 +1,4 @@
-# Benchmark results — Stario 5.7.0, November 2026
+# Benchmark results — Stario 5.7.0 and 5.8.0, November 2026
 
 One full run of `server/bench.py` and `html/compare.py`, what it says about
 Stario against other Python frameworks, and where Stario can get better.
@@ -10,7 +10,9 @@ one CPU; `wrk` and the helper clients get two other CPUs. Each throughput and
 latency number is the median of 3 × 10 s runs, metric by metric. The SSE and
 connected-users numbers come from a single run each. The VM's speed drifts
 during the day (±15% between morning and evening runs), so compare numbers
-within one table. Every table below except SSE and multi-core comes from one
+within one table. The single-core tables were measured on 5.7.0; 5.8.0
+changes nothing on GIL builds within noise (its markup change only affects
+free-threaded builds). Every table below except SSE and multi-core comes from one
 contiguous run (`results/20261109T164834Z`).
 
 **Versions:** stario 5.7.0 (the PyPI wheel, byte-identical Python sources to
@@ -33,8 +35,9 @@ review:
   latencies of the run with the median req/s.
 - The HTML comparison adds an f-string + `html.escape` baseline, which is
   faster than markupsafe; the f-string rows are no longer called a "floor".
-- The multi-core numbers are labelled as an unreleased branch, and the
-  missing Stario multi-process baseline is stated.
+- The multi-core section was rerun on the Stario 5.8.0 release, with a
+  Stario multi-process baseline (`stario-mp`) and the targets interleaved
+  across three rounds.
 
 ## The short version
 
@@ -53,7 +56,9 @@ responses, and 5–6x FastAPI. On the HTML page, the thing a hypermedia app
 serves, it is 1.6x the next framework, and 2.5x with `@baked`. Its weak
 spots are tail latency at 1,024+ concurrent connections (a uvloop scheduling
 issue it shares with Uvicorn), and HTML building on free-threaded Python,
-which does not scale across threads in 5.7.0 (fixed on an unreleased branch).
+which does not scale across threads in 5.7.0. 5.8.0 fixes that: on two
+cores it serves 1.65x the pages of one thread. Two plain GIL processes still
+serve more (see "Two cores").
 
 ## Method notes and asymmetries
 
@@ -217,47 +222,60 @@ for any asyncio server, and part of the latency at 5k is the Python client.
 Every target delivered ≥98% of events; the shortfall is the measurement
 window edge.
 
-## Two cores (unreleased branch)
+## Two cores (Stario 5.8.0)
 
-Two workers on CPUs 0–1. Stario uses the free-threaded build with
-`STARIO_THREADS=2`: two event loops in one process, with one shared
-`Relay`. The others use two processes. Two caveats: there is no Stario
-two-process (GIL) row, which would likely beat the free-threaded one because
-3.14t costs ~15% per thread; and the competitor rows ran after the Stario
-rows, not interleaved. The free-threaded model is shown because it keeps
-in-process state such as `Relay` shared across cores.
+Two workers on CPUs 0–1, `wrk` on CPUs 2–3. Stario 5.8.0 was built from
+the release commit `03d54a9`, because the PyPI wheels were not published at
+the time of the run. The Jinja2 apps use the corrected template. To control
+for drift, three rounds ran with the targets in a different order each time
+(`results/20261109T183831Z`, `…184316Z`, `…184756Z`), one 10 s run per round.
+Each number is the median of the three rounds. Every round agreed within a
+few percent, with no errors.
 
-Afternoon run. 5.7.0 is the released wheel; "branch" is
-`claude/inspiring-davinci-ydskh0` (immortal shared markup objects), built
-from source; neither is in a release yet.
+Stario appears twice:
 
-| Target | plaintext | page | mix | p99 page |
-| --- | ---: | ---: | ---: | ---: |
-| stario-ft × 2, branch (unreleased) | 133,681 | 10,617 | 21,561 | 21 ms |
-| stario-ft × 1, branch (unreleased) | 73,194 | 6,270 | 12,591 | 32 ms |
-| stario-ft × 2, 5.7.0 | 142,381 | 5,856 | 15,069 | 33 ms |
-| stario-ft × 1, 5.7.0 | 68,964 | 6,210 | 12,332 | 33–58 ms |
-| blacksheep-granian × 2 | 75,537 | 5,714 | 11,672 | 36 ms |
-| robyn × 2 | 65,435 | 5,879 | 11,667 | 37 ms |
-| sanic × 2 | 49,702 | 5,883 | 11,291 | 36 ms |
-| fastapi × 2 | 26,262 | 5,152 | 8,879 | 46 ms |
+- `stario-ft × 2`: free-threaded 3.14t, `STARIO_THREADS=2`. One process
+  with two event loops, so in-process state such as `Relay` is shared across
+  cores. This is Stario's multi-core mode.
+- `stario-mp × 2`: two GIL processes sharing the port with `SO_REUSEPORT`,
+  started by the benchmark launcher `apps/stario_mp.py`. This is how the
+  other frameworks scale. Stario ships no such mode, and each process would
+  have its own `Relay`, so it suits stateless HTTP only.
 
-These competitor rows used the old Jinja2 template (`r.id`), so their page
-and mix numbers are understated. With the corrected template, expect two
-Jinja2 workers near 2 × 5k page req/s, about level with the branch.
-Scaling from one thread to two:
+| Target | plaintext | page | mix | p99 page | p99 mix |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| **stario-mp × 2** (GIL, 2 processes) | **228,895** | **15,559** | **31,466** | **13 ms** | **6.9 ms** |
+| **stario-ft × 2** (free-threaded, 2 threads) | **140,298** | **10,534** | **22,496** | **19 ms** | **9.6 ms** |
+| robyn × 2 | 65,933 | 10,039 | 17,484 | 20 ms | 12.9 ms |
+| sanic × 2 | 50,540 | 10,040 | 16,529 | 21 ms | 15.0 ms |
+| blacksheep-granian × 2 | 75,394 | 8,753 | 18,042 | 24 ms | 19.7 ms |
+| fastapi × 2 | 26,739 | 8,243 | 11,903 | 28 ms | 19.8 ms |
+| stario-mp × 1 (reference) | 77,951 | 7,580 | 14,876 | 27 ms | 13.8 ms |
+| stario-ft × 1 (reference) | 68,788 | 6,376 | 12,529 | 37 ms | 15.5 ms |
 
-| | plaintext | page | mix |
-| --- | ---: | ---: | ---: |
-| 5.7.0 | 2.06x | **0.94x** | 1.22x |
-| branch | 1.83x | **1.69x** | 1.71x |
+- Two GIL Stario processes serve 1.55x the HTML pages and 1.74x the mix of
+  the best two-process competitor.
+- Two free-threaded threads serve the page at the same rate as Robyn and
+  Sanic with two processes each, and the mix at 1.25x the best of them. They
+  do it in one process with a shared `Relay`.
+- Free-threading costs about a third of the page throughput against two
+  separate processes (10.5k vs 15.6k). About 16% of that is 3.14t's
+  per-thread cost (6.4k vs 7.6k on one worker). The rest is scaling: two
+  threads give 1.65x one thread on the page, two processes give 2.05x. The
+  page reads module-level row dicts from both threads, and plain Python over
+  shared dicts barely scales on 3.14t, so an app that loads rows per request
+  should scale closer to 2x.
+- On 5.7.0, a second thread made the page slower (0.94x the throughput of
+  one thread, measured earlier the same day). 5.8.0 makes shared markup
+  objects immortal on free-threaded builds; see its changelog.
+- Don't read the plaintext row as a scaling result. One Stario process
+  measured 77–79k req/s with `wrk` but 99k with `h2load` on the same setup,
+  while both tools agree on two processes (229k and 212k) and on the page
+  (7.8k to 15.6k, 2.0x). The one-process plaintext baseline is
+  client-sensitive, so treat the plaintext ratios as approximate.
 
-Released 5.7.0 doesn't scale HTML work across threads at all. The branch
-does, up to a ceiling set by this benchmark: `/page` reads module-level row
-dicts from both threads, and plain Python over shared dicts scales only
-1.13x on 3.14t. In-process with per-thread data, build+render on the branch
-scales 1.81x (5.7.0: 0.33x). The single-core GIL throughput is the same on
-both builds within noise, and both render byte-identical pages.
+Earlier, superseded multi-core runs (5.7.0, the development branch, and the
+old Jinja2 template) are in the git history of this file.
 
 ## HTML generation, no server
 
@@ -287,23 +305,19 @@ the same product list, checked to be the same document.
 
 Ordered by expected impact.
 
-1. **HTML building does not scale on free-threaded Python in 5.7.0.** On
-   5.7.0, two threads building trees from per-thread data reach 0.33x of one
-   thread together, while plain Python scales 1.89x. The cause is
-   reference-count contention on shared objects: every `Element` referenced
-   its `Tag`, render increfed each Tag's cached strings, and Cython increfed
-   the module-level cache dicts on every `classes()` call. Branch
-   `claude/inspiring-davinci-ydskh0` makes those objects immortal on
-   free-threaded builds. Measured here, on the branch:
-   - in-process build+render: 0.33x → 1.81x on two threads
-   - server `/page`: 0.94x → 1.69x
-   - mix: 1.22x → 1.71x
-   - no regression on the GIL build
-
-   Two limits remain. A module-level `Element` reused by every request
-   still contends; a parameterless `@baked` fragment does not. Shared
-   plain-Python data is CPython's limit, not Stario's. Still to do: add a
-   two-thread scaling case to `html/micro.py`.
+1. **HTML scaling on free-threaded Python: fixed in 5.8.0, with a cost
+   left.** In 5.7.0, threads contended on the reference counts of shared
+   markup objects, so a second thread made `/page` slower (0.94x). 5.8.0
+   makes those objects immortal on free-threaded builds, and two threads now
+   give 1.65x one thread on `/page` and 1.80x on the mix. Two GIL processes
+   still serve 1.5x more pages than two free-threaded threads, from 3.14t's
+   ~16% per-thread cost plus shared-data contention. Angles:
+   - Measure an app that loads rows per request (from SQLite) instead of
+     module-level dicts. It's the realistic case and should scale closer
+     to 2x.
+   - Add a two-thread scaling case to `html/micro.py`.
+   - Document that a module-level `Element` reused by every request still
+     contends, while a parameterless `@baked` fragment does not.
 2. **Tail latency at 1,024+ connections.** With uvloop, a minority of
    connections starve for seconds (p99 2.4 s, ~100 `wrk` timeouts per run)
    while p50 stays low. The same Stario on stdlib asyncio is fair at 1,024

@@ -108,6 +108,7 @@ Targets (one worker each unless the phase says otherwise):
 | `falcon` | Falcon ASGI on Uvicorn |
 | `robyn` | Robyn, one process, one worker |
 | `stario-ft` | free-threaded 3.14t build, `STARIO_THREADS=N` (multicore phase only) |
+| `stario-mp` | N GIL Stario processes sharing the port with `SO_REUSEPORT`, via the benchmark launcher `apps/stario_mp.py` (multicore phase only; Stario ships no multi-process mode, and each process has its own `Relay`) |
 
 The Stario target installs `stario @ file://<checkout>` (a source build:
 needs the native libraries in [`CYTHON.md`](../CYTHON.md)). To benchmark a
@@ -163,7 +164,7 @@ rebuilds the environments.
 | `compress` | `/page` with a browser's `Accept-Encoding` (and gzip-only, brotli-only for Stario), and the mix: req/s and bytes on the wire |
 | `sse` | `sse_client.py`: 1,000 and 5,000 clients hold a Datastar SSE stream; the server broadcasts an HTML fragment every 0.5 s. Delivery latency (send to receive, same clock), share of events delivered, server CPU, peak RSS |
 | `conns` | `conn_client.py`: 2,000 and 10,000 keep-alive clients each `GET /page` every 2 s (1,000 and 5,000 req/s offered): achieved req/s, latency, errors, reconnects, peak RSS |
-| `multicore` | `MC_WORKERS` (2) workers on `MC_CPUS` (0,1): Stario free-threaded with N loop threads vs multi-process FastAPI, Granian, Sanic, Robyn |
+| `multicore` | `MC_WORKERS` (2) workers on `MC_CPUS` (0,1): Stario free-threaded with N loop threads, Stario as N GIL processes, and multi-process FastAPI, Granian, Sanic, Robyn. The Stario targets also run with one worker as a same-run reference. For drift, run it several times with the targets in a different order each time and take medians |
 
 The `sse` and `conns` clients are asyncio programs that split connections
 across one process per client CPU. At 5,000 SSE clients they handle 10,000

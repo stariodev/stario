@@ -61,6 +61,7 @@ TARGETS = [
     "falcon",
     "robyn",
     "stario-ft",  # free-threaded 3.14t build; used by the multicore phase
+    "stario-mp",  # N GIL processes on SO_REUSEPORT (apps/stario_mp.py); multicore only
 ]
 # Targets whose framework ships response compression (enabled in `compress`).
 COMPRESSING = {"stario", "fastapi", "blacksheep-uvicorn", "blacksheep-granian"}
@@ -87,18 +88,24 @@ PACKAGES = {
     "stario-ft": [os.environ.get("STARIO_FT_SPEC", f"stario @ file://{ROOT}"), "uvloop", "ujson"],
 }
 # Targets of the multicore phase (each gets MC_WORKERS workers / threads).
-MULTICORE = ["stario-ft", "fastapi", "blacksheep-granian", "sanic", "robyn"]
+MULTICORE = ["stario-ft", "stario-mp", "fastapi", "blacksheep-granian", "sanic", "robyn"]
+MULTICORE_ONLY = {"stario-ft", "stario-mp"}
 
 
 def log(*args) -> None:
     print(*args, flush=True)
 
 
+def env_name(target: str) -> str:
+    return "stario" if target == "stario-mp" else target  # stario-mp reuses the GIL env
+
+
 def py(target: str) -> str:
-    return str(ENVS / target / "bin" / "python")
+    return str(ENVS / env_name(target) / "bin" / "python")
 
 
 def ensure_env(target: str, python: str, refresh: bool) -> None:
+    target = env_name(target)
     env_dir = ENVS / target
     if refresh and env_dir.exists():
         shutil.rmtree(env_dir)
@@ -116,6 +123,7 @@ def versions(target: str) -> str:
     names = {
         "stario": ["stario", "uvloop"],
         "stario-ft": ["stario", "uvloop"],
+        "stario-mp": ["stario", "uvloop"],
         "fastapi": ["fastapi", "starlette", "uvicorn", "pydantic"],
         "blacksheep-uvicorn": ["blacksheep", "uvicorn"],
         "blacksheep-granian": ["blacksheep", "granian"],
@@ -149,6 +157,8 @@ def server_cmd(target: str, host: str, port: int, workers: int = 1) -> list[str]
                 "import uvloop; from stario import serve; "
                 "from apps.stario_app import bootstrap; uvloop.run(serve(bootstrap))",
             ]
+        case "stario-mp":
+            return [py(target), "-m", "apps.stario_mp", str(workers)]
         case "fastapi":
             return uvicorn("apps.fastapi_app:app")
         case "blacksheep-uvicorn":
@@ -546,10 +556,15 @@ def phase_compress(target: str, cfg, run_dir: Path, results: Results):
 
 
 def phase_multicore(target: str, cfg, run_dir: Path, results: Results):
-    """Same endpoints with N workers on N CPUs (stario-ft: N loop threads)."""
+    """Same endpoints with N workers on N CPUs.
+
+    stario-ft: N event-loop threads in one free-threaded process.
+    stario-mp: N GIL processes sharing the port (SO_REUSEPORT).
+    """
     if target not in MULTICORE:
         return
-    for workers in sorted({1, cfg.mc_workers}) if target == "stario-ft" else [cfg.mc_workers]:
+    # Stario rows also run with one worker: the same-run single-core reference.
+    for workers in sorted({1, cfg.mc_workers}) if target in MULTICORE_ONLY else [cfg.mc_workers]:
         server = start_server(target, cfg, run_dir, compress=False, workers=workers,
                               cpus=cfg.mc_cpus)
         key = f"{target} x{workers}"
@@ -685,7 +700,7 @@ def write_summary(results: Results, run_dir: Path, targets: list[str]) -> str:
     if "multicore" in d:
         lines += ["", f"## Multi-core ({results.meta.get('mc_workers')} workers on CPUs "
                   f"{results.meta.get('mc_cpus')}; stario-ft = free-threaded 3.14t, "
-                  "one event loop per thread)", "",
+                  "one event loop per thread; stario-mp = N GIL processes on SO_REUSEPORT)", "",
                   "| Target | plaintext | page | mixed | p99 page ms | CPU (page) |",
                   "| --- | ---: | ---: | ---: | ---: | ---: |"]
         for key, row in d["multicore"].items():
@@ -739,9 +754,9 @@ def main() -> None:
     cfg.conn_clients = [int(x) for x in cfg.conn_clients.split(",") if x]
     phases = set(cfg.phases.split(","))
     targets = []
-    default = [t for t in TARGETS if t != "stario-ft"]
+    default = [t for t in TARGETS if t not in MULTICORE_ONLY]
     if "multicore" in phases:
-        default.append("stario-ft")
+        default += sorted(MULTICORE_ONLY)
     for t in cfg.targets or default:
         targets += t.split(",")
     for t in targets:
@@ -790,9 +805,9 @@ def main() -> None:
         ensure_env(target, cfg.python, cfg.refresh_envs)
         results.meta["versions"][target] = versions(target)
         log(f"  {results.meta['versions'][target]}")
-        if target != "stario-ft" and phases & {"throughput", "sweep", "mixed", "sse", "conns"}:
+        if target not in MULTICORE_ONLY and phases & {"throughput", "sweep", "mixed", "sse", "conns"}:
             phase_http(target, cfg, run_dir, results, reference, phases)
-        if target != "stario-ft" and "compress" in phases:
+        if target not in MULTICORE_ONLY and "compress" in phases:
             phase_compress(target, cfg, run_dir, results)
         if "multicore" in phases:
             phase_multicore(target, cfg, run_dir, results)
