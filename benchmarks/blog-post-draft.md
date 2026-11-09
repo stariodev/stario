@@ -1,15 +1,15 @@
 ---
-title: How fast is Stario 5.7? Benchmarks against FastAPI, BlackSheep, Sanic, Falcon, and Robyn
+title: How fast is Stario? Benchmarks against FastAPI, BlackSheep, Sanic, Falcon, and Robyn
 slug: stario-5-7-benchmarks
-description: Stario 5.7 against five Python frameworks on one CPU core — plaintext, JSON, a 16 KB HTML page, a browser-shaped request mix, compression, and HTML rendering on its own. The method, the machine, the numbers, and where Stario is still weak.
+description: Stario against five Python frameworks — plaintext, JSON, a 16 KB HTML page, a browser-shaped request mix, and compression on one core (5.7), two cores (5.8), and HTML rendering on its own. The method, the machine, the numbers, and where Stario is still weak.
 date: 2026-11-09
 ---
 
-We rebuilt Stario's benchmark suite so that it compares like with like: the same endpoints in every framework, the same CPU budget, and the same output, checked before anything is timed. This post covers how it works and what it shows for Stario 5.7.0. The code, the raw results, and a longer write-up are in the Stario repository: [`benchmarks/`](https://github.com/stariodev/stario/tree/9ffb3d8d10bb629429849ecd3146ee63531b5b54/benchmarks).
+We rebuilt Stario's benchmark suite so that it compares like with like: the same endpoints in every framework, the same CPU budget, and the same output, checked before anything is timed. This post covers how it works and what it shows: Stario 5.7.0 on one core, and Stario 5.8.0 on two. The code, the raw results, and a longer write-up are in the Stario repository: [`benchmarks/`](https://github.com/stariodev/stario/tree/b096db9f0b89522fb3e02406291423c6322e15cf/benchmarks).
 
 ## Method
 
-The server suite is [`benchmarks/server/bench.py`](https://github.com/stariodev/stario/blob/9ffb3d8d10bb629429849ecd3146ee63531b5b54/benchmarks/server/bench.py). It sets up a virtual environment per framework and runs one server at a time. Each server is pinned to a single CPU with `taskset`, including any Rust helper threads. The load generator, `wrk`, runs on two other CPUs. Every server sat at 99–100% of its core in every `wrk` run, so the server, not the client, was the limit.
+The server suite is [`benchmarks/server/bench.py`](https://github.com/stariodev/stario/blob/b096db9f0b89522fb3e02406291423c6322e15cf/benchmarks/server/bench.py). It sets up a virtual environment per framework and runs one server at a time. Each server is pinned to a single CPU with `taskset`, including any Rust helper threads. The load generator, `wrk`, runs on two other CPUs. Every server sat at 99–100% of its core in every `wrk` run, so the server, not the client, was the limit.
 
 Before measuring, the runner fetches every endpoint of every framework and checks the answers. The HTML page has to be the same document everywhere. Socket errors and non-2xx responses are reported next to each number. Each number is the median of three 10-second runs, after a warm-up.
 
@@ -18,7 +18,7 @@ The endpoints are the usual plaintext, JSON, a path parameter, and a small JSON 
 - `/page`, a 16 KB admin page with a 50-row table, where one row in seven needs escaping. Stario builds it with `h.*`; the other frameworks render it with a compiled Jinja2 template, which is what their docs reach for.
 - A browser-shaped mix: 40% page, 30% JSON with a path parameter, 20% JSON, 10% `POST`. Every request carries a real Chrome header set with cookies.
 
-The HTML suite, [`benchmarks/html/compare.py`](https://github.com/stariodev/stario/blob/9ffb3d8d10bb629429849ecd3146ee63531b5b54/benchmarks/html/compare.py), renders the same product list with Stario, Jinja2, Mako, htpy, dominate, FastHTML's `fastcore.xml`, and tdom. Hand-written f-strings serve as baselines. Every output is checked against Stario's.
+The HTML suite, [`benchmarks/html/compare.py`](https://github.com/stariodev/stario/blob/b096db9f0b89522fb3e02406291423c6322e15cf/benchmarks/html/compare.py), renders the same product list with Stario, Jinja2, Mako, htpy, dominate, FastHTML's `fastcore.xml`, and tdom. Hand-written f-strings serve as baselines. Every output is checked against Stario's.
 
 Some choices favor one side, and you should know them:
 
@@ -32,7 +32,7 @@ An independent review of the first draft caught a bug that doubled Jinja2's rend
 
 ## The machine
 
-The VM had 4 vCPUs (Intel Xeon at 2.10 GHz), 15 GB of RAM, and ran Linux 6.18. Everything ran on CPython 3.14.6 with uvloop 0.23. Versions: Stario 5.7.0, FastAPI 0.162 on Uvicorn 0.54, BlackSheep 2.6.4 on Uvicorn and on Granian 2.8.7, Sanic 25.12, Falcon 4.4, and Robyn 0.88. A cloud VM drifts during the day, so all the server numbers below come from one contiguous run. The exception is the SSE test, which ran earlier the same day; it doesn't involve the template.
+The VM had 4 vCPUs (Intel Xeon at 2.10 GHz), 15 GB of RAM, and ran Linux 6.18. Everything ran on CPython 3.14.6 with uvloop 0.23 (3.14.6t for free-threaded Stario). Versions: Stario 5.7.0 for one core and 5.8.0 for two, FastAPI 0.162 on Uvicorn 0.54, BlackSheep 2.6.4 on Uvicorn and on Granian 2.8.7, Sanic 25.12, Falcon 4.4, and Robyn 0.88. A cloud VM drifts during the day, so all the server numbers below come from one contiguous run. The exceptions are the SSE test, which ran earlier the same day and doesn't involve the template, and the two-core section, described there.
 
 ## One core
 
@@ -80,11 +80,30 @@ Microseconds per 50-row page, with no server involved:
 
 `@baked` is slightly faster than hand-written f-strings. The plain tree, where every element is an object you can inspect, comes in 1.2–1.4x faster than Jinja2. The pure-Python element libraries are about 20x slower than either.
 
+## Two cores with Stario 5.8
+
+Stario's multi-core mode runs on free-threaded Python 3.14t: `STARIO_THREADS=2` starts two event loops in one process, so in-process state such as `Relay` is shared across cores. The other frameworks start two processes. For a like-for-like baseline we also ran two regular Stario processes sharing the port. Stario doesn't ship that mode; the benchmark has [a small launcher](https://github.com/stariodev/stario/blob/b096db9f0b89522fb3e02406291423c6322e15cf/benchmarks/server/apps/stario_mp.py) for it, and each process would have its own `Relay`.
+
+The setup: two server CPUs, three rounds with the frameworks in a different order each time, and the median of the three. Stario 5.8.0 was built from its release commit.
+
+| Setup on 2 cores | Plaintext | HTML page | Browser mix |
+| --- | ---: | ---: | ---: |
+| Stario, 2 processes | 228,895 | 15,559 | 31,466 |
+| Stario, 2 threads (free-threaded) | 140,298 | 10,534 | 22,496 |
+| Robyn, 2 processes | 65,933 | 10,039 | 17,484 |
+| Sanic, 2 workers | 50,540 | 10,040 | 16,529 |
+| BlackSheep + Granian, 2 workers | 75,394 | 8,753 | 18,042 |
+| FastAPI, 2 workers | 26,739 | 8,243 | 11,903 |
+
+Two Stario processes serve 1.55x the pages and 1.74x the mix of the best two-process setup. Two free-threaded threads match Robyn and Sanic on the page and lead the mix by 1.25x, from a single process.
+
+5.8.0 is what made the threaded row possible. In 5.7.0, threads contended on the reference counts of shared markup objects, and a second thread made the page slower (0.94x). In 5.8.0, two threads serve 1.65x the pages of one, while two processes still serve 2.05x the pages of one. Part of that gap is 3.14t's per-thread cost; part is this benchmark's page reading the same module-level rows from both threads, which plain Python on 3.14t doesn't scale well either.
+
 ## Where Stario is still weak
 
 At 1,024 concurrent connections, a minority of requests on uvloop servers, Stario and Uvicorn alike, wait several seconds while the median stays low. Granian and Robyn keep a fair tail at that load. The same Stario on stdlib asyncio is fair too, at half the throughput, so we are looking at how libuv schedules reads.
 
-On free-threaded Python 3.14t, Stario 5.7.0 runs one event loop per thread. Plaintext scales across cores, but building HTML does not, because threads contend on reference counts of shared markup objects. A fix is in progress: on a development branch, two threads serve 1.7x the pages of one. We'll publish multi-core numbers when it ships.
+On free-threaded Python, a thread costs Stario about 16% against the regular build, and HTML work still scales less well across threads than across processes (see "Two cores with Stario 5.8").
 
 ## Run it yourself
 
@@ -95,4 +114,4 @@ python3 benchmarks/server/bench.py   # every framework, every phase: about an ho
 benchmarks/server/run.sh             # throughput only: about 15 minutes
 ```
 
-The [results write-up](https://github.com/stariodev/stario/blob/9ffb3d8d10bb629429849ecd3146ee63531b5b54/benchmarks/RESULTS.md) has every table, the concurrency sweep, memory, and the list of what we plan to improve.
+The [results write-up](https://github.com/stariodev/stario/blob/b096db9f0b89522fb3e02406291423c6322e15cf/benchmarks/RESULTS.md) has every table, the concurrency sweep, memory, and the list of what we plan to improve.
