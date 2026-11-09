@@ -232,35 +232,61 @@ def _page(rows: list[dict[str, Any]]) -> bytes:
     )
 
 
+@baked
+def _icon():
+    # Static markup that every thread puts in its tree: a parameterless
+    # @baked fragment is one immortal SafeString on free-threaded builds (a
+    # module-level element would have its refcount written on every use).
+    return h.Span({"class": "icon"}, h.I("*"))
+
+
+def _shared_fragment(rows: list[dict[str, Any]]) -> bytes:
+    return render_bytes(
+        h.Table(h.Tbody(*[h.Tr(h.Td(r["name"]), h.Td(_icon())) for r in rows]))
+    )
+
+
 def _throughput(fn: Callable[[list[dict[str, Any]]], bytes], threads: int) -> float:
     """Calls per second summed over `threads` threads, each on its own rows."""
     counts = [0] * threads
+    errors: list[BaseException] = []
     ready = threading.Barrier(threads + 1)
     stop = False
 
     def worker(slot: int, fn: Callable[[list[dict[str, Any]]], bytes]) -> None:
-        rows = _rows(slot)
-        for _ in range(200):
-            fn(rows)
-        ready.wait()
-        n = 0
-        while not stop:
-            for _ in range(20):
+        try:
+            rows = _rows(slot)
+            for _ in range(200):
                 fn(rows)
-            n += 20
-        counts[slot] = n
+            ready.wait()
+            n = 0
+            while not stop:
+                for _ in range(20):
+                    fn(rows)
+                n += 20
+            counts[slot] = n
+        except BaseException as error:
+            errors.append(error)
+            ready.abort()  # the main thread is waiting on it
 
     workers = [
         threading.Thread(target=worker, args=(slot, fn)) for slot in range(threads)
     ]
     for t in workers:
         t.start()
-    ready.wait()
+    try:
+        ready.wait()
+    except threading.BrokenBarrierError:
+        for t in workers:
+            t.join()
+        raise errors[0] from None
     t0 = time.perf_counter()
     time.sleep(0.5)
     stop = True
     for t in workers:
         t.join()
+    if errors:
+        raise errors[0]
     return sum(counts) / (time.perf_counter() - t0)
 
 
@@ -279,6 +305,7 @@ def _threads_main() -> None:
     cases = (
         ("50-row table, text cells", _table),
         ("50-row table, classes + attrs", _page),
+        ("50-row table, shared @baked", _shared_fragment),
     )
     for name, fn in cases:
         one = max(_throughput(fn, 1) for _ in range(5))

@@ -17,6 +17,7 @@ from stario_cython.markup import (
     check_raw_text,
     element_parts,
     shared_safe_string,
+    shared_str,
     splice_attribute,
     splice_child,
 )
@@ -298,10 +299,10 @@ def _generate_splice_function(
 ) -> Callable[..., Any]:
     """Compile per-call splicing with the builder's exact signature.
 
-    Static text goes into the source as string literals, not globals: a
-    constant is one ``LOAD_CONST``, and free-threaded CPython makes code
-    constants immortal, so threads splicing the same template write no
-    shared refcount (a global would be increfed by every load).
+    Static text goes into the generated function's globals through
+    ``shared_str``: on free-threaded builds an immortal (interned) copy, so
+    threads loading it write no refcount. Such a template is never freed
+    there, so bake at import, not per call.
     """
     namespace: dict[str, Any] = {
         "__stario_SafeString": SafeString,
@@ -335,21 +336,25 @@ def _generate_splice_function(
         body.append("    return __stario_static")
     else:
         expr_parts: list[str] = []
-        for segment in frozen_plan:
+        for plan_index, segment in enumerate(frozen_plan):
             segment_type = type(segment)
             if segment_type is SafeString:
-                expr_parts.append(repr(cast(SafeString, segment).rendered))
+                static_name = f"__stario_static_{plan_index}"
+                namespace[static_name] = shared_str(cast(SafeString, segment).rendered)
+                expr_parts.append(static_name)
             elif segment_type is AttrSlot:
                 attr_slot = cast(AttrSlot, segment)
                 expr_parts.append(f"__stario_attr({attr_slot.key!r}, {attr_slot.name})")
             elif segment_type is RawSlot:
                 raw_slot = cast(RawSlot, segment)
                 parts_src: list[str] = []
-                for part in raw_slot.parts:
+                for part_index, part in enumerate(raw_slot.parts):
                     if type(part) is BakeSlot:
                         parts_src.append(slot_name(part))
                     else:
-                        parts_src.append(repr(part))
+                        literal_name = f"__stario_raw_{plan_index}_{part_index}"
+                        namespace[literal_name] = shared_str(part)
+                        parts_src.append(literal_name)
                 expr_parts.append(
                     f"__stario_raw({raw_slot.tag!r}, ({', '.join(parts_src)},))"
                 )
@@ -363,8 +368,7 @@ def _generate_splice_function(
             body.append(f"    return __stario_SafeString({expr_parts[0]})")
         else:
             # An f-string builds the result in one BUILD_STRING step: no
-            # tuple, no join call. Every part is already a str. A literal
-            # inside a replacement field needs Python 3.12 (PEP 701).
+            # tuple, no join call. Every part is already a str.
             fields = "".join("{" + part + "}" for part in expr_parts)
             body.append(f'    return __stario_SafeString(f"{fields}")')
 

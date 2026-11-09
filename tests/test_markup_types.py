@@ -291,8 +291,8 @@ class TestBakedStillWorks:
         ],
     )
     def test_baked_static_text_goes_into_the_source_unchanged(self, text):
-        # Static segments are string literals in the generated splice
-        # function, inside f-string replacement fields.
+        # Static segments reach the generated splice function through
+        # shared_str (an interned copy on free-threaded builds).
         def build(value):
             return h.Div(
                 {"title": text, "data-x": value},
@@ -397,10 +397,9 @@ class TestSharedObjectsAreImmortal:
     immortal copy instead.
     """
 
-    def test_a_tag_and_what_it_holds(self):
-        assert _is_immortal is not None
-        tag = Tag("x-immortal-check")
-        held = [
+    @staticmethod
+    def _held(tag: Tag) -> list[object]:
+        return [
             tag,
             tag.empty,
             tag.tag_start,
@@ -409,12 +408,48 @@ class TestSharedObjectsAreImmortal:
             tag.no_children_close,
             tag.empty_html,
         ]
-        if _FREE_THREADED:
-            assert all(_is_immortal(obj) for obj in held)
-            assert all(_is_immortal(obj) for obj in (h.Div, h.Div.empty, h.Br))
-        else:
-            assert not _is_immortal(tag)
-            assert not _is_immortal(tag.closing_tag)
+
+    def test_a_tag_and_what_it_holds(self):
+        assert _is_immortal is not None
+        for tag in (Tag("x-immortal-check"), VoidTag("x-void-check"), h.Div, h.Br):
+            if _FREE_THREADED:
+                assert all(_is_immortal(obj) for obj in self._held(tag)), tag
+            else:
+                assert not _is_immortal(tag)
+        if not _FREE_THREADED:
+            assert not _is_immortal(Tag("x-gil-check").closing_tag)
+
+    def test_tags_stay_immortal_after_their_thread_exits(self):
+        # A GC object made immortal without being untracked turns mortal
+        # again when its thread is gone and a collection merges its refcount.
+        assert _is_immortal is not None
+        made: list[Tag] = []
+        threads = [
+            threading.Thread(target=lambda n=n: made.append(Tag(f"x-exit-{n}")))
+            for n in range(4)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        gc.collect()
+        gc.collect()
+        for tag in made:
+            held = self._held(tag)
+            assert all(_is_immortal(obj) == _FREE_THREADED for obj in held), tag
+
+    def test_a_python_subclass_keeps_a_mortal_tag(self):
+        # super().__init__() holds a second reference to self, and only a
+        # uniquely referenced object is made immortal. It still works.
+        assert _is_immortal is not None
+
+        class Widget(Tag):
+            def __init__(self, name: str) -> None:
+                super().__init__(name)
+
+        widget = Widget("x-widget")
+        assert not _is_immortal(widget)
+        assert render(widget({"id": "w"}, "hi")) == '<x-widget id="w">hi</x-widget>'
 
     def test_a_cached_class_fragment(self):
         from stario.markup import attributes

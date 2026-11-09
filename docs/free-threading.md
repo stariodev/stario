@@ -345,10 +345,11 @@ thread frees. Cython's `dict.get` is not enough: it borrows the value,
 then takes a reference. Keep all three rules if you touch a cache.
 
 A fourth rule is for speed, not safety: on a free-threaded build the
-dicts and everything they store are immortal (next section). A new value
-is made immortal before `setdefault` publishes it, and a key the caller
-passed in goes through `stario_cache_copy`, which stores an immortal
-private copy instead.
+dicts and everything they store are immortal (next section). Strings are
+stored as interned copies (`stario_shared_str`), key tuples as immortal
+copies (`stario_shared_tuple`), and a new value is made immortal before
+`setdefault` publishes it. The caller's own string or tuple is never
+changed.
 
 ### Shared markup objects are immortal
 
@@ -363,36 +364,69 @@ own trees from `h.Td` / `h.Tr` did 0.3x the work of one.
 On a free-threaded build these objects are therefore immortal, and
 `Py_INCREF` / `Py_DECREF` on them only read the refcount:
 
-- every `Tag`, its strings and its `empty` element, at the end of
-  `Tag.__init__`;
+- every `Tag` and its `empty` element (`Tag._setup`), and the tag's
+  strings;
 - the three cache dicts above and what they store (`classes()` fragments,
   validated attribute names, `prefix-key` names). Cython increfs a
   module-level object each time it reads one, so the dicts need it too;
-- the `SafeString` that a `@baked` function without parameters returns.
-  `@baked` static text is written into the generated function as string
-  literals: CPython makes code constants immortal on free-threaded builds.
+- `@baked` static text (the generated function's globals) and the
+  `SafeString` that a `@baked` function without parameters returns.
 
-`stario_immortalize` (in `markup.pyx`) uses `Py_SET_REFCNT` past
-`UINT32_MAX`, the public route to the same fields CPython's own
-immortalization sets. It only touches an object the current thread owns
-and has not shared yet: making an object immortal while another thread
-changes its refcount can leave it mortal with a wrong count. That is why
-caches copy a caller's string or tuple instead of immortalizing it. With
-the GIL both helpers do nothing.
+Render also takes no references on the tree it walks: an element never
+changes once built, and the caller holds the root.
+
+The rules follow CPython's own (`PyUnstable_SetImmortal`, 3.15+, which
+`stario_immortalize` calls there):
+
+- Only a uniquely referenced object is made immortal, so no other thread
+  can be changing its refcount at that moment. `Tag._setup` is a C call
+  (`VoidTag` uses it too) and makes the tag immortal before its empty
+  element refers to it. A Python subclass that calls
+  `super().__init__()` holds a second reference and keeps a mortal tag;
+  it works, it just does not scale as well.
+- A GC object is untracked first. A tracked one turns mortal again when
+  the thread that made it exits and a collection merges its refcount.
+- A string is never made immortal directly. It is interned instead (a
+  private copy of it), and interned strings are immortal on free-threaded
+  builds (3.13t to 3.15t).
+- Before 3.15, `Py_SET_REFCNT` past `UINT32_MAX` from the owning thread
+  sets the immortal refcount. A 32-bit `Py_ssize_t` cannot hold that
+  value, so on a 32-bit build nothing is made immortal.
+
+With the GIL every helper does nothing, and the `@baked` code is what it
+was.
 
 The cost: an immortal object is never freed. On a free-threaded build a
-`Tag` lives as long as the process, so make tags at import, not per
-request. The caches stay bounded by their caps.
+`Tag` and a `@baked` template live as long as the process, so create
+them at import, not per request. The caches stay bounded by their caps.
+
+What stays mortal is anything the application shares: a module-level
+`Element`, `SafeString`, or `Attrs` that every request puts in its tree
+is increfed by the interpreter on each use, from every thread. On two
+threads a page that repeats such a constant in every row scales about
+0.7x (an `Attrs` constant 0.4x), against 2x for the same page with a
+parameterless `@baked` fragment or `classes()`, which are immortal:
+
+```python
+@baked
+def icon():                      # instead of ICON = h.Span(...)
+    return h.Span({"class": "icon"}, h.I("*"))
+
+h.Td(icon())
+h.Td(classes("btn"), label)      # instead of BTN = Attrs(' class="btn"')
+```
 
 The same contention hits pure Python on a hot path. A module-level object
 that is not a function, class, or module (a compiled regex, a dict) is
 increfed on every load, from every thread. `styles()` checks for
-`:;{}\` against string literals for that reason.
+`:;{}\` against string literals for that reason. `Tag.__call__` with a
+non-dict `Mapping` still increfs `collections.abc.Mapping` for its
+`isinstance` check; pass dicts on hot paths.
 
-`benchmarks/html/micro.py` ends with a 2-thread check that each thread
-builds and renders its own tree; pin it to two idle CPUs
-(`taskset -c 0,1`) after touching markup. Below 1.7x, something every
-thread reads is being written again.
+`benchmarks/html/micro.py` ends with a 2-thread check: each thread builds
+and renders its own tree, one of them with a shared `@baked` fragment.
+Pin it to two idle CPUs (`taskset -c 0,1`) after touching markup. Below
+1.7x, something every thread reads is being written again.
 
 The same goes for walking a caller's mapping or list. Another thread can
 change it during a tag call, or the attribute-name validator can run
