@@ -32,7 +32,7 @@ An independent review of the first draft caught a bug that doubled Jinja2's rend
 
 ## The machine
 
-The VM had 4 vCPUs (Intel Xeon at 2.10 GHz), 15 GB of RAM, and ran Linux 6.18. Everything ran on CPython 3.14.6 with uvloop 0.23. Versions: Stario 5.7.0, FastAPI 0.162 on Uvicorn 0.54, BlackSheep 2.6.4 on Uvicorn and on Granian 2.8.7, Sanic 25.12, Falcon 4.4, and Robyn 0.88. A cloud VM drifts during the day, so all the server numbers below come from one contiguous run.
+The VM had 4 vCPUs (Intel Xeon at 2.10 GHz), 15 GB of RAM, and ran Linux 6.18. Everything ran on CPython 3.14.6 with uvloop 0.23. Versions: Stario 5.7.0, FastAPI 0.162 on Uvicorn 0.54, BlackSheep 2.6.4 on Uvicorn and on Granian 2.8.7, Sanic 25.12, Falcon 4.4, and Robyn 0.88. A cloud VM drifts during the day, so all the server numbers below come from one contiguous run. The exception is the SSE test, which ran earlier the same day; it doesn't involve the template.
 
 ## One core
 
@@ -48,7 +48,7 @@ Requests per second at 128 connections:
 | Robyn | 31,893 | 30,616 | 4,952 | 8,315 |
 | FastAPI + Uvicorn | 13,067 | 12,833 | 4,017 | 5,947 |
 
-On small responses, Stario is 1.1–1.9x the fastest other setup, BlackSheep on Granian, and 5–6x FastAPI. Most of that comes from the compiled HTTP core. On the HTML page it is 1.6x the next framework. The same page through `@baked`, which compiles the static parts once, serves 12,329 pages/s, 2.5x the next framework.
+On small responses, Stario ranges from level with the fastest other setup, BlackSheep on Granian, to 1.9x it, and is 5–6x FastAPI. Most of that comes from the compiled HTTP core. On the HTML page it is 1.6x the next framework. The same page through `@baked`, which compiles the static parts once, serves 12,329 pages/s, 2.5x the next framework.
 
 Latency follows throughput. In the browser mix, Stario's p99 is 15 ms. The other frameworks range from 17 ms (BlackSheep on Uvicorn) to 309 ms (FastAPI).
 
@@ -56,11 +56,11 @@ Latency follows throughput. In the browser mix, Stario's p99 is 15 ms. The other
 
 With a browser's `Accept-Encoding`, Stario picks zstd and serves the mix at 13,240 req/s, at 792 bytes per response. FastAPI and BlackSheep compress with gzip and manage 3,800–6,000 req/s. Sanic, Falcon, and Robyn have no built-in compression and usually sit behind a proxy that does it.
 
-With gzip forced to level 1 everywhere, the HTML page shows the same 1.75x gap as without compression. Compression costs every framework about the same; the difference comes from the rest of the request.
+With gzip forced to level 1 everywhere, Stario serves the HTML page at 1.75x the best of the others, against 1.6x uncompressed. Compression costs Stario a little less, about 14% of its page throughput against 18–25% for the others, and the rest of the gap comes from the request path.
 
 ## A heavier load
 
-10,000 keep-alive connections each fetch the HTML page every 2 seconds. That's 5,000 page requests per second, close to what the other frameworks can serve on one core. Stario serves it with p50 1.1 ms, p99 26 ms, and no errors. The others serve nearly the same request rate, but queue: their median latency is 240 ms to 1.7 s, and four of the six report errors. This is the throughput result again, seen as latency under a fixed load.
+10,000 keep-alive connections each fetch the HTML page every 2 seconds. That's 5,000 page requests per second, close to what the other frameworks can serve on one core. Stario serves it with p50 1.1 ms, p99 26 ms, and no errors. Most of the others serve 4,100–4,500 req/s but queue, with median latency from 240 ms to 1.7 s; FastAPI falls to 2,850 req/s. Four of the six report errors. This is the throughput result again, seen as latency under a fixed load.
 
 For live updates, 5,000 clients hold a Datastar SSE stream while the server pushes an HTML fragment to all of them twice a second. Stario delivers at a median of 54 ms using 0.19 of a core. Sanic is level with it, and the others are close. Fan-out of small events is cheap for any async server, so this is not where Stario stands out.
 
@@ -78,7 +78,7 @@ Microseconds per 50-row page, with no server involved:
 | Mako | 59.1 | 62.1 |
 | tdom, FastHTML FT, htpy, dominate | 919–1,045 | 908–1,067 |
 
-`@baked` is faster than hand-written f-strings. The plain tree, where every element is an object you can inspect, comes in 1.2–1.4x faster than Jinja2. The pure-Python element libraries are about 20x slower than either.
+`@baked` is slightly faster than hand-written f-strings. The plain tree, where every element is an object you can inspect, comes in 1.2–1.4x faster than Jinja2. The pure-Python element libraries are about 20x slower than either.
 
 ## Where Stario is still weak
 
