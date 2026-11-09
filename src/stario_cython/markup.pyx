@@ -108,10 +108,128 @@ cdef extern from *:
     static const unsigned char stario_text_escape[256] = {
         ['&'] = 1, ['<'] = 1, ['>'] = 1,
     };
+
+    /* Free-threaded builds: make an object immortal, so that Py_INCREF and
+       Py_DECREF on it from any thread only read its refcount instead of
+       writing one cache line that every core then fights over. Every
+       element holds a reference to its Tag, so without this each thread
+       building `h.Td(...)` writes the shared `h.Td` twice per element.
+
+       CPython's rules, as PyUnstable_SetImmortal (3.15+) applies them:
+       only a uniquely referenced object (no other thread can be changing
+       its refcount), never a str (strings become immortal by interning;
+       see stario_shared_str), and a GC object is untracked first (a
+       tracked one turns mortal again when its thread exits and a
+       collection merges its refcount). Before 3.15, Py_SET_REFCNT past
+       UINT32_MAX from the owning thread sets the immortal refcount; a
+       32-bit Py_ssize_t cannot hold that value, so there it does nothing.
+       Returns 1 when the object is immortal afterwards. A no-op with the
+       GIL. An immortal object is never freed: only objects that live as
+       long as the process anyway go through here (a Tag and its empty
+       element, the caches and their entries, which are never removed). */
+    static int stario_immortalize(PyObject* op) {
+    #if !defined(Py_GIL_DISABLED)
+        (void)op;
+        return 0;
+    #else
+        if (PyUnicode_Check(op)) {
+            return 0;
+        }
+    #if PY_VERSION_HEX >= 0x030F0000
+        return PyUnstable_SetImmortal(op);
+    #else
+        if (PY_SSIZE_T_MAX <= _Py_IMMORTAL_REFCNT_LOCAL) {
+            return 0;
+        }
+        if (_Py_IsImmortal(op)) {
+            return 1;
+        }
+    #if PY_VERSION_HEX >= 0x030E0000
+        if (!PyUnstable_Object_IsUniquelyReferenced(op)) {
+            return 0;
+        }
+    #else
+        if (!_Py_IsOwnedByCurrentThread(op) || Py_REFCNT(op) != 1) {
+            return 0;
+        }
+    #endif
+        if (PyObject_IS_GC(op) && PyObject_GC_IsTracked(op)) {
+            PyObject_GC_UnTrack(op);
+        }
+        Py_SET_REFCNT(op, (Py_ssize_t)_Py_IMMORTAL_REFCNT_LOCAL + 1);
+        return 1;
+    #endif
+    #endif
+    }
+
+    /* A str that every thread reads (new reference; exact str only).
+       Free-threaded builds: the interned copy, and interned strings are
+       immortal there. The caller's own object is never interned in place:
+       another thread may hold it, so a private copy is interned instead
+       (or the canonical string, when an equal one is interned already).
+       The object itself when it is immortal already, and with the GIL. */
+    static PyObject* stario_shared_str(PyObject* s) {
+    #ifdef Py_GIL_DISABLED
+        PyObject* copy;
+        if (_Py_IsImmortal(s)) {
+            return Py_NewRef(s);
+        }
+        copy = PyUnicode_FromKindAndData(
+            PyUnicode_KIND(s), PyUnicode_DATA(s), PyUnicode_GET_LENGTH(s));
+        if (copy != NULL) {
+            PyUnicode_InternInPlace(&copy);
+        }
+        return copy;
+    #else
+        return Py_NewRef(s);
+    #endif
+    }
+
+    /* A cache key tuple (new reference): on free-threaded builds an
+       immortal private copy, because the dict increfs a stored key while
+       it compares a lookup key against it. The caller's tuple may be
+       shared (classes(*t) passes `t` itself). The tuple itself when it is
+       immortal already, and with the GIL. */
+    static PyObject* stario_shared_tuple(PyObject* t) {
+    #ifdef Py_GIL_DISABLED
+        PyObject* copy;
+        Py_ssize_t i, n;
+        if (_Py_IsImmortal(t)) {
+            return Py_NewRef(t);
+        }
+        n = PyTuple_GET_SIZE(t);
+        copy = PyTuple_New(n);
+        if (copy == NULL) {
+            return NULL;
+        }
+        for (i = 0; i < n; i++) {
+            PyTuple_SET_ITEM(copy, i, Py_NewRef(PyTuple_GET_ITEM(t, i)));
+        }
+        stario_immortalize(copy);
+        return copy;
+    #else
+        return Py_NewRef(t);
+    #endif
+    }
+
+    /* A new dict for a cache that every thread reads: immortal on
+       free-threaded builds (Cython increfs a module-level object each time
+       it reads one). Made immortal here, while it is uniquely referenced. */
+    static PyObject* stario_shared_dict(void) {
+        PyObject* d = PyDict_New();
+        if (d != NULL) {
+            stario_immortalize(d);
+        }
+        return d;
+    }
     """
     int stario_disallow_instantiation(object t) except -1
     int stario_dict_get_ref(object d, object key, PyObject** out) except -1
     const unsigned char stario_text_escape[256]
+    int stario_immortalize(object op)
+    object stario_shared_str(object s)
+    object stario_shared_tuple(object t)
+    object stario_shared_dict()
 
 
 # ---------------------------------------------------------------------------
@@ -129,12 +247,15 @@ cdef bint _bound = False
 # Bounded by refusing new entries past the cap, never by clearing: a clear
 # in place could free a key another thread is still reading (free-threaded
 # builds), and the dict object itself is never replaced for the same reason.
-cdef dict _VALID_KEYS = {}
+# Free-threaded builds store immortal entries (stario_shared_str), and the
+# cache dicts are immortal too: Cython increfs a module-level object each
+# time it reads one, and every thread reads these on every call.
+cdef dict _VALID_KEYS = <dict>stario_shared_dict()
 cdef int _VALID_KEYS_MAX = 4096
 
 # Rendered ``class`` fragments keyed by token tuples of str / None / False
 # (Tailwind lists repeat). Same bound rule. ``stario.markup.attributes`` exposes the dict.
-cdef dict _classes_cache = {}
+cdef dict _classes_cache = <dict>stario_shared_dict()
 classes_cache = _classes_cache
 CLASSES_CACHE_MAX = 1024
 cdef Py_ssize_t _CLASSES_CACHE_MAX = 1024
@@ -457,6 +578,29 @@ cdef inline SafeString _safe(str s):
     return SafeString.__new__(SafeString, s)
 
 
+def shared_str(text):
+    """``text`` for code that every thread reads (``@baked`` static segments).
+
+    On free-threaded builds an interned copy, which is immortal there, so
+    loading it writes no refcount; it is never freed. With the GIL, ``text``.
+    """
+    return stario_shared_str(_as_str(text, "shared_str"))
+
+
+def shared_safe_string(rendered):
+    """A ``SafeString`` that every call returns (``@baked`` without parameters).
+
+    On free-threaded builds it is immortal and holds an interned copy of
+    ``rendered``, so threads returning it write no refcount; it is never
+    freed. With the GIL it is a plain ``SafeString``.
+    """
+    cdef SafeString s = SafeString.__new__(
+        SafeString, stario_shared_str(_as_str(rendered, "SafeString"))
+    )
+    stario_immortalize(s)
+    return s
+
+
 # ---------------------------------------------------------------------------
 # Errors shared by Tag.__call__ and render
 
@@ -589,7 +733,8 @@ cdef inline object _valid_key(object raw_key):
     if len(_VALID_KEYS) < _VALID_KEYS_MAX:
         # setdefault: the first insert wins and is never replaced, so no
         # reader can see an entry freed under it.
-        _VALID_KEYS.setdefault(key, key)
+        key = stario_shared_str(key)
+        key = _VALID_KEYS.setdefault(key, key)
     return key
 
 
@@ -1142,6 +1287,10 @@ cdef class Tag:
 
     Calling the instance (`h.Div(...)`, `h.P("hi")`, etc.) builds an
     `Element`; see `Tag.__call__`.
+
+    Create tags once, at import. On a free-threaded build a tag is
+    immortal, so threads building elements from it never write its
+    refcount, and it is never freed.
     """
 
     cdef readonly str name
@@ -1175,7 +1324,18 @@ cdef class Tag:
         opening tag (e.g. `<!doctype html>` on `HtmlDocument`). `raw_text=True`
         is for `script` and `style`, whose text is not entity-decoded.
         """
+        self._setup(name, empty, prefix, raw_text)
+
+    cdef int _setup(self, str name, object empty, str prefix, bint raw_text) except -1:
+        """The body of ``__init__``, also called by ``VoidTag.__init__``.
+
+        A C call, so ``self`` keeps the single reference that the
+        constructor holds: only a uniquely referenced object is made
+        immortal (stario_immortalize). A Python subclass that calls
+        ``super().__init__()`` holds more and keeps a mortal tag.
+        """
         cdef Element e
+        cdef str tag_start, closing_tag, no_children_close
         _bind()
         if self.name is not None:
             raise TypeError("Tag is already initialised; create a new Tag instead")
@@ -1201,15 +1361,25 @@ cdef class Tag:
         self.empty_mode = empty
         self.raw_text = raw_text
         self._void = empty == "void"
-        self.tag_start = prefix + "<" + name
-        self.tag_start_no_attrs = self.tag_start + ">"
-        self.closing_tag = f"</{name}>"
-        self.no_children_close = "/>" if empty != "normal" else ">" + self.closing_tag
-        self.empty_html = self.tag_start + self.no_children_close
+        # Every element built from this tag renders these: shared strings
+        # (interned, so immortal, on free-threaded builds).
+        tag_start = prefix + "<" + name
+        closing_tag = f"</{name}>"
+        no_children_close = "/>" if empty != "normal" else ">" + closing_tag
+        self.tag_start = stario_shared_str(tag_start)
+        self.tag_start_no_attrs = stario_shared_str(tag_start + ">")
+        self.closing_tag = stario_shared_str(closing_tag)
+        self.no_children_close = stario_shared_str(no_children_close)
+        self.empty_html = stario_shared_str(tag_start + no_children_close)
+        # Immortal while nothing else refers to it yet (validation is done,
+        # so a failed call never leaves an immortal object behind).
+        stario_immortalize(self)
         e = Element.__new__(Element)
         e.tag = self
+        stario_immortalize(e)
         self.empty = e
         self.name = name  # last: marks the tag as ready
+        return 0
 
     def _repr(self):
         return f"Tag(name='{self.name}', empty='{self.empty_mode}')"
@@ -1445,7 +1615,7 @@ cdef class VoidTag(Tag):
 
         Create a void element factory: ``Tag(name, empty="void", prefix=prefix)``.
         """
-        Tag.__init__(self, name, empty="void", prefix=prefix)
+        self._setup(name, "void", prefix, False)
 
 
 stario_disallow_instantiation(Element)
@@ -1474,7 +1644,7 @@ def classes(*tokens):
     cdef Py_ssize_t i
     cdef bint cacheable = True
     cdef PyObject* hit
-    cdef object token, result
+    cdef object token, result, text
     cdef list rendered
     _bind()
     # str, None and False tokens are hashable and fully decide the result,
@@ -1515,37 +1685,47 @@ def classes(*tokens):
         else:
             raise _class_token_error(token, 'h.Div(classes("btn", "primary"))')
 
-    result = Attrs.__new__(Attrs, ' class="' + " ".join(rendered) + '"')
-    if cacheable and len(_classes_cache) < _CLASSES_CACHE_MAX:
-        result = _classes_cache.setdefault(tokens, result)
-    return result
+    text = ' class="' + " ".join(rendered) + '"'
+    if not cacheable or len(_classes_cache) >= _CLASSES_CACHE_MAX:
+        return Attrs.__new__(Attrs, text)
+    # Every thread gets the cached fragment, and each element built with it
+    # holds its string: on free-threaded builds both are immortal (an
+    # interned string; the Attrs is new, so uniquely referenced, until
+    # setdefault publishes it). One that loses the insert race is never
+    # freed; at most one per racing thread and key.
+    result = Attrs.__new__(Attrs, stario_shared_str(text))
+    stario_immortalize(result)
+    return _classes_cache.setdefault(stario_shared_tuple(tokens), result)
 
 
 # ``prefix`` -> {key: "prefix-key"}: validated wire names for data() / aria().
 # Same rules as the other caches: refuse new entries past a cap and never
 # clear; insert with setdefault (the first value wins and is never replaced)
 # and read with stario_dict_get_ref.
-cdef dict _PREFIXED_KEYS = {}
+cdef dict _PREFIXED_KEYS = <dict>stario_shared_dict()
 
 
 cdef object _prefixed_key(object prefix, object key):
     cdef PyObject* hit
     cdef object names = None
     cdef object wire_key
+    cdef bint cached = True
     if stario_dict_get_ref(_PREFIXED_KEYS, prefix, &hit):
         names = <object>hit
         Py_DECREF(names)
+    elif len(_PREFIXED_KEYS) < 64:
+        names = _PREFIXED_KEYS.setdefault(stario_shared_str(prefix), stario_shared_dict())
     else:
-        names = {}
-        if len(_PREFIXED_KEYS) < 64:
-            names = _PREFIXED_KEYS.setdefault(prefix, names)
-    if type(key) is str and stario_dict_get_ref(names, key, &hit):
+        cached = False
+    if cached and type(key) is str and stario_dict_get_ref(names, key, &hit):
         wire_key = <object>hit
         Py_DECREF(wire_key)
         return wire_key
     wire_key = prefix + "-" + _valid_key(key)
-    if len(names) < _VALID_KEYS_MAX:
-        wire_key = (<dict>names).setdefault(key, wire_key)
+    if cached and len(names) < _VALID_KEYS_MAX:
+        wire_key = (<dict>names).setdefault(
+            stario_shared_str(key), stario_shared_str(wire_key)
+        )
     return wire_key
 
 
@@ -1697,31 +1877,40 @@ cdef int _write_text(Buf* b, object s) except -1:
     return 0
 
 
+cdef inline int _write_str_ptr(Buf* b, PyObject* s) except -1:
+    return _write_str(b, <object>s)
+
+
 cdef int _render_element(Element e, Buf* b, int depth) except -1:
-    cdef Tag tag = e.tag
-    cdef object attrs = e._attrs
-    cdef tuple children = e._children
+    # Borrowed reads, no references taken: an element never changes after
+    # it is built, and the caller holds it (so its tag, attributes and
+    # children stay alive) for the whole walk. A reference would write the
+    # refcount of every object in a subtree that all threads render, such
+    # as a module-level element, from every thread.
+    cdef PyObject* tag = <PyObject*>e.tag
+    cdef PyObject* attrs = <PyObject*>e._attrs
+    cdef PyObject* children = <PyObject*>e._children
     cdef Py_ssize_t i
-    if attrs is None:
-        if children is None:
-            return _write_str(b, tag.empty_html)
-        _write_str(b, tag.tag_start_no_attrs)
+    if attrs == <PyObject*>None:
+        if children == <PyObject*>None:
+            return _write_str_ptr(b, <PyObject*>(<Tag>tag).empty_html)
+        _write_str_ptr(b, <PyObject*>(<Tag>tag).tag_start_no_attrs)
     else:
-        if type(attrs) is not str:
-            for part in attrs:
+        if type(<object>attrs) is not str:
+            for part in <object>attrs:
                 if type(part) is _AttrSlot:
                     raise _unfilled_attr_slot_error(part)
             raise StarioError("Invalid attribute parts in render tree")
-        _write_str(b, tag.tag_start)
-        _write_str(b, attrs)
-        if children is None:
-            return _write_str(b, tag.no_children_close)
+        _write_str_ptr(b, <PyObject*>(<Tag>tag).tag_start)
+        _write_str_ptr(b, attrs)
+        if children == <PyObject*>None:
+            return _write_str_ptr(b, <PyObject*>(<Tag>tag).no_children_close)
         _write(b, ">", 1)
     if depth >= _MAX_DEPTH:
         raise RecursionError("HTML tree is nested too deeply")
-    for i in range(e._first, PyTuple_GET_SIZE(children)):
-        _render_node(<object>PyTuple_GET_ITEM(children, i), b, depth + 1)
-    return _write_str(b, tag.closing_tag)
+    for i in range(e._first, PyTuple_GET_SIZE(<object>children)):
+        _render_node(<object>PyTuple_GET_ITEM(<object>children, i), b, depth + 1)
+    return _write_str_ptr(b, <PyObject*>(<Tag>tag).closing_tag)
 
 
 cdef int _render_node(object node, Buf* b, int depth) except -1:
@@ -1732,7 +1921,8 @@ cdef int _render_node(object node, Buf* b, int depth) except -1:
     if node_type is Element:
         return _render_element(<Element>node, b, depth)
     if node_type is SafeString:
-        return _write_str(b, (<SafeString>node).rendered)
+        # Immutable, and held by the caller: a borrowed read (see above).
+        return _write_str_ptr(b, <PyObject*>(<SafeString>node).rendered)
     if node_type is list:
         if depth >= _MAX_DEPTH:
             raise RecursionError("HTML tree is nested too deeply")

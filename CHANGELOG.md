@@ -4,6 +4,46 @@ All notable changes to Stario are documented in this file.
 
 The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 5.8.0 - 2026-11-09
+
+### Performance
+
+- Building and rendering `h.*` trees scales across `STARIO_THREADS` on
+  free-threaded Python. Each element holds a reference to its `Tag`, and
+  render increfed the tag's strings, so every thread wrote the refcounts of
+  the same `h.Td` / `h.Tr` objects, and an HTML page served fewer requests
+  on 2 threads than on 1. On a free-threaded build a `Tag` and its empty
+  element are now immortal (Py_INCREF / Py_DECREF only read them), and so
+  are its strings (interned), the `classes()` / attribute-name / `data()`
+  caches and their entries, `@baked` static text, and the result of a
+  `@baked` function without parameters. Render no longer takes references
+  on the tree it walks. Measured on 3.14t against 5.7.0:
+  - Building and rendering a 50-row table on per-thread data, on 2 CPUs:
+    1.9-2.2x the throughput of one thread (was 0.3-0.45x); with
+    `classes()` and attributes, 2.0x (was 0.6x).
+  - A 50-row page with classes and attributes on 4 CPUs: 3.8x at 4 threads
+    (was 0.36x).
+  - Over HTTP, that page does 16.5k requests/s on 2 threads against 8.7k
+    on 1 (was 5.7k on 2, 8.1k on 1).
+
+  Builds with the GIL behave as before. Their single-thread timings are
+  unchanged within noise, and render is about 7% faster on a small tree.
+- `styles()` checks for `:;{}\` with string literals instead of a
+  module-level regex (which free-threaded CPython increfs on every load).
+  About 7% faster with the GIL.
+
+### Changed
+
+- On a free-threaded build a `Tag` and a `@baked` template are never
+  freed. Create them once, at import (`Widget = Tag("my-widget")`), not per
+  request. Cache entries stay bounded by the caches' caps. A Python
+  subclass of `Tag` stays mortal (it works, but does not scale as well), and
+  a 32-bit build makes nothing immortal.
+- An `Element`, `SafeString` or `Attrs` kept in a module-level variable and
+  put in every page is still increfed on each use, from every thread. For
+  static fragments that every request repeats, use a `@baked` function
+  without parameters or `classes()`: see `docs/free-threading.md`.
+
 ## 5.7.0 - 2026-11-08
 
 ### Added

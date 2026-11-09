@@ -318,7 +318,8 @@ Ordered by expected impact.
    - Measure an app that loads rows per request (from SQLite) instead of
      module-level dicts. It's the realistic case and should scale closer
      to 2x.
-   - Add a two-thread scaling case to `html/micro.py`.
+   - 5.8.0 added a two-thread scaling check (`html/micro.py --threads`),
+     which flags a regression below 1.7x.
    - Document that a module-level `Element` reused by every request still
      contends, while a parameterless `@baked` fragment does not.
 2. **Tail latency at 1,024+ connections.** With uvloop, a minority of

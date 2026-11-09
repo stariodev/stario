@@ -5,6 +5,7 @@ import gc
 import inspect
 import json
 import pickle
+import sys
 import threading
 import time
 import uuid
@@ -278,6 +279,33 @@ class TestBakedStillWorks:
             "Go {now}</button>"
         )
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "quotes \" and ' both",
+            "braces {x} {{y}} }{",
+            "back\\slash \\n \\x41 \\N{BULLET}",
+            "line\nbreak\r\ttab",
+            "\u00e9t\u00e9 \u65e5\u672c \U0001f680 \u2028",
+            '!r :>10 = f"{a!r}"',
+        ],
+    )
+    def test_baked_static_text_goes_into_the_source_unchanged(self, text):
+        # Static segments reach the generated splice function through
+        # shared_str (an interned copy on free-threaded builds).
+        def build(value):
+            return h.Div(
+                {"title": text, "data-x": value},
+                text,
+                value,
+                h.Script(f"var s = {json.dumps(text)};", value),
+                text,
+            )
+
+        spliced = baked(build)
+        for value in ("v", "{v}", 'a"b', "x\\y"):
+            assert spliced(value) == SafeString(render(build(value)))
+
     def test_classes_cache_takes_none_and_false(self):
         from stario.markup import attributes
 
@@ -329,6 +357,132 @@ class TestThreads:
         for thread in threads:
             thread.join()
         assert errors == []
+
+    def test_tags_made_on_many_threads_at_once(self):
+        # Each new Tag (and its strings and empty element) is made immortal
+        # on a free-threaded build while other threads build and render.
+        errors: list[BaseException] = []
+
+        def worker(n: int) -> None:
+            try:
+                for i in range(200):
+                    tag = Tag(f"x-t{n}-{i}")
+                    node = tag(classes(f"c{n}", "on"), str(i))
+                    expected = f'<x-t{n}-{i} class="c{n} on">{i}</x-t{n}-{i}>'
+                    assert render(node) == expected
+                    assert render(tag()) == f"<x-t{n}-{i}></x-t{n}-{i}>"
+            except BaseException as error:  # pragma: no cover - reported below
+                errors.append(error)
+
+        threads = [threading.Thread(target=worker, args=(n,)) for n in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert errors == []
+
+
+_FREE_THREADED = not getattr(sys, "_is_gil_enabled", lambda: True)()
+# Strings become immortal by interning, on any free-threaded build. Other
+# objects only where Py_ssize_t can hold the immortal refcount (64-bit).
+_IMMORTAL_STRINGS = _FREE_THREADED
+_IMMORTAL_OBJECTS = _FREE_THREADED and sys.maxsize > 2**32
+_is_immortal = getattr(sys, "_is_immortal", None)
+
+
+@pytest.mark.skipif(_is_immortal is None, reason="sys._is_immortal is 3.14+")
+class TestSharedObjectsAreImmortal:
+    """What every thread reads while building is immortal on free-threaded builds.
+
+    Each element holds its Tag and each render reads the Tag's strings, so a
+    refcount write there would be one cache line every core fights over.
+    With the GIL nothing changes. A caller's own object is never made
+    immortal (another thread may be changing its refcount): caches store an
+    immortal copy instead.
+    """
+
+    @staticmethod
+    def _check(tag: Tag) -> None:
+        assert _is_immortal is not None
+        assert _is_immortal(tag) == _IMMORTAL_OBJECTS, tag
+        assert _is_immortal(tag.empty) == _IMMORTAL_OBJECTS, tag
+        strings = (tag.tag_start, tag.tag_start_no_attrs, tag.closing_tag)
+        assert all(_is_immortal(s) == _IMMORTAL_STRINGS for s in strings), tag
+        if _IMMORTAL_STRINGS:  # "/>" may be an immortal constant with the GIL
+            assert _is_immortal(tag.no_children_close), tag
+            assert _is_immortal(tag.empty_html), tag
+
+    def test_a_tag_and_what_it_holds(self):
+        for tag in (Tag("x-immortal-check"), VoidTag("x-void-check"), h.Div, h.Br):
+            self._check(tag)
+
+    def test_tags_stay_immortal_after_their_thread_exits(self):
+        # A GC object made immortal without being untracked turns mortal
+        # again when its thread is gone and a collection merges its refcount.
+        assert _is_immortal is not None
+        made: list[Tag] = []
+        threads = [
+            threading.Thread(target=lambda n=n: made.append(Tag(f"x-exit-{n}")))
+            for n in range(4)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        gc.collect()
+        gc.collect()
+        for tag in made:
+            self._check(tag)
+
+    def test_a_python_subclass_keeps_a_mortal_tag(self):
+        # super().__init__() holds a second reference to self, and only a
+        # uniquely referenced object is made immortal. It still works.
+        assert _is_immortal is not None
+
+        class Widget(Tag):
+            def __init__(self, name: str) -> None:
+                super().__init__(name)
+
+        widget = Widget("x-widget")
+        assert not _is_immortal(widget)
+        assert render(widget({"id": "w"}, "hi")) == '<x-widget id="w">hi</x-widget>'
+
+    def test_a_cached_class_fragment(self):
+        from stario.markup import attributes
+
+        assert _is_immortal is not None
+        tokens = ("imm-a", "".join(["imm-", "b"]))
+        result = classes(*tokens)
+        assert result == Attrs(' class="imm-a imm-b"')
+        # Cached or not (another test may have filled the cache to its cap),
+        # the caller's own tuple and strings stay mortal.
+        assert not _is_immortal(tokens)
+        assert not _is_immortal(tokens[1])
+        if tokens in attributes._CLASSES_CACHE:
+            assert classes("imm-a", "imm-b") is result
+        # () is immortal on every build: look at a key with tokens in it.
+        key, cached = next(kv for kv in attributes._CLASSES_CACHE.items() if kv[0])
+        assert _is_immortal(cached) == _IMMORTAL_OBJECTS
+        assert _is_immortal(cached.rendered) == _IMMORTAL_STRINGS
+        assert _is_immortal(key) == _IMMORTAL_OBJECTS
+
+    def test_a_dynamic_attribute_name_is_copied_into_the_cache(self):
+        assert _is_immortal is not None
+        key = "".join(["data-", uuid.uuid4().hex])
+        assert render(h.Div({key: "v"})) == f'<div {key}="v"></div>'
+        assert render(h.Div(data({key: 1}))) == f'<div data-{key}="1"></div>'
+        assert not _is_immortal(key)
+
+    def test_a_static_baked_result_is_one_shared_object(self):
+        assert _is_immortal is not None
+
+        @baked
+        def footer():
+            return h.Footer(h.P("Made with Stario"))
+
+        assert footer() is footer()
+        assert footer() == SafeString("<footer><p>Made with Stario</p></footer>")
+        assert _is_immortal(footer()) == _IMMORTAL_OBJECTS
 
 
 class TestRawTextChecks:

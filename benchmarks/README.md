@@ -60,6 +60,17 @@ cd projects/stario
 uv run benchmarks/html/micro.py
 ```
 
+The last section runs only on a free-threaded build (3.14t): each of 1, then
+2, threads builds and renders its own 50-row table, and it prints aggregate
+throughput and the 2-thread scale. Pin it to two idle CPUs; below 1.7x it
+flags the line, which means something every thread reads (a `Tag`, one of
+its strings, a cache) has its refcount written again. See
+[`docs/free-threading.md`](../docs/free-threading.md).
+
+```bash
+taskset -c 0,1 uv run benchmarks/html/micro.py --threads
+```
+
 ## In-process protocol (`server/inproc.py`)
 
 Feeds keep-alive HTTP/1.1 requests straight into `HttpProtocol` with a
