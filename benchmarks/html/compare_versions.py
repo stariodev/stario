@@ -16,7 +16,10 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve()
 THIS = HERE.parents[2]
-WITH = ["--with", "dominate", "--with", "htpy", "--with", "jinja2", "--with", "tdom"]
+WITH = [
+    "--with", "dominate", "--with", "htpy", "--with", "jinja2", "--with", "tdom",
+    "--with", "mako", "--with", "fastcore", "--with", "markupsafe",
+]
 
 
 def run(checkout: Path, rows: int) -> dict:

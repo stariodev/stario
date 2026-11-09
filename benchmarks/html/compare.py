@@ -1,10 +1,15 @@
 """
-Compare stario HTML generation against jinja2, htpy, dominate, and tdom.
+Compare stario HTML generation against jinja2, mako, htpy, dominate,
+fastcore.xml (FastHTML's FT), and tdom, plus a hand-written f-string floor.
 
 Every contender renders the same product page (autoescaping on everywhere).
 Run from the project root:
 
-    uv run --with dominate --with htpy --with jinja2 --with tdom benchmarks/html/compare.py
+    uv run --with dominate --with htpy --with jinja2 --with tdom --with mako \
+        --with fastcore --with markupsafe benchmarks/html/compare.py [--rows N] [--escape]
+
+``--escape`` puts characters that need escaping (``<>&"'``) in every name,
+so the escaper does work on each row instead of scanning clean ASCII.
 
 Times are best-of-N microseconds per full page; lower is better. The
 `bytes` column adds the UTF-8 encode a response needs (stario: one
@@ -13,6 +18,7 @@ Times are best-of-N microseconds per full page; lower is better. The
 """
 
 import hashlib
+import html as html_lib
 import json
 import re
 import sys
@@ -22,6 +28,9 @@ from string.templatelib import Template
 import htpy as hp
 import jinja2
 from dominate import tags as dt
+from fastcore import xml as fx
+from mako.template import Template as MakoTemplate
+from markupsafe import escape as ms_escape
 from tdom import html
 
 from stario.markup import baked, classes, data, render
@@ -37,13 +46,22 @@ except ImportError:  # stario before the typed core
 from stario import h
 
 ROW_COUNT = int(sys.argv[sys.argv.index("--rows") + 1]) if "--rows" in sys.argv else 50
+ESCAPE = "--escape" in sys.argv
 ROWS = [
-    {"id": i, "name": f"Item {i}", "active": i % 3 == 0, "price": f"{i}.99"}
+    {
+        "id": i,
+        "name": f'Item {i} <b>"Tom" & Jerry\'s</b>' if ESCAPE else f"Item {i}",
+        "active": i % 3 == 0,
+        "price": f"{i}.99",
+    }
     for i in range(ROW_COUNT)
 ]
 
 
-def bench(fn, n: int = 2000, repeat: int = 7) -> float:
+N = max(20, 100_000 // max(ROW_COUNT, 1))
+
+
+def bench(fn, n: int = N, repeat: int = 7) -> float:
     for _ in range(200):
         fn()
     best = float("inf")
@@ -172,16 +190,14 @@ def htpy_page() -> str:
 
 def dominate_page() -> str:
     doc = dt.html(lang="en")
-    with doc:
-        with dt.body(cls="bg min-h-screen"):
-            with dt.main(cls="mx-auto px-4"):
-                dt.h1("Products", cls="title")
-                with dt.ul(cls="product-list"):
-                    for r in ROWS:
-                        cls = "card active" if r["active"] else "card"
-                        with dt.li(cls=cls, data_id=r["id"]):
-                            dt.span(r["name"], cls="name")
-                            dt.span(r["price"], cls="price")
+    with doc, dt.body(cls="bg min-h-screen"), dt.main(cls="mx-auto px-4"):
+        dt.h1("Products", cls="title")
+        with dt.ul(cls="product-list"):
+            for r in ROWS:
+                cls = "card active" if r["active"] else "card"
+                with dt.li(cls=cls, data_id=r["id"]):
+                    dt.span(r["name"], cls="name")
+                    dt.span(r["price"], cls="price")
     return doc.render(pretty=False)
 
 
@@ -199,6 +215,77 @@ _tmpl = _env.from_string(
 
 def jinja_page() -> str:
     return _tmpl.render(rows=ROWS)
+
+
+# --- mako ---------------------------------------------------------------------------
+
+_mako = MakoTemplate(
+    '<html lang="en"><body class="bg min-h-screen"><main class="mx-auto px-4">'
+    '<h1 class="title">Products</h1><ul class="product-list">\\\n'
+    "% for r in rows:\n"
+    '<li class="card${\' active\' if r[\'active\'] else \'\'}" data-id="${r[\'id\']}">'
+    '<span class="name">${r[\'name\']}</span><span class="price">${r[\'price\']}</span></li>'
+    "\\\n% endfor\n"
+    "</ul></main></body></html>",
+    default_filters=["h"],
+)
+
+
+def mako_page() -> str:
+    return _mako.render(rows=ROWS)
+
+
+# --- fastcore.xml (FastHTML's FT components) ----------------------------------------
+
+
+def fastcore_page() -> str:
+    return fx.to_xml(
+        fx.Html(
+            fx.Body(
+                fx.Main(
+                    fx.H1("Products", cls="title"),
+                    fx.Ul(
+                        *[
+                            fx.Li(
+                                fx.Span(r["name"], cls="name"),
+                                fx.Span(r["price"], cls="price"),
+                                cls="card active" if r["active"] else "card",
+                                data_id=r["id"],
+                            )
+                            for r in ROWS
+                        ],
+                        cls="product-list",
+                    ),
+                    cls="mx-auto px-4",
+                ),
+                cls="bg min-h-screen",
+            ),
+            lang="en",
+        ),
+        indent=False,
+    )
+
+
+# --- hand-written f-strings + markupsafe: the floor -------------------------------
+# No library at all: escape each value and join strings. Nothing reusable,
+# no components, no structure checks; it shows how far each library is from
+# the cost of just producing the bytes in Python.
+
+
+def fstring_page() -> str:
+    parts = [
+        '<html lang="en"><body class="bg min-h-screen"><main class="mx-auto px-4">'
+        '<h1 class="title">Products</h1><ul class="product-list">'
+    ]
+    append = parts.append
+    for r in ROWS:
+        append(
+            f'<li class="{"card active" if r["active"] else "card"}" data-id="{r["id"]}">'
+            f'<span class="name">{ms_escape(r["name"])}</span>'
+            f'<span class="price">{ms_escape(r["price"])}</span></li>'
+        )
+    append("</ul></main></body></html>")
+    return "".join(parts)
 
 
 # --- tdom (Python 3.14 t-strings) ------------------------------------------------
@@ -254,7 +341,9 @@ def _normalized(page: object) -> str:
     """The page without a doctype or whitespace between tags (htpy adds a
     doctype; the naive t-string keeps its newlines)."""
     text = re.sub(r"(?i)^<!doctype html>", "", str(page).strip())
-    return re.sub(r">\s+<", "><", text)
+    # Escapers differ (&#34; vs &quot; vs a bare quote in text): compare
+    # the decoded text, after checking above that stario's own output is exact.
+    return html_lib.unescape(re.sub(r">\s+<", "><", text))
 
 
 def main() -> None:
@@ -262,8 +351,11 @@ def main() -> None:
         ("stario @baked", stario_baked, stario_baked_bytes),
         ("stario naive (tree per call)", stario_naive, stario_naive_bytes),
         ("jinja2 (compiled, autoescape)", jinja_page, None),
+        ("mako (compiled, h filter)", mako_page, None),
         ("htpy", htpy_page, None),
+        ("fastcore.xml (FastHTML FT)", fastcore_page, None),
         ("dominate", dominate_page, None),
+        ("f-string + markupsafe (floor)", fstring_page, None),
         ("tdom (components)", tdom_components, None),
         ("tdom (naive t-string)", tdom_naive, None),
     ]
@@ -285,7 +377,8 @@ def main() -> None:
         return
 
     fastest = min(r["str"] for r in results.values())
-    print(f"\n{ROW_COUNT}-row product page, per page (best of 7 x 2000):\n")
+    kind = "escape-heavy" if ESCAPE else "clean-text"
+    print(f"\n{ROW_COUNT}-row product page, {kind}, per page (best of 7 x {N}):\n")
     print(f"  {'':<34} {'str':>9}    {'bytes':>9}")
     for name, r in sorted(results.items(), key=lambda item: item[1]["str"]):
         print(

@@ -1,27 +1,35 @@
 # pyright: reportMissingImports=false
 
 import argparse
+import os
 
 import ujson
-from robyn import Robyn
+from robyn import Headers, Response, Robyn
 
-HELLO = "Hello, World!"
+from apps.common import HELLO, jinja_page
+
 JSON_HEADERS = {"Content-Type": "application/json"}
+HTML_HEADERS = {"Content-Type": "text/html; charset=utf-8"}
+# const=True makes Robyn cache the first response in Rust and never call the
+# handler again. Every other target runs its handler per request, so the
+# comparison leaves it off; BENCH_ROBYN_CONST=1 turns it back on.
+CONST = os.environ.get("BENCH_ROBYN_CONST") == "1"
+render_page = jinja_page()
 
 
 def error_json(value):
-    return (value, JSON_HEADERS, 400)
+    return Response(400, Headers(JSON_HEADERS), ujson.dumps(value))
 
 
 app = Robyn(__file__)
 
 
-@app.get("/plaintext", const=True)
+@app.get("/plaintext", const=CONST)
 def plaintext():
     return HELLO
 
 
-@app.get("/json", const=True)
+@app.get("/json", const=CONST)
 def json_endpoint():
     return {"message": HELLO}
 
@@ -43,6 +51,11 @@ def validate(request):
         return error_json({"error": "age must be an integer between 0 and 150"})
 
     return {"name": name, "age": age, "valid": True}
+
+
+@app.get("/page")
+def page():
+    return Response(200, Headers(HTML_HEADERS), render_page())
 
 
 if __name__ == "__main__":
