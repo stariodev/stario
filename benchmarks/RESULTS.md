@@ -231,6 +231,9 @@ for drift, three rounds ran with the targets in a different order each time
 (`results/20261109T183831Z`, `…184316Z`, `…184756Z`), one 10 s run per round.
 Each number is the median of the three rounds. Every round agreed within a
 few percent, with no errors.
+A spot-check with the published PyPI 5.8.0 wheels (`results/20261109T185657Z`,
+one round) came out within 4% on page and mix: two processes 14,890 / 31,274,
+two threads 10,732 / 22,139.
 
 Stario appears twice:
 

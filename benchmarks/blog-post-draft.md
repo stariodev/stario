@@ -84,7 +84,7 @@ Microseconds per 50-row page, with no server involved:
 
 Stario's multi-core mode runs on free-threaded Python 3.14t: `STARIO_THREADS=2` starts two event loops in one process, so in-process state such as `Relay` is shared across cores. The other frameworks start two processes. For a like-for-like baseline we also ran two regular Stario processes sharing the port. Stario doesn't ship that mode; the benchmark has [a small launcher](https://github.com/stariodev/stario/blob/b096db9f0b89522fb3e02406291423c6322e15cf/benchmarks/server/apps/stario_mp.py) for it, and each process would have its own `Relay`.
 
-The setup: two server CPUs, three rounds with the frameworks in a different order each time, and the median of the three. Stario 5.8.0 was built from its release commit.
+The setup: two server CPUs, three rounds with the frameworks in a different order each time, and the median of the three. Stario 5.8.0 was built from its release commit, `03d54a9`, because the PyPI wheels were not out yet; a later run with the published wheels came out within 4% on the page and mix.
 
 | Setup on 2 cores | Plaintext | HTML page | Browser mix |
 | --- | ---: | ---: | ---: |
@@ -95,7 +95,7 @@ The setup: two server CPUs, three rounds with the frameworks in a different orde
 | BlackSheep + Granian, 2 workers | 75,394 | 8,753 | 18,042 |
 | FastAPI, 2 workers | 26,739 | 8,243 | 11,903 |
 
-Two Stario processes serve 1.55x the pages and 1.74x the mix of the best two-process setup. Two free-threaded threads match Robyn and Sanic on the page and lead the mix by 1.25x, from a single process.
+Read the page and mix columns: plaintext is near the load generator's limit at these rates and shifts with the tool used to measure it, so its ratios are rough. Two Stario processes (the benchmark launcher, not a shipped mode) serve 1.55x the pages and 1.74x the mix of the best two-process setup. Two free-threaded threads match Robyn and Sanic on the page and lead the mix by 1.25x, from a single process.
 
 5.8.0 is what made the threaded row possible. In 5.7.0, threads contended on the reference counts of shared markup objects, and a second thread made the page slower (0.94x). In 5.8.0, two threads serve 1.65x the pages of one, while two processes still serve 2.05x the pages of one. Part of that gap is 3.14t's per-thread cost; part is this benchmark's page reading the same module-level rows from both threads, which plain Python on 3.14t doesn't scale well either.
 
