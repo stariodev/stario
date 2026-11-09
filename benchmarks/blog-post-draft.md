@@ -1,142 +1,98 @@
 ---
-title: "How fast is Stario? Benchmarks against FastAPI, BlackSheep, Sanic, Falcon and Robyn"
+title: How fast is Stario 5.7? Benchmarks against FastAPI, BlackSheep, Sanic, Falcon, and Robyn
+slug: stario-5-7-benchmarks
+description: Stario 5.7 against five Python frameworks on one CPU core — plaintext, JSON, a 16 KB HTML page, a browser-shaped request mix, compression, and HTML rendering on its own. The method, the machine, the numbers, and where Stario is still weak.
 date: 2026-11-09
 ---
 
-<!--
-Draft notes (delete before publishing):
-- Links point to `main`; they work once branch claude/keen-johnson-qpqk7o is merged.
-- The "Multi-core" section shows numbers from the unreleased immortalization
-  branch (claude/inspiring-davinci-ydskh0). Keep it only if that ships in the
-  release this post goes out with; otherwise drop the section or use the
-  5.7.0 row only.
--->
+We rebuilt Stario's benchmark suite so that it compares like with like: the same endpoints in every framework, the same CPU budget, and the same output, checked before anything is timed. This post covers how it works and what it shows for Stario 5.7.0. The code, the raw results, and a longer write-up are in the Stario repository: [`benchmarks/`](https://github.com/stariodev/stario/tree/9ffb3d8d10bb629429849ecd3146ee63531b5b54/benchmarks).
 
-We rebuilt Stario's benchmark suite to compare like with like across Python
-web frameworks: the same endpoints, the same CPU budget, the same output,
-checked before anything is timed. Here is how it works and what it shows.
+## Method
 
-## Methodology
+The server suite is [`benchmarks/server/bench.py`](https://github.com/stariodev/stario/blob/9ffb3d8d10bb629429849ecd3146ee63531b5b54/benchmarks/server/bench.py). It sets up a virtual environment per framework and runs one server at a time. Each server is pinned to a single CPU with `taskset`, including any Rust helper threads. The load generator, `wrk`, runs on two other CPUs. Every server sat at 99–100% of its core in every `wrk` run, so the server, not the client, was the limit.
 
-**Server benchmarks** ([`benchmarks/server/bench.py`](https://github.com/stariodev/stario/blob/main/benchmarks/server/bench.py)):
+Before measuring, the runner fetches every endpoint of every framework and checks the answers. The HTML page has to be the same document everywhere. Socket errors and non-2xx responses are reported next to each number. Each number is the median of three 10-second runs, after a warm-up.
 
-- **One core per server.** Each server is pinned to a single CPU with
-  `taskset`, Rust helper threads included (Granian, Robyn). The load
-  generator, [`wrk`](https://github.com/wg/wrk), runs on separate CPUs. Every
-  server is at ~100% of its core in every run, so the server is the
-  bottleneck, not the client.
-- **Same answers.** Before measuring, every endpoint of every framework is
-  fetched and checked. The HTML page must be the same document everywhere.
-  Socket errors and non-2xx responses are reported next to each number.
-- **Real work, not just hello-world.** Besides plaintext and JSON, there is
-  a 16 KB HTML page: a 50-row admin table, with escaping. Stario builds it with `h.*`; the
-  other frameworks render it with Jinja2. There is also a browser-shaped
-  mix: 40% page, 30% JSON with a path parameter, 20% JSON, 10% POST, each
-  request carrying a real Chrome header set.
-- **Handlers run per request.** No response caching: Robyn's `const=True` is
-  off. Listen backlogs are 2048 everywhere (Sanic's default of 100 and
-  Granian's 1,024-connection cap were raised to match).
-- **Median of 3 runs** of 10 s each, after a warm-up.
+The endpoints are the usual plaintext, JSON, a path parameter, and a small JSON `POST`, plus two that look more like a real app:
 
-**HTML benchmarks** ([`benchmarks/html/compare.py`](https://github.com/stariodev/stario/blob/main/benchmarks/html/compare.py)):
-the same product list rendered by Stario, Jinja2, Mako, htpy, dominate,
-FastHTML's `fastcore.xml`, and tdom, plus hand-written f-strings with
-markupsafe as a floor. Every output is checked against Stario's. It runs at
-10, 50, and 500 rows, with and without text that needs escaping.
+- `/page`, a 16 KB admin page with a 50-row table, where one row in seven needs escaping. Stario builds it with `h.*`; the other frameworks render it with a compiled Jinja2 template, which is what their docs reach for.
+- A browser-shaped mix: 40% page, 30% JSON with a path parameter, 20% JSON, 10% `POST`. Every request carries a real Chrome header set with cookies.
 
-Everything, including how to rerun it, is in
-[`benchmarks/README.md`](https://github.com/stariodev/stario/blob/main/benchmarks/README.md).
-The full numbers are in
-[`benchmarks/RESULTS.md`](https://github.com/stariodev/stario/blob/main/benchmarks/RESULTS.md).
+The HTML suite, [`benchmarks/html/compare.py`](https://github.com/stariodev/stario/blob/9ffb3d8d10bb629429849ecd3146ee63531b5b54/benchmarks/html/compare.py), renders the same product list with Stario, Jinja2, Mako, htpy, dominate, FastHTML's `fastcore.xml`, and tdom. Hand-written f-strings serve as baselines. Every output is checked against Stario's.
 
-**Machine:** 4 vCPU Intel Xeon @ 2.10 GHz cloud VM, 15 GB RAM, Linux 6.18,
-CPython 3.14.6, uvloop 0.23. Versions: Stario 5.7.0, FastAPI 0.162 (Uvicorn
-0.54), BlackSheep 2.6.4 (on Uvicorn and on Granian 2.8.7), Sanic 25.12,
-Falcon 4.4, Robyn 0.88. Expect about ±10% run-to-run noise on a VM like this.
+Some choices favor one side, and you should know them:
 
-## Results: one core
+- Pinning everything to one core favors single-threaded event loops. Granian and Robyn run Rust I/O threads, which here share the core with Python.
+- FastAPI validates the `POST` with Pydantic, as its users would; the others check fields by hand.
+- Stario runs with its tracer off, the counterpart of the access logs turned off elsewhere.
+- Robyn's `const=True` response cache is off, so every framework runs its handler per request.
+- The listen backlog is 2048 everywhere it can be set. Robyn has no setting for it.
 
-Requests per second at 128 connections. Higher is better.
+An independent review of the first draft caught a bug that doubled Jinja2's render time: the template used `r.id` on dicts, and Jinja2 tries attribute access before indexing. The numbers below are from the rerun with that fixed.
+
+## The machine
+
+The VM had 4 vCPUs (Intel Xeon at 2.10 GHz), 15 GB of RAM, and ran Linux 6.18. Everything ran on CPython 3.14.6 with uvloop 0.23. Versions: Stario 5.7.0, FastAPI 0.162 on Uvicorn 0.54, BlackSheep 2.6.4 on Uvicorn and on Granian 2.8.7, Sanic 25.12, Falcon 4.4, and Robyn 0.88. A cloud VM drifts during the day, so all the server numbers below come from one contiguous run.
+
+## One core
+
+Requests per second at 128 connections:
 
 | Framework | Plaintext | JSON | HTML page | Browser mix |
 | --- | ---: | ---: | ---: | ---: |
-| **Stario** | **77,601** | **75,381** | **6,666** | **13,298** |
-| BlackSheep + Granian | 48,515 | 48,115 | 2,082 | 4,309 |
-| Robyn | 29,946 | 31,477 | 2,502 | 4,762 |
-| BlackSheep + Uvicorn | 23,053 | 22,660 | 2,409 | 5,116 |
-| Falcon + Uvicorn | 21,391 | 19,660 | 2,515 | 4,814 |
-| Sanic | 18,680 | 17,150 | 2,280 | 4,127 |
-| FastAPI + Uvicorn | 11,505 | 10,773 | 2,205 | 3,685 |
+| Stario | 82,506 | 66,895 | 7,789 | 14,526 |
+| BlackSheep + Granian | 52,571 | 52,793 | 4,659 | 9,010 |
+| BlackSheep + Uvicorn | 24,924 | 25,019 | 4,862 | 8,929 |
+| Falcon + Uvicorn | 24,196 | 23,235 | 4,965 | 8,507 |
+| Sanic | 23,425 | 22,305 | 4,920 | 8,333 |
+| Robyn | 31,893 | 30,616 | 4,952 | 8,315 |
+| FastAPI + Uvicorn | 13,067 | 12,833 | 4,017 | 5,947 |
 
-On the HTML page, Stario is 2.6x the next framework. With
-`@baked` (the same page, precompiled) it serves 9,513
-pages/s, 3.8x the next framework. Latency follows: on the mix, Stario's p99
-is 17 ms; the others range from 90 ms to 1.5 s.
+On small responses, Stario is 1.1–1.9x the fastest other setup, BlackSheep on Granian, and 5–6x FastAPI. Most of that comes from the compiled HTTP core. On the HTML page it is 1.6x the next framework. The same page through `@baked`, which compiles the static parts once, serves 12,329 pages/s, 2.5x the next framework.
 
-**With compression on** (a browser's `Accept-Encoding`), Stario serves the
-mix at 11,933 req/s and 792 B per response using zstd. Frameworks with
-built-in gzip manage 2,600–3,900 req/s. Even with gzip forced to the same
-level everywhere, Stario's HTML page is 2.5x faster, so the gap is framework
-cost, not the codec.
+Latency follows throughput. In the browser mix, Stario's p99 is 15 ms. The other frameworks range from 17 ms (BlackSheep on Uvicorn) to 309 ms (FastAPI).
 
-## Results: day-to-day load
+## With compression
 
-- **10,000 connected users**, each loading the HTML page every 2 seconds
-  (5,000 req/s offered), on one core. Stario serves them all: p50 3.4 ms,
-  p99 86 ms, zero errors. Every other framework falls behind, at 1,100–2,500
-  req/s, with seconds of latency or thousands of errors.
-- **Live updates:** 5,000 clients on a Datastar SSE stream, with an HTML
-  fragment broadcast every 0.5 s. Stario delivers at p50 54 ms using 0.19
-  of a core. This is on par with the fastest others (Sanic: 55 ms, 0.18
-  core); fan-out is cheap for every async server.
+With a browser's `Accept-Encoding`, Stario picks zstd and serves the mix at 13,240 req/s, at 792 bytes per response. FastAPI and BlackSheep compress with gzip and manage 3,800–6,000 req/s. Sanic, Falcon, and Robyn have no built-in compression and usually sit behind a proxy that does it.
 
-## Results: HTML rendering alone
+With gzip forced to level 1 everywhere, the HTML page shows the same 1.75x gap as without compression. Compression costs every framework about the same; the difference comes from the rest of the request.
 
-Microseconds per 50-row page, no server. Lower is better.
+## A heavier load
+
+10,000 keep-alive connections each fetch the HTML page every 2 seconds. That's 5,000 page requests per second, close to what the other frameworks can serve on one core. Stario serves it with p50 1.1 ms, p99 26 ms, and no errors. The others serve nearly the same request rate, but queue: their median latency is 240 ms to 1.7 s, and four of the six report errors. This is the throughput result again, seen as latency under a fixed load.
+
+For live updates, 5,000 clients hold a Datastar SSE stream while the server pushes an HTML fragment to all of them twice a second. Stario delivers at a median of 54 ms using 0.19 of a core. Sanic is level with it, and the others are close. Fan-out of small events is cheap for any async server, so this is not where Stario stands out.
+
+## HTML rendering on its own
+
+Microseconds per 50-row page, with no server involved:
 
 | Library | Clean text | Escape-heavy |
 | --- | ---: | ---: |
-| **Stario `@baked`** | **17** | **20** |
-| f-strings + markupsafe (no library) | 35 | 41 |
-| **Stario (plain `h.*` tree)** | **44** | **41** |
-| Mako | 61 | 79 |
-| Jinja2 | 99 | 132 |
-| tdom, dominate, FastHTML FT, htpy | 940–1,150 | 970–1,220 |
+| Stario `@baked` | 17.7 | 20.0 |
+| f-strings + `html.escape` | 20.6 | 29.4 |
+| f-strings + markupsafe | 35.6 | 38.7 |
+| Stario plain `h.*` tree | 40.7 | 39.5 |
+| Jinja2 | 48.9 | 54.6 |
+| Mako | 59.1 | 62.1 |
+| tdom, FastHTML FT, htpy, dominate | 919–1,045 | 908–1,067 |
 
-`@baked` beats hand-written f-strings. The plain tree, where every element
-is a real object you can inspect, beats both compiled template engines.
+`@baked` is faster than hand-written f-strings. The plain tree, where every element is an object you can inspect, comes in 1.2–1.4x faster than Jinja2. The pure-Python element libraries are about 20x slower than either.
 
-## Multi-core
+## Where Stario is still weak
 
-Stario runs one process with one event loop per thread on free-threaded
-Python 3.14t (`STARIO_THREADS`), so in-process features like `Relay` keep
-working across cores. Two threads on two CPUs, against two-process setups
-of the other frameworks:
+At 1,024 concurrent connections, a minority of requests on uvloop servers, Stario and Uvicorn alike, wait several seconds while the median stays low. Granian and Robyn keep a fair tail at that load. The same Stario on stdlib asyncio is fair too, at half the throughput, so we are looking at how libuv schedules reads.
 
-| | Plaintext | HTML page | Browser mix |
-| --- | ---: | ---: | ---: |
-| **Stario, 2 threads** | **133,681** | **10,617** | **21,561** |
-| BlackSheep + Granian, 2 workers | 75,537 | 5,714 | 11,672 |
-| Robyn, 2 processes | 65,435 | 5,879 | 11,667 |
-| Sanic, 2 workers | 49,702 | 5,883 | 11,291 |
-| FastAPI, 2 workers | 26,262 | 5,152 | 8,879 |
+On free-threaded Python 3.14t, Stario 5.7.0 runs one event loop per thread. Plaintext scales across cores, but building HTML does not, because threads contend on reference counts of shared markup objects. A fix is in progress: on a development branch, two threads serve 1.7x the pages of one. We'll publish multi-core numbers when it ships.
 
-(Measured on the same machine in a separate session; it ran ~15% faster
-that afternoon, so compare within this table.)
+## Run it yourself
 
-## What we're still working on
-
-Benchmarks are only useful if they show the weak spots too:
-
-- At 1,024+ concurrent connections, a minority of requests on uvloop-based
-  servers (Stario and Uvicorn) can wait seconds. Granian and Robyn keep a
-  fairer tail there. We're investigating.
-- Free-threaded Python costs ~15% on a single thread compared with the GIL
-  build. That is CPython's cost; the win comes from the second core.
-
-The numbers are from one machine. Run the suite on yours:
+Numbers from one machine are a starting point. The suite runs on any Linux box with four or more CPUs, `uv`, and `wrk`:
 
 ```bash
-python3 benchmarks/server/bench.py            # all frameworks, all phases (~1 h)
-benchmarks/server/run.sh                      # throughput only (~15 min)
+python3 benchmarks/server/bench.py   # every framework, every phase: about an hour
+benchmarks/server/run.sh             # throughput only: about 15 minutes
 ```
+
+The [results write-up](https://github.com/stariodev/stario/blob/9ffb3d8d10bb629429849ecd3146ee63531b5b54/benchmarks/RESULTS.md) has every table, the concurrency sweep, memory, and the list of what we plan to improve.
