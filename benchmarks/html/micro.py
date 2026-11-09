@@ -15,8 +15,8 @@ import time
 from collections.abc import Mapping
 from typing import Any, cast
 
-from stario.markup import baked, classes, data, render, styles
 from stario import h
+from stario.markup import baked, classes, data, render, styles
 from stario.markup.escape import escape_attribute_value, escape_text
 from stario.markup.types import Attrs
 

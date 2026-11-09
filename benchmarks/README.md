@@ -25,8 +25,8 @@ Renders the same product page (autoescaping on everywhere) with:
 - `dominate`
 - `tdom` — Python 3.14 t-strings ([tdom](https://github.com/t-strings/tdom));
   naive inline template and Page/Row component functions
-- `f-string + markupsafe` — no library, just escape and join: the floor a
-  library can be measured against
+- `f-string + markupsafe` and `f-string + html.escape` — no library, just
+  escape and join: baselines to measure the libraries against
 
 Two categories are being compared, and both are fair fights: template
 engines compile once and fill values per call (jinja2, mako, and
@@ -150,7 +150,8 @@ rebuilds the environments.
   and are left out of that phase. `--gzip-level N` forces one gzip level in
   every framework for a like-for-like codec comparison.
 - **Median of `--repeat` runs** (default 3) of `--duration` seconds each
-  (default 10), after a warm-up.
+  (default 10), after a warm-up. Each reported metric (req/s, p50,
+  p99, CPU) is its own median across the runs; errors are summed.
 
 ### Phases
 

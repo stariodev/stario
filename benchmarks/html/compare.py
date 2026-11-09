@@ -1,6 +1,6 @@
 """
 Compare stario HTML generation against jinja2, mako, htpy, dominate,
-fastcore.xml (FastHTML's FT), and tdom, plus a hand-written f-string floor.
+fastcore.xml (FastHTML's FT), and tdom, plus hand-written f-string baselines.
 
 Every contender renders the same product page (autoescaping on everywhere).
 Run from the project root:
@@ -23,6 +23,7 @@ import json
 import re
 import sys
 import time
+from html import escape as html_escape
 from string.templatelib import Template
 
 import htpy as hp
@@ -207,8 +208,8 @@ _env = jinja2.Environment(autoescape=True)
 _tmpl = _env.from_string(
     '<html lang="en"><body class="bg min-h-screen"><main class="mx-auto px-4">'
     '<h1 class="title">Products</h1><ul class="product-list">{% for r in rows %}'
-    '<li class="card{% if r.active %} active{% endif %}" data-id="{{ r.id }}">'
-    '<span class="name">{{ r.name }}</span><span class="price">{{ r.price }}</span>'
+    '<li class="card{% if r["active"] %} active{% endif %}" data-id="{{ r["id"] }}">'
+    '<span class="name">{{ r["name"] }}</span><span class="price">{{ r["price"] }}</span>'
     "</li>{% endfor %}</ul></main></body></html>"
 )
 
@@ -266,10 +267,11 @@ def fastcore_page() -> str:
     )
 
 
-# --- hand-written f-strings + markupsafe: the floor -------------------------------
+# --- hand-written f-strings: baselines ------------------------------------------
 # No library at all: escape each value and join strings. Nothing reusable,
 # no components, no structure checks; it shows how far each library is from
-# the cost of just producing the bytes in Python.
+# the cost of just producing the bytes in Python. Two escapers: markupsafe
+# (what Jinja2 uses) and the stdlib's html.escape, which is faster here.
 
 
 def fstring_page() -> str:
@@ -283,6 +285,22 @@ def fstring_page() -> str:
             f'<li class="{"card active" if r["active"] else "card"}" data-id="{r["id"]}">'
             f'<span class="name">{ms_escape(r["name"])}</span>'
             f'<span class="price">{ms_escape(r["price"])}</span></li>'
+        )
+    append("</ul></main></body></html>")
+    return "".join(parts)
+
+
+def fstring_stdlib_page() -> str:
+    parts = [
+        '<html lang="en"><body class="bg min-h-screen"><main class="mx-auto px-4">'
+        '<h1 class="title">Products</h1><ul class="product-list">'
+    ]
+    append = parts.append
+    for r in ROWS:
+        append(
+            f'<li class="{"card active" if r["active"] else "card"}" data-id="{r["id"]}">'
+            f'<span class="name">{html_escape(r["name"])}</span>'
+            f'<span class="price">{html_escape(r["price"])}</span></li>'
         )
     append("</ul></main></body></html>")
     return "".join(parts)
@@ -355,7 +373,8 @@ def main() -> None:
         ("htpy", htpy_page, None),
         ("fastcore.xml (FastHTML FT)", fastcore_page, None),
         ("dominate", dominate_page, None),
-        ("f-string + markupsafe (floor)", fstring_page, None),
+        ("f-string + markupsafe", fstring_page, None),
+        ("f-string + html.escape", fstring_stdlib_page, None),
         ("tdom (components)", tdom_components, None),
         ("tdom (naive t-string)", tdom_naive, None),
     ]

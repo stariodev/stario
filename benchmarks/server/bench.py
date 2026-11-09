@@ -370,8 +370,15 @@ class WrkResult:
 
     @staticmethod
     def median(results: list[WrkResult]) -> WrkResult:
-        best = sorted(results, key=lambda r: r.rps)[len(results) // 2]
-        return best
+        """Each metric's median across the runs (p99 is noisy run to run)."""
+
+        def med(name):
+            return statistics.median(getattr(r, name) for r in results)
+
+        return WrkResult(
+            med("rps"), med("p50"), med("p90"), med("p99"), med("bytes_per_req"),
+            sum(r.errors for r in results), sum(r.non2xx for r in results), med("cpu"),
+        )
 
 
 def wrk(server: Server, cfg, path: str, *, conns: int, script: Path | None = None,

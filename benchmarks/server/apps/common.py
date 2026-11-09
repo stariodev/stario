@@ -1,10 +1,12 @@
 """Data and the Jinja2 template shared by the benchmark apps.
 
 Every target renders the same ``/page``: a product admin page with a head,
-nav, a 50-row table, and a footer (about 11 KB). One row in seven carries
+nav, a 50-row table, and a footer (about 16 KB). One row in seven carries
 text that must be escaped, so autoescaping does real work. Stario builds it
 with ``h.*`` (see ``stario_app.py``); every other target uses Jinja2, which
-is what their docs reach for. ``bench.py`` checks that all targets produce
+is what their docs reach for. Rows are dicts, so the template indexes them
+(``r['id']``): ``r.id`` would make Jinja2 try ``getattr`` first on every
+lookup, which roughly doubles its render time. ``bench.py`` checks that all targets produce
 the same document before it measures anything.
 
 Standard library only: imported from every target's virtual environment.
@@ -61,11 +63,11 @@ PAGE_TEMPLATE = (
     '<table class="table"><thead><tr><th>SKU</th><th>Name</th><th>Description</th>'
     "<th>Price</th><th>Status</th><th></th></tr></thead><tbody>"
     "{% for r in rows %}"
-    '<tr id="row-{{ r.id }}" class="row row-{{ r.status }}">'
-    '<td class="mono">{{ r.sku }}</td><td>{{ r.name }}</td><td class="muted">{{ r.desc }}</td>'
-    '<td class="num">${{ r.price }}</td>'
-    '<td><span class="badge badge-{{ r.status }}">{{ r.status }}</span></td>'
-    '<td><a href="/products/{{ r.id }}" class="btn btn-sm">Edit</a></td></tr>'
+    '<tr id="row-{{ r["id"] }}" class="row row-{{ r["status"] }}">'
+    '<td class="mono">{{ r["sku"] }}</td><td>{{ r["name"] }}</td><td class="muted">{{ r["desc"] }}</td>'
+    '<td class="num">${{ r["price"] }}</td>'
+    '<td><span class="badge badge-{{ r["status"] }}">{{ r["status"] }}</span></td>'
+    '<td><a href="/products/{{ r["id"] }}" class="btn btn-sm">Edit</a></td></tr>'
     "{% endfor %}"
     '</tbody></table></main><footer class="footer"><p>50 products</p></footer></body></html>'
 )
