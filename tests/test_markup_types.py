@@ -383,6 +383,10 @@ class TestThreads:
 
 
 _FREE_THREADED = not getattr(sys, "_is_gil_enabled", lambda: True)()
+# Strings become immortal by interning, on any free-threaded build. Other
+# objects only where Py_ssize_t can hold the immortal refcount (64-bit).
+_IMMORTAL_STRINGS = _FREE_THREADED
+_IMMORTAL_OBJECTS = _FREE_THREADED and sys.maxsize > 2**32
 _is_immortal = getattr(sys, "_is_immortal", None)
 
 
@@ -398,26 +402,19 @@ class TestSharedObjectsAreImmortal:
     """
 
     @staticmethod
-    def _held(tag: Tag) -> list[object]:
-        return [
-            tag,
-            tag.empty,
-            tag.tag_start,
-            tag.tag_start_no_attrs,
-            tag.closing_tag,
-            tag.no_children_close,
-            tag.empty_html,
-        ]
+    def _check(tag: Tag) -> None:
+        assert _is_immortal is not None
+        assert _is_immortal(tag) == _IMMORTAL_OBJECTS, tag
+        assert _is_immortal(tag.empty) == _IMMORTAL_OBJECTS, tag
+        strings = (tag.tag_start, tag.tag_start_no_attrs, tag.closing_tag)
+        assert all(_is_immortal(s) == _IMMORTAL_STRINGS for s in strings), tag
+        if _IMMORTAL_STRINGS:  # "/>" may be an immortal constant with the GIL
+            assert _is_immortal(tag.no_children_close), tag
+            assert _is_immortal(tag.empty_html), tag
 
     def test_a_tag_and_what_it_holds(self):
-        assert _is_immortal is not None
         for tag in (Tag("x-immortal-check"), VoidTag("x-void-check"), h.Div, h.Br):
-            if _FREE_THREADED:
-                assert all(_is_immortal(obj) for obj in self._held(tag)), tag
-            else:
-                assert not _is_immortal(tag)
-        if not _FREE_THREADED:
-            assert not _is_immortal(Tag("x-gil-check").closing_tag)
+            self._check(tag)
 
     def test_tags_stay_immortal_after_their_thread_exits(self):
         # A GC object made immortal without being untracked turns mortal
@@ -435,8 +432,7 @@ class TestSharedObjectsAreImmortal:
         gc.collect()
         gc.collect()
         for tag in made:
-            held = self._held(tag)
-            assert all(_is_immortal(obj) == _FREE_THREADED for obj in held), tag
+            self._check(tag)
 
     def test_a_python_subclass_keeps_a_mortal_tag(self):
         # super().__init__() holds a second reference to self, and only a
@@ -466,9 +462,9 @@ class TestSharedObjectsAreImmortal:
             assert classes("imm-a", "imm-b") is result
         # () is immortal on every build: look at a key with tokens in it.
         key, cached = next(kv for kv in attributes._CLASSES_CACHE.items() if kv[0])
-        assert _is_immortal(cached) == _FREE_THREADED
-        assert _is_immortal(cached.rendered) == _FREE_THREADED
-        assert _is_immortal(key) == _FREE_THREADED
+        assert _is_immortal(cached) == _IMMORTAL_OBJECTS
+        assert _is_immortal(cached.rendered) == _IMMORTAL_STRINGS
+        assert _is_immortal(key) == _IMMORTAL_OBJECTS
 
     def test_a_dynamic_attribute_name_is_copied_into_the_cache(self):
         assert _is_immortal is not None
@@ -486,7 +482,7 @@ class TestSharedObjectsAreImmortal:
 
         assert footer() is footer()
         assert footer() == SafeString("<footer><p>Made with Stario</p></footer>")
-        assert _is_immortal(footer()) == _FREE_THREADED
+        assert _is_immortal(footer()) == _IMMORTAL_OBJECTS
 
 
 class TestRawTextChecks:
