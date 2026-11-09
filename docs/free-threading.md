@@ -344,6 +344,56 @@ Thus a reader never holds a borrowed pointer to an entry that another
 thread frees. Cython's `dict.get` is not enough: it borrows the value,
 then takes a reference. Keep all three rules if you touch a cache.
 
+A fourth rule is for speed, not safety: on a free-threaded build the
+dicts and everything they store are immortal (next section). A new value
+is made immortal before `setdefault` publishes it, and a key the caller
+passed in goes through `stario_cache_copy`, which stores an immortal
+private copy instead.
+
+### Shared markup objects are immortal
+
+Free-threaded CPython keeps two refcounts per object: the owning thread
+updates its own without atomics, and every other thread does an atomic
+add on the shared one, which sits on the same cache line. An object that
+every thread increfs for every element becomes one cache line that every
+core fights over. Each `Element` holds its `Tag`, and render increfed the
+tag's `tag_start` / `closing_tag` strings, so two threads building their
+own trees from `h.Td` / `h.Tr` did 0.3x the work of one.
+
+On a free-threaded build these objects are therefore immortal, and
+`Py_INCREF` / `Py_DECREF` on them only read the refcount:
+
+- every `Tag`, its strings and its `empty` element, at the end of
+  `Tag.__init__`;
+- the three cache dicts above and what they store (`classes()` fragments,
+  validated attribute names, `prefix-key` names). Cython increfs a
+  module-level object each time it reads one, so the dicts need it too;
+- the `SafeString` that a `@baked` function without parameters returns.
+  `@baked` static text is written into the generated function as string
+  literals: CPython makes code constants immortal on free-threaded builds.
+
+`stario_immortalize` (in `markup.pyx`) uses `Py_SET_REFCNT` past
+`UINT32_MAX`, the public route to the same fields CPython's own
+immortalization sets. It only touches an object the current thread owns
+and has not shared yet: making an object immortal while another thread
+changes its refcount can leave it mortal with a wrong count. That is why
+caches copy a caller's string or tuple instead of immortalizing it. With
+the GIL both helpers do nothing.
+
+The cost: an immortal object is never freed. On a free-threaded build a
+`Tag` lives as long as the process, so make tags at import, not per
+request. The caches stay bounded by their caps.
+
+The same contention hits pure Python on a hot path. A module-level object
+that is not a function, class, or module (a compiled regex, a dict) is
+increfed on every load, from every thread. `styles()` checks for
+`:;{}\` against string literals for that reason.
+
+`benchmarks/html/micro.py` ends with a 2-thread check that each thread
+builds and renders its own tree; pin it to two idle CPUs
+(`taskset -c 0,1`) after touching markup. Below 1.7x, something every
+thread reads is being written again.
+
 The same goes for walking a caller's mapping or list. Another thread can
 change it during a tag call, or the attribute-name validator can run
 Python code in the middle of the walk. Iterate with

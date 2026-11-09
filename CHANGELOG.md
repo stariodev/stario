@@ -4,6 +4,36 @@ All notable changes to Stario are documented in this file.
 
 The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Performance
+
+- Building and rendering `h.*` trees scales across `STARIO_THREADS` on
+  free-threaded Python. Each element holds a reference to its `Tag`, and
+  render increfed the tag's strings, so every thread wrote the refcounts of
+  the same `h.Td` / `h.Tr` objects: on 3.14t, 2 threads building their own
+  50-row table did 0.3x the work of one, and the server's HTML page served
+  fewer requests on 2 threads than on 1. On a free-threaded build a `Tag`,
+  its strings and its empty element are now immortal (Py_INCREF / Py_DECREF
+  only read them), as are the `classes()` / attribute-name / `data()`
+  caches and the entries they store, the result of a `@baked` function
+  without parameters, and `@baked` static text (now string literals in the
+  generated code). `styles()` checks for `:;{}\` with string literals
+  instead of a module-level regex. On 2 CPUs, building and rendering a
+  50-row table on private data scales 1.97x (was 0.31x), the same table
+  with `classes()` and attributes 1.92x (was 0.60x), and a 50-row page
+  served over HTTP does 15.2k requests/s on 2 threads against about 8k on
+  1 (was 5.9k on 2). Builds with the GIL are unchanged.
+  `benchmarks/html/micro.py` ends with this 2-thread check (`--threads`
+  runs only that).
+
+### Changed
+
+- On a free-threaded build a `Tag` is never freed. Create tags once, at
+  import (`Widget = Tag("my-widget")`), not per request. Cache entries stay
+  bounded by the caches' caps; a cache never immortalizes the caller's own
+  string or tuple, only a private copy.
+
 ## 5.7.0 - 2026-11-08
 
 ### Added

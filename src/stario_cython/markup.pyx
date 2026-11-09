@@ -108,10 +108,75 @@ cdef extern from *:
     static const unsigned char stario_text_escape[256] = {
         ['&'] = 1, ['<'] = 1, ['>'] = 1,
     };
+
+    /* Free-threaded builds: make a new object immortal, so that Py_INCREF
+       and Py_DECREF on it from any thread only read its refcount instead of
+       writing one cache line that every core then fights over. Every
+       element holds a reference to its Tag, so without this each thread
+       building `h.Td(...)` writes the shared `h.Td` twice per element.
+       Py_SET_REFCNT past UINT32_MAX from the owning thread is the public
+       way to get there: it sets the same fields as CPython's own
+       immortalization. A no-op with the GIL, and for an object that another
+       thread owns (its owner may be writing the local refcount right now).
+       Call it only on an object this thread made and has not shared yet.
+       An immortal object is never freed: only objects that live as long as
+       the process anyway go through here (a Tag and what it holds, the
+       caches and their entries, which are never removed). */
+    static void stario_immortalize(PyObject* op) {
+    #ifdef Py_GIL_DISABLED
+        if (!_Py_IsImmortal(op) && _Py_IsOwnedByCurrentThread(op)) {
+            Py_SET_REFCNT(op, (Py_ssize_t)UINT32_MAX + 1);
+        }
+    #else
+        (void)op;
+    #endif
+    }
+
+    /* The object to store in a cache that every thread reads (new
+       reference). Free-threaded builds: an immortal private copy of a str
+       or tuple, so a hit writes no refcount, neither on the value it hands
+       out nor on the key that the dict increfs while comparing. Only a
+       copy is made immortal: the caller's object may be visible to other
+       threads already, and immortalizing an object while another thread
+       changes its refcount could leave it mortal with a wrong count. The
+       object itself when it is immortal already, and with the GIL. */
+    static PyObject* stario_cache_copy(PyObject* op) {
+    #ifdef Py_GIL_DISABLED
+        PyObject* copy;
+        Py_ssize_t i, n;
+        if (_Py_IsImmortal(op)) {
+            return Py_NewRef(op);
+        }
+        if (PyUnicode_CheckExact(op)) {
+            copy = PyUnicode_FromKindAndData(
+                PyUnicode_KIND(op), PyUnicode_DATA(op), PyUnicode_GET_LENGTH(op));
+        }
+        else if (PyTuple_CheckExact(op)) {
+            n = PyTuple_GET_SIZE(op);
+            copy = PyTuple_New(n);
+            if (copy != NULL) {
+                for (i = 0; i < n; i++) {
+                    PyTuple_SET_ITEM(copy, i, Py_NewRef(PyTuple_GET_ITEM(op, i)));
+                }
+            }
+        }
+        else {
+            return Py_NewRef(op);
+        }
+        if (copy != NULL) {
+            stario_immortalize(copy);
+        }
+        return copy;
+    #else
+        return Py_NewRef(op);
+    #endif
+    }
     """
     int stario_disallow_instantiation(object t) except -1
     int stario_dict_get_ref(object d, object key, PyObject** out) except -1
     const unsigned char stario_text_escape[256]
+    void stario_immortalize(object op)
+    object stario_cache_copy(object op)
 
 
 # ---------------------------------------------------------------------------
@@ -129,12 +194,17 @@ cdef bint _bound = False
 # Bounded by refusing new entries past the cap, never by clearing: a clear
 # in place could free a key another thread is still reading (free-threaded
 # builds), and the dict object itself is never replaced for the same reason.
+# Free-threaded builds store immortal copies (stario_cache_copy), and the
+# cache dicts are immortal too: Cython increfs a module-level object each
+# time it reads one, and every thread reads these on every call.
 cdef dict _VALID_KEYS = {}
+stario_immortalize(_VALID_KEYS)
 cdef int _VALID_KEYS_MAX = 4096
 
 # Rendered ``class`` fragments keyed by token tuples of str / None / False
 # (Tailwind lists repeat). Same bound rule. ``stario.markup.attributes`` exposes the dict.
 cdef dict _classes_cache = {}
+stario_immortalize(_classes_cache)
 classes_cache = _classes_cache
 CLASSES_CACHE_MAX = 1024
 cdef Py_ssize_t _CLASSES_CACHE_MAX = 1024
@@ -457,6 +527,18 @@ cdef inline SafeString _safe(str s):
     return SafeString.__new__(SafeString, s)
 
 
+def shared_safe_string(str rendered not None):
+    """A ``SafeString`` that every call returns (``@baked`` without parameters).
+
+    On free-threaded builds it is immortal and holds an immortal copy of
+    ``rendered``, so threads returning it write no refcount; it is never
+    freed. With the GIL it is a plain ``SafeString``.
+    """
+    cdef SafeString s = SafeString.__new__(SafeString, stario_cache_copy(rendered))
+    stario_immortalize(s)
+    return s
+
+
 # ---------------------------------------------------------------------------
 # Errors shared by Tag.__call__ and render
 
@@ -589,7 +671,8 @@ cdef inline object _valid_key(object raw_key):
     if len(_VALID_KEYS) < _VALID_KEYS_MAX:
         # setdefault: the first insert wins and is never replaced, so no
         # reader can see an entry freed under it.
-        _VALID_KEYS.setdefault(key, key)
+        key = stario_cache_copy(key)
+        key = _VALID_KEYS.setdefault(key, key)
     return key
 
 
@@ -1142,6 +1225,10 @@ cdef class Tag:
 
     Calling the instance (`h.Div(...)`, `h.P("hi")`, etc.) builds an
     `Element`; see `Tag.__call__`.
+
+    Create tags once, at import. On a free-threaded build a tag is
+    immortal, so threads building elements from it never write its
+    refcount, and it is never freed.
     """
 
     cdef readonly str name
@@ -1210,6 +1297,13 @@ cdef class Tag:
         e.tag = self
         self.empty = e
         self.name = name  # last: marks the tag as ready
+        stario_immortalize(self.tag_start)
+        stario_immortalize(self.tag_start_no_attrs)
+        stario_immortalize(self.closing_tag)
+        stario_immortalize(self.no_children_close)
+        stario_immortalize(self.empty_html)
+        stario_immortalize(e)
+        stario_immortalize(self)
 
     def _repr(self):
         return f"Tag(name='{self.name}', empty='{self.empty_mode}')"
@@ -1517,7 +1611,13 @@ def classes(*tokens):
 
     result = Attrs.__new__(Attrs, ' class="' + " ".join(rendered) + '"')
     if cacheable and len(_classes_cache) < _CLASSES_CACHE_MAX:
-        result = _classes_cache.setdefault(tokens, result)
+        # Every thread gets the cached fragment, and each element built
+        # with it holds its string: immortal on free-threaded builds (see
+        # stario_immortalize). Both are new and private until setdefault
+        # publishes them; one that loses the insert race is never freed.
+        stario_immortalize((<Attrs>result).rendered)
+        stario_immortalize(result)
+        result = _classes_cache.setdefault(stario_cache_copy(tokens), result)
     return result
 
 
@@ -1526,26 +1626,32 @@ def classes(*tokens):
 # clear; insert with setdefault (the first value wins and is never replaced)
 # and read with stario_dict_get_ref.
 cdef dict _PREFIXED_KEYS = {}
+stario_immortalize(_PREFIXED_KEYS)
 
 
 cdef object _prefixed_key(object prefix, object key):
     cdef PyObject* hit
     cdef object names = None
     cdef object wire_key
+    cdef bint cached = True
     if stario_dict_get_ref(_PREFIXED_KEYS, prefix, &hit):
         names = <object>hit
         Py_DECREF(names)
-    else:
+    elif len(_PREFIXED_KEYS) < 64:
+        # New and private until setdefault publishes it (see classes).
         names = {}
-        if len(_PREFIXED_KEYS) < 64:
-            names = _PREFIXED_KEYS.setdefault(prefix, names)
-    if type(key) is str and stario_dict_get_ref(names, key, &hit):
+        stario_immortalize(names)
+        names = _PREFIXED_KEYS.setdefault(stario_cache_copy(prefix), names)
+    else:
+        cached = False
+    if cached and type(key) is str and stario_dict_get_ref(names, key, &hit):
         wire_key = <object>hit
         Py_DECREF(wire_key)
         return wire_key
     wire_key = prefix + "-" + _valid_key(key)
-    if len(names) < _VALID_KEYS_MAX:
-        wire_key = (<dict>names).setdefault(key, wire_key)
+    if cached and len(names) < _VALID_KEYS_MAX:
+        stario_immortalize(wire_key)
+        wire_key = (<dict>names).setdefault(stario_cache_copy(key), wire_key)
     return wire_key
 
 
