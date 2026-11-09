@@ -11,28 +11,38 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 - Building and rendering `h.*` trees scales across `STARIO_THREADS` on
   free-threaded Python. Each element holds a reference to its `Tag`, and
   render increfed the tag's strings, so every thread wrote the refcounts of
-  the same `h.Td` / `h.Tr` objects: on 3.14t, 2 threads building their own
-  50-row table did 0.3x the work of one, and the server's HTML page served
-  fewer requests on 2 threads than on 1. On a free-threaded build a `Tag`,
-  its strings and its empty element are now immortal (Py_INCREF / Py_DECREF
-  only read them), as are the `classes()` / attribute-name / `data()`
-  caches and the entries they store, the result of a `@baked` function
-  without parameters, and `@baked` static text (now string literals in the
-  generated code). `styles()` checks for `:;{}\` with string literals
-  instead of a module-level regex. On 2 CPUs, building and rendering a
-  50-row table on private data scales 1.97x (was 0.31x), the same table
-  with `classes()` and attributes 1.92x (was 0.60x), and a 50-row page
-  served over HTTP does 15.2k requests/s on 2 threads against about 8k on
-  1 (was 5.9k on 2). Builds with the GIL are unchanged.
-  `benchmarks/html/micro.py` ends with this 2-thread check (`--threads`
-  runs only that).
+  the same `h.Td` / `h.Tr` objects, and an HTML page served fewer requests
+  on 2 threads than on 1. On a free-threaded build a `Tag` and its empty
+  element are now immortal (Py_INCREF / Py_DECREF only read them), and so
+  are its strings (interned), the `classes()` / attribute-name / `data()`
+  caches and their entries, `@baked` static text, and the result of a
+  `@baked` function without parameters. Render no longer takes references
+  on the tree it walks. Measured on 3.14t against 5.7.0:
+  - Building and rendering a 50-row table on per-thread data, on 2 CPUs:
+    1.9-2.2x the throughput of one thread (was 0.3-0.45x); with
+    `classes()` and attributes, 2.0x (was 0.6x).
+  - A 50-row page with classes and attributes on 4 CPUs: 3.8x at 4 threads
+    (was 0.36x).
+  - Over HTTP, that page does 16.5k requests/s on 2 threads against 8.7k
+    on 1 (was 5.7k on 2, 8.1k on 1).
+
+  Builds with the GIL behave as before. Their single-thread timings are
+  unchanged within noise, and render is about 7% faster on a small tree.
+- `styles()` checks for `:;{}\` with string literals instead of a
+  module-level regex (which free-threaded CPython increfs on every load).
+  About 7% faster with the GIL.
 
 ### Changed
 
-- On a free-threaded build a `Tag` is never freed. Create tags once, at
-  import (`Widget = Tag("my-widget")`), not per request. Cache entries stay
-  bounded by the caches' caps; a cache never immortalizes the caller's own
-  string or tuple, only a private copy.
+- On a free-threaded build a `Tag` and a `@baked` template are never
+  freed. Create them once, at import (`Widget = Tag("my-widget")`), not per
+  request. Cache entries stay bounded by the caches' caps. A Python
+  subclass of `Tag` stays mortal (it works, but does not scale as well), and
+  a 32-bit build makes nothing immortal.
+- An `Element`, `SafeString` or `Attrs` kept in a module-level variable and
+  put in every page is still increfed on each use, from every thread. For
+  static fragments that every request repeats, use a `@baked` function
+  without parameters or `classes()`: see `docs/free-threading.md`.
 
 ## 5.7.0 - 2026-11-08
 
