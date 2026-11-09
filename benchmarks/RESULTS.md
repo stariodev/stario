@@ -27,7 +27,7 @@ htpy 26.5.1 · dominate 3.1.0 · fastcore 2.2.39 · tdom 0.1.20.
 | 10,000 users, one page view each per 2 s, one core | **all served**: p50 3.4 ms, p99 86 ms, 0 errors | none keep up (1.1–2.5k req/s, seconds of latency, thousands of errors) | |
 | SSE fan-out to 5,000 clients | p50 54 ms, 0.19 CPU, 134 MB | on par (Sanic 55 ms, 0.18 CPU, 111 MB) | 70–80 ms |
 | Template rendering (50-row page, no server) | 17 µs (`@baked`), 44 µs (naive tree) | 61 µs (mako) | 99 µs (jinja2), ~1 ms (htpy, dominate, fastcore, tdom) |
-| 2 cores (free-threaded vs multi-process) | plaintext 136k, mix 13.2k | 72k plaintext (Granian), 10.1k mix | page barely scales (see below) |
+| 2 cores (free-threaded vs multi-process) | 5.7.0: page doesn't scale (0.94x). Immortalization branch: page 10.6k, mix 21.6k | page 5.9k, mix 11.7k (Granian, Robyn) | branch: 1.8x the best two-process setup |
 
 On one core, Stario is **3–7x faster than FastAPI** and 1.4–2.7x faster
 than the fastest other combination on every endpoint. On HTML pages, the
@@ -35,7 +35,8 @@ thing a hypermedia app actually serves, it is 2.6x faster than every other
 framework, and up to 3.8x with `@baked`. Its weak spots: tail latency at
 1,024+ concurrent connections (a uvloop scheduling issue it shares with
 Uvicorn), and HTML building on free-threaded Python, which does not scale
-across threads today. Both are covered under "Where Stario is weak".
+across threads in 5.7.0. A branch fixes that: two-thread page throughput goes
+from 0.94x to 1.69x. Both are covered under "Where Stario is weak".
 
 ## What changed in the benchmarks, and why
 
@@ -229,19 +230,70 @@ Two workers on CPUs 0–1. Stario uses the free-threaded build with
 `STARIO_THREADS=2` (two event loops, one process, one shared `Relay`); the
 others use two processes.
 
+**Update (same day, afternoon):** branch `claude/inspiring-davinci-ydskh0`
+makes shared markup objects immortal on free-threaded builds (Tags, their
+cached strings, the `classes()` / attribute / `data()` caches, `@baked`
+static parts) and stops render from increfing the tree it walks. It was
+measured against 5.7.0 back to back on the same machine, swapping only the
+wheel. The machine ran ~15% faster in the afternoon than in the morning run
+above, so compare within this table only.
+
 | Target | plaintext | page | mix | p99 page |
 | --- | ---: | ---: | ---: | ---: |
-| **stario-ft × 2** | **136,121** | **5,468** | **13,168** | **44 ms** |
-| stario-ft × 1 (reference) | 69,377 | 5,159 | 9,935 | 63 ms |
+| **stario-ft × 2, branch** | **133,681** | **10,617** | **21,561** | **21 ms** |
+| stario-ft × 1, branch | 73,194 | 6,270 | 12,591 | 32 ms |
+| stario-ft × 2, 5.7.0 | 142,381 | 5,856 | 15,069 | 33 ms |
+| stario-ft × 1, 5.7.0 | 68,964 | 6,210 | 12,332 | 33–58 ms |
+| blacksheep-granian × 2 | 75,537 | 5,714 | 11,672 | 36 ms |
+| robyn × 2 | 65,435 | 5,879 | 11,667 | 37 ms |
+| sanic × 2 | 49,702 | 5,883 | 11,291 | 36 ms |
+| fastapi × 2 | 26,262 | 5,152 | 8,879 | 46 ms |
+
+5.7.0 rows are the mean of two runs (before and after the branch run; they
+agree within 4%). Scaling from one thread to two:
+
+| | plaintext | page | mix |
+| --- | ---: | ---: | ---: |
+| 5.7.0 | 2.06x | **0.94x** | 1.22x |
+| branch | 1.83x | **1.69x** | 1.71x |
+
+With the branch, two Stario threads serve 1.8x the HTML pages and 1.85x the
+mix of the best two-process setup (Granian, Robyn, Sanic), in one process
+with one shared `Relay`. The plaintext dip (134k vs 142k) is within this
+VM's noise. The markup change does not touch that path, and two `wrk`
+threads are close to their limit at that rate.
+
+Why page scales 1.69x and not ~1.9x: `/page` reads the module-level `ROWS`
+dicts and their strings from both threads. On 3.14t, plain Python over
+shared dicts barely scales (1.13x in-process, no Stario involved), so this
+benchmark caps the result, not Stario. In-process with per-thread data,
+build+render on the branch scales 1.81x (5.7.0: 0.33x), and an
+attribute-heavy tree 2.21x (5.7.0: 0.55x). An app that loads its rows per
+request, from a database, gets the per-thread case.
+
+The original morning run, 5.7.0 only:
+
+| Target | plaintext | page | mix | p99 page |
+| --- | ---: | ---: | ---: | ---: |
+| stario-ft × 2 | 136,121 | 5,468 | 13,168 | 44 ms |
+| stario-ft × 1 | 69,377 | 5,159 | 9,935 | 63 ms |
 | blacksheep-granian × 2 | 72,186 | 4,458 | 10,103 | 49 ms |
 | sanic × 2 | 44,379 | 5,087 | 9,944 | 57 ms |
 | robyn × 2 | 60,404 | 4,875 | 8,567 | 63 ms |
 | fastapi × 2 | 24,520 | 4,256 | 7,364 | 64 ms |
 
-Plaintext scales 1.96x on the second thread. `/page` scales 1.06x while both
-cores sit at 100%, and that is the most important finding of this run.
-Free-threaded single-thread cost against the GIL build: −11% plaintext,
-−23% page.
+**Single-core regression check (GIL 3.14, throughput phase, same afternoon):**
+
+| | plaintext | json | params | validate | page | page-baked |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 5.7.0 | 84,502 | 74,464 | 63,470 | 46,561 | 7,389 | 11,182 |
+| branch | 85,774 | 71,752 | 66,465 | 47,900 | 7,533 | 12,244 |
+| change | +1.5% | −3.6% | +4.7% | +2.9% | +1.9% | +9.5% |
+
+All within noise except, possibly, `@baked` (+9.5%), which is consistent
+with render no longer increfing. Both builds render byte-identical pages.
+The free-threaded single-thread cost against the GIL build is now 15–17%
+on both 5.7.0 and the branch.
 
 ## HTML generation, no server
 
@@ -275,28 +327,27 @@ list is rendered by every library and checked to be the same document.
 
 Ordered by expected impact.
 
-1. **HTML building does not scale on free-threaded Python.** In an isolated
-   test with per-thread data, plain Python scales 1.96x on two threads, but
-   `h.*` tree building *anti-scales*: two threads together reach 0.35x of
-   one thread. The cause is reference-count contention on shared objects.
-   Every `Element` holds a reference to its `Tag` (`h.Td`, `h.Tr`, …), so
-   both threads hit the same refcount cache lines on every element.
-   Making the `h.*` tags immortal (a ctypes hack, only to measure) took
-   two-thread building from 0.30x to 1.22x. Also making the `h` namespace,
-   `render_bytes`, and the `Element`/`Tag` types immortal took building to
-   ~2x. Rendering (`render_bytes` on a private tree) still only reaches
-   ~1.2x, so the render path has a second shared hotspot. Angles:
-   - On 3.14t, immortalize the module-level tag singletons, or enable
-     deferred refcounting with `PyUnstable_Object_EnableDeferredRefcount`.
-     Or have `Element` keep a borrowed pointer to its tag, since tags live
-     for the life of the process.
-   - Profile `render_bytes` under two threads (`perf c2c`) to find the
-     second shared write: a module-level cache, scratch buffer, or counter.
-   - Add a two-thread scaling check to `html/micro.py` so this cannot
-     regress silently.
-
-   This is the biggest lever for the free-threaded story: plaintext already
-   scales; HTML is what Stario apps serve.
+1. **HTML building did not scale on free-threaded Python. Fixed on branch
+   `claude/inspiring-davinci-ydskh0`.** On 5.7.0, `h.*` tree building
+   *anti-scales*: two threads with per-thread data together reach 0.33x of
+   one thread, while plain Python scales 1.89x. The cause was reference-count
+   contention on shared objects: every `Element` referenced its `Tag`,
+   render increfed each Tag's cached strings, and Cython increfed the
+   module-level cache dicts on every `classes()` call. The branch makes
+   those objects immortal on free-threaded builds and reads them borrowed
+   in render. Measured here: in-process build+render 0.33x → 1.81x on two
+   threads; server `/page` 0.94x → 1.69x (capped by this benchmark's shared
+   module-level data, see "Two cores"); mix 1.22x → 1.71x. No regression on
+   the GIL build. Remaining limits:
+   - A module-level `Element`, `SafeString`, or `Attrs` reused by every
+     request still has its refcount written on each use (~0.7x on two
+     threads, per the branch author). This benchmark's `/page` has no such
+     constants (nav links are built per call), so it is not affected, but
+     the docs should steer users toward parameterless `@baked` fragments
+     for shared constants.
+   - Shared plain-Python data (module-level dicts and lists read by every
+     request) is CPython's limit, not Stario's.
+   - Still to do: add a two-thread scaling case to `html/micro.py`.
 2. **Tail latency at 1,024+ connections.** With uvloop, a minority of
    connections starve for seconds (p99 2–3 s, ~100 `wrk` timeouts per run)
    while p50 stays low. The same Stario on stdlib asyncio is perfectly fair
@@ -325,10 +376,10 @@ Ordered by expected impact.
    for 15% fewer bytes. Brotli levels 2–3 are usually much cheaper for
    similar ratios on 16 KB of HTML. Benchmark them as the dynamic default
    (keep high levels for precompressed `Files`).
-6. **Free-threaded single-thread cost**: 3.14t is 11% slower on plaintext
-   and 23% slower on `/page` than the GIL build. Part of that is CPython;
-   part may be the same atomic refcounts as item 1, so fixing item 1 should
-   recover some of it.
+6. **Free-threaded single-thread cost**: 3.14t is 11–18% slower on
+   plaintext and 16–23% slower on `/page` than the GIL build (morning and
+   afternoon runs). The immortalization branch does not change it on one
+   thread (−17% on page, either build), so this part is CPython itself.
 7. **Small-response throughput is syscall-bound.** Stario's own cost is
    ~1.35 µs of the ~13 µs per plaintext request, so more Python-level
    micro-optimization of the request path has little left to give. The
