@@ -353,7 +353,7 @@ def _generate_splice_function(
                         parts_src.append(slot_name(part))
                     else:
                         literal_name = f"__stario_raw_{plan_index}_{part_index}"
-                        namespace[literal_name] = shared_str(part)
+                        namespace[literal_name] = shared_str(cast(str, part))
                         parts_src.append(literal_name)
                 expr_parts.append(
                     f"__stario_raw({raw_slot.tag!r}, ({', '.join(parts_src)},))"
