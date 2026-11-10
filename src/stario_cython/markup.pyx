@@ -109,6 +109,10 @@ cdef extern from *:
         ['&'] = 1, ['<'] = 1, ['>'] = 1,
     };
 
+    /* type(o) as a borrowed pointer: Cython's type(o) takes a reference,
+       a refcount write on the type for every argument or node. */
+    #define stario_type(o) ((PyObject*)Py_TYPE(o))
+
     /* Free-threaded builds: make an object immortal, so that Py_INCREF and
        Py_DECREF on it from any thread only read its refcount instead of
        writing one cache line that every core then fights over. Every
@@ -226,6 +230,7 @@ cdef extern from *:
     int stario_disallow_instantiation(object t) except -1
     int stario_dict_get_ref(object d, object key, PyObject** out) except -1
     const unsigned char stario_text_escape[256]
+    PyObject* stario_type(PyObject* o)
     int stario_immortalize(object op)
     object stario_shared_str(object s)
     object stario_shared_tuple(object t)
@@ -1512,7 +1517,8 @@ cdef class Tag:
         cdef bint has_children = False
         cdef bint has_attrs = False
         cdef bint has_mapping = False
-        cdef object arg, arg_type
+        cdef PyObject* arg
+        cdef PyObject* arg_type
         cdef object attrs = None
         cdef tuple children = None
         cdef Element e
@@ -1522,30 +1528,36 @@ cdef class Tag:
             return self.empty
 
         for i in range(n):
-            arg = <object>PyTuple_GET_ITEM(args, i)
-            arg_type = type(arg)
+            # Borrowed: ``args`` holds every item for the whole call, and
+            # the scan only compares pointers (no refcount writes).
+            arg = PyTuple_GET_ITEM(args, i)
+            arg_type = stario_type(arg)
             # Child content first: it is what most calls carry. A @baked
             # parameter is child content too while the builder runs.
             if (
-                arg_type is str
-                or arg_type is Element
-                or arg_type is SafeString
-                or arg_type is int
-                or arg_type is float
-                or arg_type is list
-                or arg_type is _BakeSlot
+                arg_type == <PyObject*>str
+                or arg_type == <PyObject*>Element
+                or arg_type == <PyObject*>SafeString
+                or arg_type == <PyObject*>int
+                or arg_type == <PyObject*>float
+                or arg_type == <PyObject*>list
+                or arg_type == <PyObject*>_BakeSlot
             ):
                 pass
-            elif arg is None:
+            elif arg == <PyObject*>None:
                 continue
-            elif arg_type is Attrs:
+            elif arg_type == <PyObject*>Attrs:
                 if has_children:
                     raise _attrs_before_children_error(self._repr())
                 has_attrs = True
                 continue
             elif (
-                arg_type is dict
-                or (arg_type is not bool and arg_type is not tuple and isinstance(arg, _Mapping))
+                arg_type == <PyObject*>dict
+                or (
+                    arg_type != <PyObject*>bool
+                    and arg_type != <PyObject*>tuple
+                    and isinstance(<object>arg, _Mapping)
+                )
             ):
                 if has_children:
                     raise _attrs_before_children_error(self._repr())
@@ -1553,7 +1565,7 @@ cdef class Tag:
                 has_mapping = True
                 continue
             else:
-                raise _bad_child_error(arg, self._repr())
+                raise _bad_child_error(<object>arg, self._repr())
             if not has_children:
                 has_children = True
                 first = i
