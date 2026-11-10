@@ -57,6 +57,7 @@ cdef extern from "Python.h":
     const char* PyUnicode_AsUTF8AndSize(object o, Py_ssize_t* size) except NULL
     object PyUnicode_DecodeUTF8(const char* s, Py_ssize_t size, const char* errors)
     object PyBytes_FromStringAndSize(const char* v, Py_ssize_t len)
+    object PyUnicode_AsUTF8String(object o)
     object PyUnicode_FromObject(object o)
     Py_ssize_t PyDict_Size(object d)
 
@@ -119,6 +120,130 @@ cdef extern from *:
         {[38] = 4, [60] = 3, [62] = 3, [34] = 5},   /* and " */
         {[38] = 4, [60] = 3, [62] = 3, [39] = 4},   /* and ' */
     };
+
+    /* A clean prefix of p[0:n] (bytes: Latin-1 or UTF-8): n when nothing
+       in it needs escaping in `mode`, else a length at or before the first
+       byte that does (the start of the 8-byte step that holds it; callers
+       rescan from there). Eight bytes a step (SWAR), two exact zero-byte
+       tests per step: < and > differ in bit 1 only, so (x | 0x02) ^ 0x3e
+       is zero for both; & is x ^ 0x26, and its partner in the quote modes
+       differs in one bit too (" is 0x22, ' is 0x27). The tail goes byte
+       by byte. */
+    static inline Py_ssize_t stario_clean_run_mode(const unsigned char* p,
+                                                   Py_ssize_t n, int mode) {
+        const uint64_t ones = 0x0101010101010101ULL;
+        const uint64_t highs = 0x8080808080808080ULL;
+        const uint64_t amp_or = ones * (mode == 1 ? 0x04 : mode == 2 ? 0x01 : 0x00);
+        const uint64_t amp_eq = ones * (mode == 2 ? 0x27 : 0x26);
+        const unsigned char* table = stario_escape_extra[mode];
+        Py_ssize_t i = 0;
+        uint64_t x, a, g;
+        for (; i + 8 <= n; i += 8) {
+            memcpy(&x, p + i, 8);
+            a = (x | amp_or) ^ amp_eq;
+            g = (x | (ones * 0x02)) ^ (ones * 0x3e);
+            if ((((a - ones) & ~a) | ((g - ones) & ~g)) & highs) {
+                return i;  /* the run ends somewhere in these 8 bytes */
+            }
+        }
+        for (; i < n; i++) {
+            if (table[p[i]]) {
+                break;
+            }
+        }
+        return i;
+    }
+
+    /* The run with no & < or > (text escaping). */
+    static inline Py_ssize_t stario_clean_run(const unsigned char* p, Py_ssize_t n) {
+        return stario_clean_run_mode(p, n, 0);
+    }
+
+    /* The UTF-8 a str already carries (PyUnicode_AsUTF8AndSize made it
+       earlier), or NULL. Builds with the GIL only: on free-threaded builds
+       another thread may be setting the pointer, so they always encode. */
+    static inline const char* stario_cached_utf8(PyObject* s, Py_ssize_t* n) {
+    #if defined(Py_GIL_DISABLED) || defined(Py_LIMITED_API)
+        (void)s; (void)n;
+        return NULL;
+    #else
+        PyCompactUnicodeObject* c;
+        if (!PyUnicode_IS_COMPACT(s) || PyUnicode_IS_ASCII(s)) {
+            return NULL;
+        }
+        c = (PyCompactUnicodeObject*)s;
+        *n = c->utf8_length;
+        return c->utf8;
+    #endif
+    }
+
+    /* One character below 0x80 into d, escaped when `esc` and it is
+       & < or >; returns the bytes written. */
+    static inline Py_ssize_t stario_put_ascii(char* d, unsigned int c, int esc) {
+        if (esc && stario_text_escape[c]) {
+            if (c == 38) {
+                memcpy(d, "&amp;", 5);
+                return 5;
+            }
+            memcpy(d, c == 60 ? "&lt;" : "&gt;", 4);
+            return 4;
+        }
+        d[0] = (char)c;
+        return 1;
+    }
+
+    /* UTF-8 of the n characters at p (a str's data, of `kind`) into d,
+       escaping & < > when `esc`. d needs room for 5 bytes per character
+       when escaping, else `kind + 1` (at most 2, 3 or 4 bytes each).
+       Returns the bytes written, or -1 for a surrogate (which UTF-8
+       cannot encode: the caller lets CPython's encoder raise). This
+       replaces PyUnicode_AsUTF8AndSize for text that is not ASCII, which
+       allocates a UTF-8 copy and keeps it on the str. */
+    static Py_ssize_t stario_utf8_into(char* d, int kind, const void* p,
+                                       Py_ssize_t n, int esc) {
+        Py_ssize_t i, w = 0;
+        Py_UCS4 c;
+        if (kind == PyUnicode_1BYTE_KIND) {
+            const Py_UCS1* s = (const Py_UCS1*)p;
+            for (i = 0; i < n; i++) {
+                c = s[i];
+                if (c < 0x80) {
+                    w += stario_put_ascii(d + w, c, esc);
+                } else {
+                    d[w] = (char)(0xC0 | (c >> 6));
+                    d[w + 1] = (char)(0x80 | (c & 0x3F));
+                    w += 2;
+                }
+            }
+            return w;
+        }
+        for (i = 0; i < n; i++) {
+            c = kind == PyUnicode_2BYTE_KIND ? ((const Py_UCS2*)p)[i]
+                                             : ((const Py_UCS4*)p)[i];
+            if (c < 0x80) {
+                w += stario_put_ascii(d + w, c, esc);
+            } else if (c < 0x800) {
+                d[w] = (char)(0xC0 | (c >> 6));
+                d[w + 1] = (char)(0x80 | (c & 0x3F));
+                w += 2;
+            } else if (c < 0x10000) {
+                if (c >= 0xD800 && c <= 0xDFFF) {
+                    return -1;
+                }
+                d[w] = (char)(0xE0 | (c >> 12));
+                d[w + 1] = (char)(0x80 | ((c >> 6) & 0x3F));
+                d[w + 2] = (char)(0x80 | (c & 0x3F));
+                w += 3;
+            } else {
+                d[w] = (char)(0xF0 | (c >> 18));
+                d[w + 1] = (char)(0x80 | ((c >> 12) & 0x3F));
+                d[w + 2] = (char)(0x80 | ((c >> 6) & 0x3F));
+                d[w + 3] = (char)(0x80 | (c & 0x3F));
+                w += 4;
+            }
+        }
+        return w;
+    }
 
     /* type(o) as a borrowed pointer: Cython's type(o) takes a reference,
        a refcount write on the type for every argument or node. */
@@ -242,6 +367,10 @@ cdef extern from *:
     int stario_dict_get_ref(object d, object key, PyObject** out) except -1
     const unsigned char stario_text_escape[256]
     const unsigned char stario_escape_extra[3][256]
+    Py_ssize_t stario_clean_run(const unsigned char* p, Py_ssize_t n) nogil
+    Py_ssize_t stario_clean_run_mode(const unsigned char* p, Py_ssize_t n, int mode) nogil
+    const char* stario_cached_utf8(object s, Py_ssize_t* n)
+    Py_ssize_t stario_utf8_into(char* d, int kind, const void* p, Py_ssize_t n, int esc) nogil
     PyObject* stario_type(PyObject* o)
     int stario_immortalize(object op)
     object stario_shared_str(object s)
@@ -269,6 +398,13 @@ cdef bint _bound = False
 # time it reads one, and every thread reads these on every call.
 cdef dict _VALID_KEYS = <dict>stario_shared_dict()
 cdef int _VALID_KEYS_MAX = 4096
+# Cache entries live as long as the process (and are immortal on
+# free-threaded builds), so a cap on their number alone does not bound the
+# memory: a name or class list from user data could be megabytes, and 1024
+# such entries would pin gigabytes. Only short strings are remembered;
+# longer ones validate or render on every call.
+cdef Py_ssize_t _CACHE_MAX_LEN = 256
+cdef Py_ssize_t _CLASSES_CACHE_MAX_LEN = 1024
 
 # Rendered ``class`` fragments keyed by token tuples of str / None / False
 # (Tailwind lists repeat). Same bound rule. ``stario.markup.attributes`` exposes the dict.
@@ -331,13 +467,17 @@ cdef object _escape_1byte(object s, int mode):
     cdef const unsigned char* table = stario_escape_extra[mode]
     cdef unsigned char* dst
     cdef object out
-    for i in range(n):
-        extra += table[src[i]]
-    if extra == 0:
+    # The clean prefix eight bytes at a time; most values are all prefix.
+    cdef Py_ssize_t k = stario_clean_run_mode(src, n, mode)
+    if k == n:
         return s
+    for i in range(k, n):
+        extra += table[src[i]]
     out = PyUnicode_New(n + extra, PyUnicode_MAX_CHAR_VALUE(s))
     dst = <unsigned char*>PyUnicode_DATA(out)
-    for i in range(n):
+    memcpy(dst, src, k)
+    w = k
+    for i in range(k, n):
         c = src[i]
         if c == 38:
             dst[w] = 38; dst[w + 1] = 97; dst[w + 2] = 109; dst[w + 3] = 112; dst[w + 4] = 59
@@ -749,7 +889,7 @@ cdef inline object _valid_key(object raw_key):
         Py_DECREF(key)  # ``key`` holds its own reference now
         return key
     key = _validate_attribute_key(raw_key)
-    if len(_VALID_KEYS) < _VALID_KEYS_MAX:
+    if len(_VALID_KEYS) < _VALID_KEYS_MAX and PyUnicode_GET_LENGTH(key) <= _CACHE_MAX_LEN:
         # setdefault: the first insert wins and is never replaced, so no
         # reader can see an entry freed under it.
         key = stario_shared_str(key)
@@ -1712,7 +1852,11 @@ def classes(*tokens):
             raise _class_token_error(token, 'h.Div(classes("btn", "primary"))')
 
     text = ' class="' + " ".join(rendered) + '"'
-    if not cacheable or len(_classes_cache) >= _CLASSES_CACHE_MAX:
+    if (
+        not cacheable
+        or len(_classes_cache) >= _CLASSES_CACHE_MAX
+        or PyUnicode_GET_LENGTH(text) > _CLASSES_CACHE_MAX_LEN
+    ):
         return Attrs.__new__(Attrs, text)
     # Every thread gets the cached fragment, and each element built with it
     # holds its string: on free-threaded builds both are immortal (an
@@ -1739,7 +1883,7 @@ cdef object _prefixed_key(object prefix, object key):
     if stario_dict_get_ref(_PREFIXED_KEYS, prefix, &hit):
         names = <object>hit
         Py_DECREF(names)
-    elif len(_PREFIXED_KEYS) < 64:
+    elif len(_PREFIXED_KEYS) < 64 and PyUnicode_GET_LENGTH(prefix) <= _CACHE_MAX_LEN:
         names = _PREFIXED_KEYS.setdefault(stario_shared_str(prefix), stario_shared_dict())
     else:
         cached = False
@@ -1748,7 +1892,7 @@ cdef object _prefixed_key(object prefix, object key):
         Py_DECREF(wire_key)
         return wire_key
     wire_key = prefix + "-" + _valid_key(key)
-    if cached and len(names) < _VALID_KEYS_MAX:
+    if cached and len(names) < _VALID_KEYS_MAX and PyUnicode_GET_LENGTH(wire_key) <= _CACHE_MAX_LEN:
         wire_key = (<dict>names).setdefault(
             stario_shared_str(key), stario_shared_str(wire_key)
         )
@@ -1876,6 +2020,7 @@ cdef struct Buf:
     Py_ssize_t len
     Py_ssize_t cap
     bint heap
+    bint ascii      # every byte written so far is below 0x80
 
 
 cdef int _grow(Buf* b, Py_ssize_t need) except -1:
@@ -1914,32 +2059,27 @@ cdef inline int _write(Buf* b, const char* s, Py_ssize_t n) except -1:
     return 0
 
 
-cdef inline int _write_str(Buf* b, object s) except -1:
-    cdef Py_ssize_t n
-    cdef const char* p
-    if PyUnicode_IS_ASCII(s):
-        return _write(b, <const char*>PyUnicode_DATA(s), PyUnicode_GET_LENGTH(s))
-    p = PyUnicode_AsUTF8AndSize(s, &n)
-    return _write(b, p, n)
+cdef int _write_escaped(Buf* b, const unsigned char* p, Py_ssize_t n) except -1:
+    """Copy UTF-8 (or ASCII) bytes, escaping ``& < >``.
 
-
-cdef int _write_text(Buf* b, object s) except -1:
-    """Copy ``s`` as UTF-8 and escape ``& < >`` on the way (bytes < 0x80 only).
-
-    Works in chunks of ``_TEXT_CHUNK`` bytes. Each chunk reserves its worst
-    case (every byte becomes ``&amp;``) once, then copies byte by byte: text
-    nodes are short, and a copy loop beats a ``memcpy`` call per run. The
-    chunks keep a long text from reserving five times its size.
+    The clean prefix is found eight bytes at a time; for most text that is
+    all of it, and it goes out in one copy. Otherwise the copy goes byte by
+    byte (from the start, unless the clean prefix is long enough to be
+    worth a copy of its own) in chunks of ``_TEXT_CHUNK`` bytes. Each chunk
+    reserves its worst case (every byte becomes ``&amp;``) once; the chunks
+    keep a long text from reserving five times its size.
     """
-    cdef const unsigned char* p
-    cdef Py_ssize_t n, k, start = 0, stop, w
+    cdef Py_ssize_t k, start, stop, w
     cdef unsigned char c
     cdef char* d
-    if PyUnicode_IS_ASCII(s):
-        p = <const unsigned char*>PyUnicode_DATA(s)
-        n = PyUnicode_GET_LENGTH(s)
+    start = stario_clean_run(p, n)
+    if start == n:
+        return _write(b, <const char*>p, n)
+    if start < 32:
+        # A short prefix costs less in the loop than in a call of its own.
+        start = 0
     else:
-        p = <const unsigned char*>PyUnicode_AsUTF8AndSize(s, &n)
+        _write(b, <const char*>p, start)
     # A while loop for the chunks: range() with a step is not a C loop here.
     while start < n:
         stop = n if n - start <= _TEXT_CHUNK else start + _TEXT_CHUNK
@@ -1964,6 +2104,60 @@ cdef int _write_text(Buf* b, object s) except -1:
         b.len += w
         start = stop
     return 0
+
+
+cdef int _write_utf8(Buf* b, object s, bint escape) except -1:
+    """``s`` (not ASCII) as UTF-8, escaping ``& < >`` when ``escape``.
+
+    A str that already carries its UTF-8 (builds with the GIL) is copied
+    from that. Otherwise it is encoded straight into the buffer, rather
+    than through ``PyUnicode_AsUTF8AndSize``, which allocates a UTF-8 copy
+    and keeps it on the str: a fresh string per request pays for both. The
+    encode works in chunks of ``_TEXT_CHUNK`` characters that each reserve
+    their worst case (5 bytes a character when escaping, else ``kind + 1``).
+    A surrogate, which UTF-8 cannot encode, goes back to
+    ``PyUnicode_AsUTF8AndSize`` so that CPython raises its usual
+    ``UnicodeEncodeError``.
+    """
+    cdef int kind
+    cdef const char* data
+    cdef Py_ssize_t n, start = 0, stop, w, per
+    b.ascii = False
+    data = stario_cached_utf8(s, &n)
+    if data != NULL:
+        if escape:
+            return _write_escaped(b, <const unsigned char*>data, n)
+        return _write(b, data, n)
+    kind = PyUnicode_KIND(s)
+    data = <const char*>PyUnicode_DATA(s)
+    n = PyUnicode_GET_LENGTH(s)
+    per = 5 if escape else kind + 1
+    while start < n:
+        stop = n if n - start <= _TEXT_CHUNK else start + _TEXT_CHUNK
+        if b.len + (stop - start) * per > b.cap:
+            _grow(b, (stop - start) * per)
+        w = stario_utf8_into(b.data + b.len, kind, data + start * kind, stop - start, escape)
+        if w < 0:
+            PyUnicode_AsUTF8AndSize(s, &w)  # raises for the surrogate
+            raise UnicodeEncodeError("utf-8", s, start, stop, "surrogates not allowed")
+        b.len += w
+        start = stop
+    return 0
+
+
+cdef inline int _write_str(Buf* b, object s) except -1:
+    if PyUnicode_IS_ASCII(s):
+        return _write(b, <const char*>PyUnicode_DATA(s), PyUnicode_GET_LENGTH(s))
+    return _write_utf8(b, s, False)
+
+
+cdef inline int _write_text(Buf* b, object s) except -1:
+    """Copy ``s`` as UTF-8 and escape ``& < >`` on the way."""
+    if PyUnicode_IS_ASCII(s):
+        return _write_escaped(
+            b, <const unsigned char*>PyUnicode_DATA(s), PyUnicode_GET_LENGTH(s)
+        )
+    return _write_utf8(b, s, True)
 
 
 cdef inline int _write_str_ptr(Buf* b, PyObject* s) except -1:
@@ -2087,15 +2281,38 @@ cdef object _render_error(BaseException e, object root_count):
 cdef object _render(object nodes, object root_count, bint as_bytes):
     cdef char stack[_STACK_BUF]
     cdef Buf b
+    cdef object out
     b.data = stack
     b.len = 0
     b.cap = _STACK_BUF
     b.heap = False
+    b.ascii = True
     _bind()
     try:
+        if (
+            type(nodes) is tuple
+            and PyTuple_GET_SIZE(nodes) == 1
+            and type(<object>PyTuple_GET_ITEM(nodes, 0)) is SafeString
+        ):
+            # One trusted fragment (a @baked result): its text is the
+            # markup. ASCII needs no buffer; other text is encoded once.
+            out = (<SafeString>PyTuple_GET_ITEM(nodes, 0)).rendered
+            if as_bytes:
+                if PyUnicode_IS_ASCII(out):
+                    return PyBytes_FromStringAndSize(
+                        <const char*>PyUnicode_DATA(out), PyUnicode_GET_LENGTH(out)
+                    )
+                return PyUnicode_AsUTF8String(out)
+            if PyUnicode_IS_ASCII(out):
+                return out
         _render_into(nodes, &b)
         if as_bytes:
             return PyBytes_FromStringAndSize(b.data, b.len)
+        if b.ascii:
+            # A copy: no UTF-8 decode (and its validation) for ASCII markup.
+            out = PyUnicode_New(b.len, 127)
+            memcpy(PyUnicode_DATA(out), b.data, b.len)
+            return out
         return PyUnicode_DecodeUTF8(b.data, b.len, NULL)
     except StarioError:
         raise
