@@ -1567,6 +1567,7 @@ class TestPathHardening:
             pytest.fail("open() blocked on a FIFO")
         assert result == [None]
 
+    @pytest.mark.skipif(not hasattr(os, "O_NONBLOCK"), reason="POSIX open flag")
     def test_open_regular_returns_a_blocking_fd(self, tmp_path: Path) -> None:
         (tmp_path / "f.txt").write_text("x")
         opened = filesystem._open_regular(tmp_path / "f.txt")
