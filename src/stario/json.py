@@ -122,7 +122,30 @@ _STDLIB_ENCODER = json_module.JSONEncoder(
 )
 _c_make_encoder = getattr(json_module.encoder, "c_make_encoder", None)
 
-if _c_make_encoder is None:
+
+def _c_encoder_usable() -> bool:
+    # `c_make_encoder` is CPython's own, undocumented entry point: check its
+    # argument list still matches before relying on it.
+    if _c_make_encoder is None:
+        return False
+    try:
+        probe = _c_make_encoder(
+            {},
+            _STDLIB_ENCODER.default,
+            json_module.encoder.encode_basestring,
+            None,
+            ":",
+            ",",
+            False,
+            False,
+            False,
+        )({"a": [1, "é"]}, 0)
+    except Exception:
+        return False
+    return "".join(probe) == '{"a":[1,"é"]}'
+
+
+if _c_make_encoder is None or not _c_encoder_usable():
     # Pure-Python json build: the shared encoder has no per-call state.
     _stdlib_encode = _STDLIB_ENCODER.encode
 else:
