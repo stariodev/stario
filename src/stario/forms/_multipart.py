@@ -18,6 +18,8 @@ _DONE = 4
 
 # The rest of a delimiter line: optional transport padding, then CRLF.
 _MAX_DELIMITER_LINE = 1024
+# `filename*` charsets decoded as Latin-1; every other one is read as UTF-8.
+_LATIN1_CHARSETS = frozenset(("iso-8859-1", "latin-1", "latin1"))
 
 
 class MultipartError(ValueError):
@@ -113,11 +115,12 @@ def _parse_part_headers(block: bytes) -> PartStart:
     elif "filename*" in params:
         # RFC 5987 (charset''percent-encoded), which RFC 7578 forbids but
         # some non-browser clients still send.
+        # Only the charsets RFC 8187 requires: the client must not choose
+        # the codec (punycode decodes in quadratic time; idna raises).
         charset, _, encoded = params["filename*"].partition("''")
-        try:
-            filename = unquote(encoded, encoding=charset or "utf-8", errors="replace")
-        except LookupError:
-            filename = unquote(encoded, errors="replace")
+        if charset.strip().lower() not in _LATIN1_CHARSETS:
+            charset = "utf-8"
+        filename = unquote(encoded, encoding=charset, errors="replace")
     return PartStart(_unescape_quoted(params["name"]), filename, content_type)
 
 
