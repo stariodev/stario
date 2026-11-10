@@ -1902,6 +1902,8 @@ cdef int _render_element(Element e, Buf* b, int depth) except -1:
     cdef PyObject* tag = <PyObject*>e.tag
     cdef PyObject* attrs = <PyObject*>e._attrs
     cdef PyObject* children = <PyObject*>e._children
+    cdef PyObject* child
+    cdef PyObject* child_type
     cdef Py_ssize_t i
     if attrs == <PyObject*>None:
         if children == <PyObject*>None:
@@ -1921,21 +1923,29 @@ cdef int _render_element(Element e, Buf* b, int depth) except -1:
     if depth >= _MAX_DEPTH:
         raise RecursionError("HTML tree is nested too deeply")
     for i in range(e._first, PyTuple_GET_SIZE(<object>children)):
-        _render_node(<object>PyTuple_GET_ITEM(<object>children, i), b, depth + 1)
+        # Text and elements, the usual children, without the _render_node
+        # call (the tuple holds each child; type compared, not referenced).
+        child = PyTuple_GET_ITEM(<object>children, i)
+        child_type = stario_type(child)
+        if child_type == <PyObject*>str:
+            _write_text(b, <object>child)
+        elif child_type == <PyObject*>Element:
+            _render_element(<Element>child, b, depth + 1)
+        else:
+            _render_node(<object>child, b, depth + 1)
     return _write_str_ptr(b, <PyObject*>(<Tag>tag).closing_tag)
 
 
 cdef int _render_node(object node, Buf* b, int depth) except -1:
-    cdef object node_type = type(node)
-    cdef Py_ssize_t i
-    if node_type is str:
+    cdef PyObject* node_type = stario_type(<PyObject*>node)
+    if node_type == <PyObject*>str:
         return _write_text(b, node)
-    if node_type is Element:
+    if node_type == <PyObject*>Element:
         return _render_element(<Element>node, b, depth)
-    if node_type is SafeString:
+    if node_type == <PyObject*>SafeString:
         # Immutable, and held by the caller: a borrowed read (see above).
         return _write_str_ptr(b, <PyObject*>(<SafeString>node).rendered)
-    if node_type is list:
+    if node_type == <PyObject*>list:
         if depth >= _MAX_DEPTH:
             raise RecursionError("HTML tree is nested too deeply")
         # Cython's list loop reads the length on each step and takes a
@@ -1943,7 +1953,7 @@ cdef int _render_node(object node, Buf* b, int depth) except -1:
         for item in <list>node:
             _render_node(item, b, depth + 1)
         return 0
-    if node_type is int or node_type is float:
+    if node_type == <PyObject*>int or node_type == <PyObject*>float:
         return _write_str(b, str(node))
     if node is None:
         return 0
