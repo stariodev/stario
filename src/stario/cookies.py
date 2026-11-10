@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import http.cookies
 import re
+import string
 import time
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -24,6 +25,71 @@ from stario.json import dumps_bytes, loads
 from stario_cython.exchange import ParsedCookies
 
 _SAMESITE = frozenset(("lax", "strict", "none"))
+
+# The `Set-Cookie` line `http.cookies.SimpleCookie` writes, without building
+# a SimpleCookie and Morsel per call (most of set_cookie's cost): the same
+# legal-name set, value quoting, control-character check, and attribute order.
+_LEGAL_CHARS = string.ascii_letters + string.digits + "!#$%&'*+-.^_`|~:"
+_is_legal = re.compile(f"[{re.escape(_LEGAL_CHARS)}]+").fullmatch
+_QUOTE = {
+    n: f"\\{n:03o}"
+    for n in set(range(256)) - set(map(ord, _LEGAL_CHARS + " ()/<=>?@[]{}"))
+}
+_QUOTE.update({ord('"'): '\\"', ord("\\"): "\\\\"})
+_has_control = re.compile(r"[\x00-\x1F\x7F]").search
+# Morsel's reserved attribute names: a cookie may not be named one of them.
+_RESERVED = frozenset(
+    (
+        "expires",
+        "path",
+        "comment",
+        "domain",
+        "max-age",
+        "secure",
+        "httponly",
+        "version",
+        "samesite",
+        "partitioned",
+    )
+)
+
+
+def _cookie_line(
+    name: str,
+    value: object,
+    max_age: str | None,
+    expires: str | None,
+    path: str,
+    domain: str | None,
+    httponly: bool,
+    samesite: str | None,
+    secure: bool,
+) -> str:
+    """`SimpleCookie` output for one cookie; `CookieError` where it raises one."""
+    if name.lower() in _RESERVED or not _is_legal(name):
+        raise http.cookies.CookieError(f"Illegal key {name!r}")
+    text = str(value)
+    coded = text if _is_legal(text) else '"' + text.translate(_QUOTE) + '"'
+    parts = [f"{name}={coded}"]
+    # Morsel writes its attributes sorted by key and skips empty ones.
+    if domain:
+        parts.append(f"Domain={domain}")
+    if expires is not None and expires != "":
+        parts.append(f"expires={expires}")
+    if httponly:
+        parts.append("HttpOnly")
+    if max_age:
+        parts.append(f"Max-Age={max_age}")
+    if path:
+        parts.append(f"Path={path}")
+    if samesite:
+        parts.append(f"SameSite={samesite}")
+    if secure:
+        parts.append("Secure")
+    line = "; ".join(parts)
+    if _has_control(line) or _has_control(text):
+        raise http.cookies.CookieError("Control characters are not allowed in cookies")
+    return line.strip()
 
 
 def morsels_from_lines(
@@ -143,32 +209,27 @@ def set_cookie(
             help_text="Cookie Expires must not contain ';'.",
         )
 
-    cookie: http.cookies.BaseCookie[str] = http.cookies.SimpleCookie()
     try:
-        cookie[name] = value
-        if max_age is not None:
-            cookie[name]["max-age"] = str(max_age)
-        if expires is not None:
-            if isinstance(expires, datetime):
-                cookie[name]["expires"] = format_datetime(expires, usegmt=True)
-            elif isinstance(expires, int):
-                cookie[name]["expires"] = format_datetime(
-                    datetime.fromtimestamp(expires, tz=UTC),
-                    usegmt=True,
-                )
-            else:
-                cookie[name]["expires"] = expires
-        if path:
-            cookie[name]["path"] = path
-        if domain:
-            cookie[name]["domain"] = domain
-        if httponly:
-            cookie[name]["httponly"] = True
-        if samesite:
-            cookie[name]["samesite"] = samesite
-        if secure or (samesite is not None and samesite.lower() == "none"):
-            cookie[name]["secure"] = True
-        w.headers.add("set-cookie", cookie.output(header="").strip())
+        if isinstance(expires, datetime):
+            expires_text: str | None = format_datetime(expires, usegmt=True)
+        elif isinstance(expires, int):
+            expires_text = format_datetime(
+                datetime.fromtimestamp(expires, tz=UTC), usegmt=True
+            )
+        else:
+            expires_text = expires
+        line = _cookie_line(
+            name,
+            value,
+            None if max_age is None else str(max_age),
+            expires_text,
+            path,
+            domain,
+            httponly,
+            samesite,
+            secure or (samesite is not None and samesite.lower() == "none"),
+        )
+        w.headers.add("set-cookie", line)
     except (http.cookies.CookieError, ValueError) as exc:
         raise StarioError(
             "Invalid cookie name, value, or attribute",
