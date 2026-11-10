@@ -218,6 +218,51 @@ class _Cached:
     encodings: dict[bytes, bytes] = field(default_factory=dict[bytes, bytes])
 
 
+class _Ready:
+    """An `Assets` file held in memory, with every response header it needs.
+
+    Built once at load: a GET without `Range` sends these bytes as they are.
+    """
+
+    __slots__ = (
+        "cache_control",
+        "cached",
+        "content_type",
+        "etags",
+        "hashed",
+        "last_modified",
+        "lengths",
+        "modified",
+        "vary",
+    )
+
+    def __init__(self, hashed: _Hashed, cached: _Cached, cache_control: bytes) -> None:
+        self.hashed = hashed
+        self.cached = cached
+        self.cache_control = cache_control
+        self.content_type = cached.content_type
+        self.modified = hashed.modified_ns / 1_000_000_000
+        self.last_modified = _last_modified(self.modified)
+        self.vary = tuple(cached.encodings)
+        self.etags: dict[bytes | None, bytes] = {None: _etag(hashed.digest, None)}
+        self.lengths: dict[bytes | None, bytes] = {None: b"%d" % len(cached.content)}
+        for encoding, body in cached.encodings.items():
+            self.etags[encoding] = _etag(hashed.digest, encoding)
+            self.lengths[encoding] = b"%d" % len(body)
+
+
+@functools.lru_cache(maxsize=256)
+def _negotiate_cached(accept: bytes, available: tuple[bytes, ...]) -> bytes | None:
+    return negotiate_content_encoding(accept, available, CODECS)
+
+
+def _negotiate(accept: bytes, available: tuple[bytes, ...]) -> bytes | None:
+    """`negotiate_content_encoding` over `CODECS`; few distinct headers repeat."""
+    if len(accept) > 512:
+        return negotiate_content_encoding(accept, available, CODECS)
+    return _negotiate_cached(accept, available)
+
+
 def _identity(stat: stat_result) -> tuple[int, int, int, int]:
     return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
 
@@ -643,6 +688,40 @@ async def _stream(writer: Writer, fd: int, start: int, length: int) -> None:
     writer.end()
 
 
+def _emit_ready(request: RequestHeaders, writer: Writer, ready: _Ready) -> None:
+    """`_Mount._serve` for a held `Assets` file and a request without `Range`.
+
+    Same answer and headers in the same order; only the per-request work
+    is left (encoding, then 304 or 200).
+    """
+    cached = ready.cached
+    encoding = (
+        _negotiate(request.unsafe_get(b"accept-encoding", b""), ready.vary)
+        if ready.vary
+        else None
+    )
+    etag = ready.etags[encoding]
+    headers = writer.headers
+    headers.unsafe_set(b"cache-control", ready.cache_control)
+    headers.unsafe_set(b"content-type", ready.content_type)
+    headers.unsafe_set(b"x-content-type-options", b"nosniff")
+    headers.unsafe_set(b"etag", etag)
+    headers.unsafe_set(b"last-modified", ready.last_modified)
+    headers.unsafe_set(b"accept-ranges", b"bytes")
+    if ready.vary:
+        headers.unsafe_merge_vary(b"accept-encoding")
+    if _fresh(request, etag, ready.modified):
+        writer.write_headers(304).end()
+        return
+    if encoding is None:
+        body = cached.content
+    else:
+        body = cached.encodings[encoding]
+        headers.unsafe_set(b"content-encoding", encoding)
+    headers.unsafe_set(b"content-length", ready.lengths[encoding])
+    writer.write_headers(200).end(body)
+
+
 class _Mount:
     """Directory, prefix, and the shared register / load / read path."""
 
@@ -1066,10 +1145,8 @@ class _Mount:
         encoding = (
             None
             if byte_range is not None or not encodings
-            else negotiate_content_encoding(
-                request.unsafe_get(b"accept-encoding", b""),
-                encodings,
-                CODECS,
+            else _negotiate(
+                request.unsafe_get(b"accept-encoding", b""), tuple(encodings)
             )
         )
         etag = identity_etag if encoding is None else _etag(validator, encoding)
@@ -1148,7 +1225,7 @@ class Assets(_Mount):
     _default_prefix = "/static"
     _default_cache_control = "public, max-age=31536000, immutable"
     _default_codecs = ("br", "zstd", "gzip")
-    __slots__ = ("_catalog", "_hashed")
+    __slots__ = ("_catalog", "_hashed", "_ready")
 
     def __init__(
         self,
@@ -1168,6 +1245,8 @@ class Assets(_Mount):
         )
         self._catalog: dict[str, _Hashed] = {}
         self._hashed: dict[str, _Hashed] = {}
+        # hashed path -> held file and its headers; filled by register + load.
+        self._ready: dict[str, _Ready] = {}
 
     def href(
         self,
@@ -1262,9 +1341,33 @@ class Assets(_Mount):
         stats["files"] = len(self._catalog)
         stats["streamed_files"] = stats["files"] - stats["cached_files"]
         self.stats = stats
+        self._prepare()
+
+    def register(self, app: App, *, cache_control: str | None = None) -> None:
+        super().register(app, cache_control=cache_control)
+        self._prepare()
+
+    def _prepare(self) -> None:
+        """Build `_ready` from the held bodies, once `register` set cache-control."""
+        cache_control = getattr(self, "_cache_control", None)
+        if cache_control is None:
+            return
+        self._ready = {
+            path: _Ready(self._hashed[path], cached, cache_control)
+            for path, cached in self._cache.items()
+            if path in self._hashed
+        }
 
     async def __call__(self, context: Context, writer: Writer) -> None:
         path = context.match.params.get("path", "")
+        ready = self._ready.get(path)
+        if ready is not None:
+            request = context.req.headers
+            if request.unsafe_get(b"range") is None:
+                # The common GET: everything but the encoding and the
+                # validators was settled at load.
+                _emit_ready(request, writer, ready)
+                return
         if not _is_relative(path):
             _not_found(writer)
             return
