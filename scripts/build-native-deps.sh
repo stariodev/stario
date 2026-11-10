@@ -21,6 +21,19 @@ BROTLI_SHA256="98d35d11a78dc453aebb7d10c3748f3f73ff78c8267c0dc697b8631f67bf7e8f"
 ZSTD_SHA256="eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3"
 JOBS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)"
 
+# The wheels bundle these libraries, and nghttp2 parses every HTTP/2 byte a
+# client sends. Build them with the same hardening as the extensions
+# (setup.py): stack canaries, checked libc calls, stack clash probes, full
+# RELRO. No debug info: autotools' default `-g -O2` put 0.5 MB of DWARF into
+# the bundled libnghttp2. nghttp2's own assert()s stay on (no -DNDEBUG): an
+# internal invariant that fails should abort, not run on. CMake Release
+# builds append their -O3 -DNDEBUG after these flags. Linux only; Apple's
+# toolchain defaults already cover what applies there.
+if [[ "$(uname -s)" == "Linux" ]]; then
+  export CFLAGS="-O2 -g0 -fstack-protector -fstack-clash-protection -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2${CFLAGS:+ $CFLAGS}"
+  export LDFLAGS="-Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack${LDFLAGS:+ $LDFLAGS}"
+fi
+
 want() {
   local name="$1" part
   if [[ "$COMPONENTS" == "all" ]]; then
@@ -80,7 +93,8 @@ $SUDO mkdir -p "$PREFIX"
 fetch() {
   local out="$1" url="$2" attempt
   for attempt in 1 2 3 4 5; do
-    if curl -fsSL --retry 2 --retry-delay 5 -o "$out" "$url"; then
+    # HTTPS only, redirects included (the SHA-256 check is the real guard).
+    if curl -fsSL --proto '=https' --proto-redir '=https' --retry 2 --retry-delay 5 -o "$out" "$url"; then
       return 0
     fi
     echo "build-native-deps.sh: download failed (attempt $attempt of 5): $url" >&2
