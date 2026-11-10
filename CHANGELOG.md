@@ -4,6 +4,107 @@ All notable changes to Stario are documented in this file.
 
 The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+A second security and performance review of the whole tree. Timings are
+`benchmarks/server/inproc.py` and `inproc_paths.py` on one pinned CPU, best
+of four interleaved rounds against 5.8.1 (plain builds, no profile).
+
+### Security
+
+- **HTTP/1: llhttp 9.2.1 → 9.4.3.** An empty `Transfer-Encoding:` was read
+  as absent, so the bytes after such a request were parsed as a second
+  request (request smuggling behind a front end that frames it
+  differently). The vendored files are upstream's `release/v9.4.3`,
+  unmodified.
+- **HTTP/1: no second status after a request's own response.** A handler
+  that answered a chunked upload before reading it left the connection
+  open; a malformed chunk after that wrote a `400` behind the `200`, which
+  a client or pooling front end reads as the answer to its next request.
+  The connection now closes without writing.
+- **HTTP/2: small bodies waiting for dispatch are bounded per connection.**
+  Bodies up to 256 KiB are read before their handler starts, with the
+  windows open: 200 stalled streams held 50 MiB on one connection, on any
+  path. Past 1 MiB of such bytes a stream dispatches at its next DATA
+  frame.
+- **nghttp2 1.68.1 is the minimum** (CVE-2026-27135: an assertion failure
+  when frames arrive after `nghttp2_session_terminate_session()`, which
+  the reset budget calls). Wheels already bundle 1.70 / 1.71.
+- **Response writer: a declared `Content-Length` of 16 digits or more
+  overflowed a stack buffer** (a fortified build aborts the process).
+- **Response writer:** a list body is counted and sent from one iteration
+  (a list that changed between the two put bytes past `Content-Length` on
+  the wire); an HTTP/1.0 close-delimited stream closes even if the handler
+  removes `connection: close`.
+- **Relay: `publish()` of a subject with thousands of dots** (a path
+  parameter in `room.{id}`) cost O(length × dots) and cached the result:
+  0.45 s and 400 MB for one 40 KB subject. Lookup keys now come from the
+  registered `prefix.*` lengths.
+- **Multipart: `filename*` is decoded as UTF-8 or Latin-1 only.** The
+  client could name any Python codec: `punycode` decodes in quadratic
+  time, `idna` raised past `read_form` as a 500.
+- **Datastar:** `data.on(target=, case=)`, `on_intersect(threshold=)`,
+  `scroll_into_view(...)` and the `DatastarAttributes` prefix are checked
+  as attribute-name parts (a value from data could add an attribute);
+  numeric and boolean action options must be numbers and booleans, and
+  `at.intl()` quotes nested strings.
+- **Markup caches** (`classes()`, attribute names) keep only short
+  entries: 1024 megabyte-long class lists pinned 2 GB for good.
+- **Codecs:** zstd decoding reads every concatenated frame and Brotli
+  rejects bytes after the stream; stream encoders and decoders run in a
+  critical section on free-threaded builds (two threads finishing one
+  encoder returned it to the pool twice).
+- `ParsedCookies` copies bytes-like lines to `bytes` (a `bytearray` line
+  was read past its start); `RequestHeaders.__init__` run twice resets its
+  hot indexes; `data_received` accepts a memoryview instead of dropping
+  it; NaN timeouts are rejected; the TTY tracer escapes Unicode bidi
+  controls; an idle HTTP/2 connection gives back an outbound buffer over
+  64 KiB.
+- **Build:** `-fvisibility=hidden`, `-fstack-clash-protection` and
+  `-fcf-protection=full` where the compiler has them, `-DNDEBUG` whatever
+  `CFLAGS` says; bundled native libraries are built hardened and stripped;
+  CI actions are pinned to commit SHAs with a read-only token.
+
+### Performance
+
+| case | 5.8.1 | now | |
+| --- | ---: | ---: | ---: |
+| plaintext | 2.39 µs | 2.02 | -15% |
+| json | 4.16 | 3.77 | -9% |
+| `GET /user/{id}` | 5.04 | 4.58 | -9% |
+| browser header set | 3.34 | 2.93 | -12% |
+| response headers + `set_cookie` | 19.25 | 7.26 | -62% |
+| multipart form | 55.85 | 31.78 | -43% |
+| urlencoded form | 9.81 | 8.41 | -14% |
+| in-memory asset | 11.32 | 7.04 | -38% |
+| 405 / 308 | 3.64 / 2.87 | 3.16 / 2.44 | -13% / -15% |
+| pipelined ×4 | 2.66 | 2.38 | -11% |
+| 50-row HTML page | 43.51 | 42.81 | -2% |
+
+HTTP/2, SSE and compressed-page cases are within ±3% (noise).
+
+- Hidden symbol visibility: calls between the Cython modules' helpers,
+  llhttp and the compression glue skip the PLT.
+- `respond()` with headers set sends head and body in one write.
+- `set_cookie` writes the `SimpleCookie` line without building one.
+- `Assets` answers a held file from headers built at load.
+- Multipart part headers and form `Content-Type` values are memoized.
+- A 405 under middleware builds its handler once per allowed-method set.
+- Markup: clean text is found eight bytes at a time and copied once;
+  non-ASCII text is encoded straight into the render buffer; `render()`
+  of ASCII output skips the UTF-8 decode (`render` -21%, `render_bytes`
+  -13% on a prebuilt page). Text where every string needs escaping
+  renders 5-8% slower.
+
+### Changed
+
+- **x86-64 builds no longer pass `-msse4.2`** (it applied to the whole
+  protocol module: SIGILL on a CPU or VM without SSE 4.2). llhttp's header
+  scan loses about 45 ns on a 600-byte request, under 1% end to end.
+- `filename*` with a charset other than UTF-8 or Latin-1 is read as UTF-8.
+- `ParsedCookies` raises `TypeError` for a line that is not text or bytes.
+- `escape.validate_attribute_key` no longer has `cache_info()`.
+
 ## 5.8.1 - 2026-11-10
 
 Results of a security and performance review of the whole tree. Timings are
