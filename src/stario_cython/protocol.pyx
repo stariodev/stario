@@ -243,6 +243,9 @@ cdef enum:
     # this, and wakes once nghttp2 has sent it down to the low mark.
     H2_DRAIN_HIGH = 256 * 1024
     H2_DRAIN_LOW = 64 * 1024
+    # DATA frames up to this size are copied into the outbound scratch with
+    # their header; bigger ones go out zero-copy as a memoryview.
+    H2_INLINE_DATA_MAX = 4096
 
 cdef bytes H2_PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 cdef object _settings_lock = Lock()
@@ -3391,11 +3394,10 @@ cdef class CHttpProtocol(HttpConnection):
         nghttp2_data_source* source,
     ) noexcept:
         cdef RequestExchange ex
-        cdef object pending
         cdef list batch
         cdef Py_ssize_t off
-        cdef Py_ssize_t n
-        cdef const char* src
+        cdef Py_ssize_t n = 0
+        cdef const char* src = NULL
         if source == NULL or source.ptr == NULL:
             return NGHTTP2_ERR_CALLBACK_FAILURE
         # We never ask nghttp2 to pad DATA; a padlen would need extra writes.
@@ -3407,31 +3409,45 @@ cdef class CHttpProtocol(HttpConnection):
         ):
             return NGHTTP2_ERR_CALLBACK_FAILURE
 
-        # Frames nghttp2 wrote before this DATA go first; the payload is
-        # queued behind its 9-byte header and written with the rest of
-        # the pass by ``_h2_write_batch``. No transport call runs inside
-        # this nghttp2 callback.
-        self._h2_flush_out()
-        batch = self.h2_batch
-        pending = PyBytes_FromStringAndSize(<const char*>framehd, 9)
         if self.transport is None:
             return NGHTTP2_ERR_CALLBACK_FAILURE
-        if length == 0:
-            batch.append(pending)
-            return 0
-
         off = ex._h2_pending_off
-        if not _as_buf(ex._h2_pending, &src, &n):
-            return NGHTTP2_ERR_CALLBACK_FAILURE
-        if off < 0 or off + <Py_ssize_t>length > n:
-            return NGHTTP2_ERR_CALLBACK_FAILURE
+        if length > 0:
+            if not _as_buf(ex._h2_pending, &src, &n):
+                return NGHTTP2_ERR_CALLBACK_FAILURE
+            if off < 0 or off + <Py_ssize_t>length > n:
+                return NGHTTP2_ERR_CALLBACK_FAILURE
 
-        batch.append(pending)
-        if PyBytes_Check(ex._h2_pending):
-            batch.append(memoryview(ex._h2_pending)[off:off + <Py_ssize_t>length])
+        if length <= H2_INLINE_DATA_MAX:
+            # Small frame: header and payload go into ``h2_out`` behind the
+            # frames nghttp2 already wrote there, so a small response is one
+            # bytes object and one ``write`` (no header bytes, memoryview, or
+            # writelines per frame). The copy is cheaper than those objects.
+            if self._h2_out_append(<const char*>framehd, 9) != 0:
+                return NGHTTP2_ERR_CALLBACK_FAILURE
+            if length > 0 and self._h2_out_append(
+                src + off, <Py_ssize_t>length
+            ) != 0:
+                return NGHTTP2_ERR_CALLBACK_FAILURE
         else:
-            # A bytearray is extended in place by later writes: copy the slice.
-            batch.append(PyBytes_FromStringAndSize(src + off, <Py_ssize_t>length))
+            # Frames nghttp2 wrote before this DATA go first; the payload is
+            # queued behind its 9-byte header and written with the rest of
+            # the pass by ``_h2_write_batch``. No transport call runs inside
+            # this nghttp2 callback.
+            self._h2_flush_out()
+            batch = self.h2_batch
+            batch.append(PyBytes_FromStringAndSize(<const char*>framehd, 9))
+            if PyBytes_Check(ex._h2_pending):
+                batch.append(
+                    memoryview(ex._h2_pending)[off:off + <Py_ssize_t>length]
+                )
+            else:
+                # A bytearray is extended in place by later writes: copy the slice.
+                batch.append(
+                    PyBytes_FromStringAndSize(src + off, <Py_ssize_t>length)
+                )
+        if length == 0:
+            return 0
 
         ex._h2_pending_off = off + <Py_ssize_t>length
         ex._h2_sent_total += <Py_ssize_t>length

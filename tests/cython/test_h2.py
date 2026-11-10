@@ -1442,6 +1442,56 @@ async def test_h2_head_omits_data_payload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_h2_data_frames_around_inline_size_keep_order() -> None:
+    """Small DATA frames are copied into the outbound buffer, big ones go out
+    as views: a body mixing both arrives intact and in order."""
+    app = App()
+    parts = [b"a" * 10, b"b" * 4096, b"c" * 4097, b"d", b"e" * 20000, b"f" * 3]
+
+    async def mixed(_c, w) -> None:
+        w.write_headers(200)
+        for part in parts:
+            w.write(bytearray(part))
+        w.end(b"g" * 5)
+
+    async def small(_c, w) -> None:
+        w.respond(b"tiny", b"text/plain", 200)
+
+    app.add(Route("GET /mixed"), mixed)
+    app.add(Route("GET /small"), small)
+    loop = asyncio.get_running_loop()
+    proto = make_protocol(loop, app)
+    transport = RecordingTransport(proto)
+    proto.connection_made(transport)
+    try:
+        proto.data_received(H2_PREFACE + pack_frame(TYPE_SETTINGS, 0, 0))
+        proto.data_received(
+            pack_frame(
+                TYPE_HEADERS,
+                FLAG_END_HEADERS | FLAG_END_STREAM,
+                1,
+                encode_request(method="GET", path="/mixed"),
+            )
+            + pack_frame(
+                TYPE_HEADERS,
+                FLAG_END_HEADERS | FLAG_END_STREAM,
+                3,
+                encode_request(method="GET", path="/small"),
+            )
+        )
+        await app.drain_tasks()
+        frames, _rest = parse_frames(b"".join(transport.writes))
+        assert stream_data(frames, 1) == b"".join(parts) + b"g" * 5
+        assert stream_ended(frames, 1)
+        assert stream_data(frames, 3) == b"tiny"
+        assert stream_ended(frames, 3)
+        assert not has_rst(frames, 1) and not has_rst(frames, 3)
+    finally:
+        proto.connection_lost(None)
+        await app.drain_tasks()
+
+
+@pytest.mark.asyncio
 async def test_tls_http11_alpn_does_not_sniff_h2_preface() -> None:
     loop = asyncio.get_running_loop()
     app = App()
