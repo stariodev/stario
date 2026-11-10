@@ -36,9 +36,6 @@ class _Uuid7State(threading.local):
 _uuid7_state = _Uuid7State()
 
 
-_int_from_bytes = int.from_bytes
-
-
 def _span_id() -> UUID:
     """UUIDv7 for span and trace ids. Same bits as CPython 3.14 `uuid.uuid7`.
 
@@ -68,7 +65,7 @@ def _span_id() -> UUID:
                 int=((timestamp_ms & 0xFFFF_FFFF_FFFF) << 80)
                 | ((counter >> 30) << 64)
                 | ((counter & 0x3FFF_FFFF) << 32)
-                | _int_from_bytes(pool[pos:end])
+                | int.from_bytes(pool[pos:end])
                 | _RFC_4122_VERSION_7_FLAGS
             )
         timestamp_ms += 1
@@ -78,7 +75,7 @@ def _span_id() -> UUID:
     if end > len(pool):
         state.pool = pool = os.urandom(_RANDOM_POOL_BYTES)
         pos, end = 0, 10
-    rand = _int_from_bytes(pool[pos:end])
+    rand = int.from_bytes(pool[pos:end])
     counter = (rand >> 32) & 0x1FF_FFFF_FFFF
     state.pos = end
     state.last_timestamp = timestamp_ms

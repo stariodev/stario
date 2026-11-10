@@ -110,11 +110,14 @@ async def read_form(
     raise RequestBodyError(415, "Expected a form body")
 
 
-_PAIR = re.compile(rb"[^&]+")
-
-
 def _too_many_pairs(body: bytes, limit: int) -> bool:
-    return any(count > limit for count, _ in enumerate(_PAIR.finditer(body), start=1))
+    # At most one pair more than there are separators, so the usual form is
+    # settled by one count; only a body with that many `&` is scanned.
+    if body.count(b"&") < limit:
+        return False
+    return any(
+        count > limit for count, _ in enumerate(re.finditer(rb"[^&]+", body), start=1)
+    )
 
 
 def _fields_form(items: list[tuple[str, str]], max_fields: int) -> Form:

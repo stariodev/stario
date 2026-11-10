@@ -40,7 +40,10 @@ built this way): `setup.py` compiles the extensions instrumented, runs
 `scripts/pgo_train.py` against them, and compiles again with the recorded
 branch profile. It doubles the build time and adds about two minutes of
 training. With another compiler, or if training fails, the build goes on
-without a profile.
+without a profile; `STARIO_PGO=require` (what the wheel build sets) fails
+instead, so a wheel cannot lose its profile unnoticed and a training run
+that crashes stops the release. Branch counts differ from run to run, so
+two PGO builds of one commit are not byte-identical.
 
 The training run is both in-process benchmarks: `inproc.py` (the fast
 paths) and `inproc_paths.py` (query, cookies, headers, a real route table,

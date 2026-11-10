@@ -169,7 +169,25 @@ _ACTIVE_TYPES: Final = frozenset(
 # `content-disposition` and the sandbox CSP when a page loads the URL as a
 # script, service worker, or stylesheet; with nosniff, the media type is what
 # stops it.
-_UNTRUSTED_REWRITE: Final = _ACTIVE_TYPES | {b"text/css", b"application/wasm"}
+_UNTRUSTED_REWRITE: Final = _ACTIVE_TYPES | {
+    b"text/css",
+    b"application/wasm",
+    # Every other JavaScript MIME type essence a browser runs (WHATWG
+    # mimesniff), for a `content_types` table that names one of them.
+    b"application/x-ecmascript",
+    b"application/x-javascript",
+    b"text/ecmascript",
+    b"text/javascript1.0",
+    b"text/javascript1.1",
+    b"text/javascript1.2",
+    b"text/javascript1.3",
+    b"text/javascript1.4",
+    b"text/javascript1.5",
+    b"text/jscript",
+    b"text/livescript",
+    b"text/x-ecmascript",
+    b"text/x-javascript",
+}
 
 
 UNSAT: Final = object()
@@ -437,6 +455,9 @@ def _open_regular(path: Path | str) -> tuple[int, stat_result] | None:
         if not stat_module.S_ISREG(file_stat.st_mode):
             os.close(fd)
             return None
+        if hasattr(os, "O_NONBLOCK"):
+            # Only the open needed it; reads go back to blocking.
+            os.set_blocking(fd, True)
     except BaseException:
         os.close(fd)
         raise

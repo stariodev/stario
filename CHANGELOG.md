@@ -24,7 +24,9 @@ rounds against 5.8.0.
   block the server had already given up on: a 100 KB read blocked the loop
   for 289 ms. A block is now cut off (RST_STREAM) once its ignored fields
   decode to twice `max_header_bytes`, and at once when a field is rejected.
-  A request just over the limit still gets its 431.
+  Such blocks spend the same reset budget, so spreading the flood over
+  streams ends the connection. A request just over the limit still gets
+  its 431.
 - **HTTP/1: a final response before `100 Continue` closes the connection.**
   A handler that answered 401/403 without reading the body left the
   connection open; a front end that then skipped the body had its next
@@ -37,8 +39,9 @@ rounds against 5.8.0.
   (`a="x` ... `z=y"`) could swallow the cookies between them into one
   value an app might echo. `parse_cookie_headers` now runs the same scan
   as `c.req.cookies`.
-- **`Files(untrusted=True)`** serves scripts, stylesheets, wasm, HTML, SVG
-  and XML as `application/octet-stream`. A browser ignores
+- **`Files(untrusted=True)`** serves scripts (under every JavaScript media
+  type name), stylesheets, wasm, HTML, SVG and XML as
+  `application/octet-stream`. A browser ignores
   `content-disposition` and the sandbox CSP when a page loads an upload as
   a script, service worker, or stylesheet.
 - **`Files`:** an 8.3-alias-shaped name (`x~1`) lists its directory only
@@ -48,14 +51,13 @@ rounds against 5.8.0.
   hidden on every platform.
 - **`read_form`** counts urlencoded pairs before decoding them. A 10 MB
   `a&a&a...` body used 570 MB and 0.7 s before its 413.
-- **`h.Style`** refuses `<` followed by a letter, `/`, `!` or `?`. Under
-  `<svg>` or `<math>` a browser parses `<style>` content as markup.
 - **Datastar:** `string_literal` and `data.signals` never write an escaped
   backslash before a closing quote, which Datastar's statement splitter
   reads as an escaped quote; a value ending in `\` broke the expression.
 - **Response writer:** lengths of `bytes` / `bytearray` subclasses come
   from their storage, not `__len__` / `__bytes__`; `write_headers()`
-  accepts only digits in `Content-Length` and sends one canonical field;
+  accepts only digits in `Content-Length`, refuses conflicting values, and
+  sends one canonical field;
   `proxy-connection` is dropped from HTTP/2 responses.
 - `Route.href()` rejects `.` and `..` parameter values.
 - Builds pass `-fstack-protector` and `-D_FORTIFY_SOURCE=2` and link with
@@ -79,8 +81,9 @@ rounds against 5.8.0.
 
 Plaintext is within run-to-run noise (-7% to +7% across runs).
 
-- **JSON** encodes with one shared `json.JSONEncoder`. `json.dumps` with
-  options built a new encoder on every call.
+- **JSON** encodes with one shared `json.JSONEncoder` on builds with the
+  GIL. `json.dumps` with options built a new encoder on every call (which
+  free-threaded builds keep doing, so threads share no encoder).
 - **Tracing:** pending spans sit in a deque under one lock, and
   `JsonTracer` formats a span's fixed fields directly.
 - **HTTP/2:** DATA frames up to 4 KiB are copied behind their header into
@@ -88,7 +91,8 @@ Plaintext is within run-to-run noise (-7% to +7% across runs).
 - **`c.req.body()`** returns a complete body without a second coroutine.
 - **Profile-guided builds.** `STARIO_PGO=1` (GCC) compiles instrumented,
   runs `scripts/pgo_train.py`, and compiles again with the profile; Linux
-  wheels are built this way. On top of the table above it takes 12-16% off
+  wheels are built this way (`STARIO_PGO=require`: the wheel build fails
+  rather than ship without a profile). On top of the table above it takes 12-16% off
   small requests in-process, 6% off the HTML page, and 13% (geometric mean)
   off the 28 cases of the new `benchmarks/server/inproc_paths.py`. A
   profile trained without those 28 cases still made them 9% faster and none
@@ -113,6 +117,17 @@ Plaintext is within run-to-run noise (-7% to +7% across runs).
 - `c.req.cookies.get()` returns the default for a name that is too long or
   not Latin-1 instead of raising.
 - `max_header_bytes` is capped at 2^30 (was 2^31-1).
+- `Files(untrusted=True)` no longer sends `text/css`, JavaScript, wasm,
+  HTML, SVG or XML media types: those files download as
+  `application/octet-stream`. Serve files you trust with a plain `Files`.
+- A response sent before the request body was read, to a request with
+  `Expect: 100-continue`, now carries `connection: close`. Clients that
+  send `Expect` (curl on large uploads, some SDKs) reconnect after an
+  early 401/403/413; a handler that reads the body first is unaffected.
+- `write_headers()` raises for a `Content-Length` that is not plain digits
+  (`" 50"`, `"+50"`, `"5_0"` were accepted) and for two different values.
+- `parse_cookie_headers` uses Stario's own scan, not
+  `http.cookies.SimpleCookie`; a line that is not Latin-1 is skipped.
 
 ## 5.8.0 - 2026-11-09
 

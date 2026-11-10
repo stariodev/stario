@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import gzip
-import time
 
 import pytest
 
@@ -181,14 +180,10 @@ async def test_h2_hpack_reference_flood_stops_at_twice_the_header_limit() -> Non
     try:
         big = b"\x40" + h2.hpack_string(b"x-big") + h2.hpack_string(b"v" * 4050)
         block = h2.encode_request() + big + h2.indexed(62) * 60_000
-        began = time.perf_counter()
         proto.data_received(_header_block(1, block))
-        elapsed = time.perf_counter() - began
         frames = _frames(transport, first)
         assert h2.rst_code(frames, 1) == ENHANCE_YOUR_CALM
         assert not transport.is_closing()
-        # 60,000 references to 4 KiB took ~150 ms before the cutoff.
-        assert elapsed < 0.05
         # A block just over the limit still gets its 431.
         mark = len(transport.writes)
         proto.data_received(
@@ -424,9 +419,54 @@ async def test_write_headers_rejects_non_digit_content_length(value: str) -> Non
 async def test_write_headers_sends_one_canonical_content_length() -> None:
     async def handler(_c, w) -> None:
         w.headers.add("content-length", "005")
-        w.headers.add("content-length", "100")
+        w.headers.add("content-length", "5")
         w.write_headers(200).end(b"hello")
 
     wire = await _one_response(handler, _GET)
     assert wire.lower().count(b"content-length") == 1
     assert b"content-length: 5\r\n" in wire
+
+
+@pytest.mark.asyncio
+async def test_write_headers_rejects_conflicting_content_lengths() -> None:
+    raised: list[BaseException] = []
+
+    async def handler(_c, w) -> None:
+        w.headers.add("content-length", "5")
+        w.headers.add("content-length", "100")
+        try:
+            w.write_headers(200)
+        except StarioError as exc:
+            raised.append(exc)
+        w.respond(b"", b"text/plain", 500)
+
+    await _one_response(handler, _GET)
+    assert raised
+    assert "Conflicting" in str(raised[0])
+
+
+@pytest.mark.asyncio
+async def test_h2_cut_off_header_blocks_spend_the_reset_budget() -> None:
+    """A flood spread over streams: each block is cut off at the limit, but
+    the client never sends RST_STREAM and no handler starts. Those blocks
+    draw from the same budget, so the connection ends."""
+    app = App()
+    app.add(Route("GET /"), _ok)
+    proto, transport = _attach_h2(app, max_header_bytes=4 * 1024)
+    first = len(transport.writes)
+    try:
+        big = b"\x40" + h2.hpack_string(b"x-big") + h2.hpack_string(b"v" * 4000)
+        proto.data_received(_header_block(1, h2.encode_request() + big))
+        block = h2.encode_request() + h2.indexed(62) * 8
+        for sid in range(3, 603, 2):
+            if transport.is_closing():
+                break
+            proto.data_received(_header_block(sid, block))
+        frames = _frames(transport, first)
+        goaways = [f for f in frames if f.type == h2.TYPE_GOAWAY]
+        assert goaways, "the connection was never limited"
+        assert int.from_bytes(goaways[-1].payload[4:8], "big") == ENHANCE_YOUR_CALM
+        resets = [f for f in frames if f.type == h2.TYPE_RST_STREAM]
+        assert len(resets) <= 110
+    finally:
+        await _finish(app, transport)

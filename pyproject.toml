@@ -66,9 +66,9 @@ test-command = "pytest -q -p no:cacheprovider"
 [tool.cibuildwheel.linux]
 before-all = "bash scripts/build-native-deps.sh /usr/local"
 # Same soname as a distro libbrotlidec still in the CVE-2026-111497 range.
-# STARIO_PGO: profile-guided build (GCC), see CYTHON.md; it falls back to a
-# plain build if the training run fails.
-environment = { PKG_CONFIG_PATH = "/usr/local/lib/pkgconfig", LD_LIBRARY_PATH = "/usr/local/lib", STARIO_PGO = "1" }
+# STARIO_PGO: profile-guided build (GCC), see CYTHON.md. "require" fails the
+# wheel if the training run fails, instead of shipping one without a profile.
+environment = { PKG_CONFIG_PATH = "/usr/local/lib/pkgconfig", LD_LIBRARY_PATH = "/usr/local/lib", STARIO_PGO = "require" }
 
 [tool.cibuildwheel.macos]
 before-all = "bash scripts/build-native-deps.sh /tmp/stario-deps"

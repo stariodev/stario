@@ -2450,6 +2450,13 @@ cdef class RequestExchange:
         elif raw_length is not None:
             headers.c_remove(b"transfer-encoding")
             self._declared_length = _parse_declared_length(raw_length)
+            for other in headers.unsafe_getlist(b"content-length"):
+                if _parse_declared_length(other) != self._declared_length:
+                    raise StarioError(
+                        "Conflicting Content-Length headers",
+                        context={"content-length": [raw_length, other]},
+                        help_text="Set Content-Length once before write_headers().",
+                    )
             # One canonical field: drops duplicates and leading zeros.
             headers.c_set(b"content-length", _dec(<size_t>self._declared_length))
         elif self._head_request:

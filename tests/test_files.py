@@ -1282,6 +1282,17 @@ class TestUntrustedFiles:
             trusted = await client.get("/data/evil.js")
         assert "javascript" in trusted.headers.get("content-type", "")
 
+    async def test_untrusted_covers_legacy_javascript_type_names(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "a.js").write_text("x")
+        files = Files(
+            tmp_path, untrusted=True, content_types={".js": "text/x-javascript"}
+        )
+        async with TestClient(_app(files)) as client:
+            r = await client.get("/data/a.js")
+        assert r.headers.get("content-type") == "application/octet-stream"
+
     async def test_untrusted_headers_on_304_206_and_416(self, tmp_path: Path) -> None:
         (tmp_path / "page.html").write_text("<p>hi</p>")
         files = Files(tmp_path, untrusted=True)
@@ -1542,8 +1553,28 @@ class TestPathHardening:
     @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs FIFOs")
     def test_open_regular_does_not_block_on_a_fifo(self, tmp_path: Path) -> None:
         os.mkfifo(tmp_path / "pipe")
+        result: list[object] = []
+        # In a thread: a regression would block in open() forever.
+        opener = threading.Thread(
+            target=lambda: result.append(filesystem._open_regular(tmp_path / "pipe")),
+            daemon=True,
+        )
+        opener.start()
+        opener.join(5)
+        if opener.is_alive():
+            # Unblock the stuck open() so the thread can end.
+            os.close(os.open(tmp_path / "pipe", os.O_WRONLY | os.O_NONBLOCK))
+            pytest.fail("open() blocked on a FIFO")
+        assert result == [None]
 
-        assert filesystem._open_regular(tmp_path / "pipe") is None
+    def test_open_regular_returns_a_blocking_fd(self, tmp_path: Path) -> None:
+        (tmp_path / "f.txt").write_text("x")
+        opened = filesystem._open_regular(tmp_path / "f.txt")
+        assert opened is not None
+        try:
+            assert os.get_blocking(opened[0])
+        finally:
+            os.close(opened[0])
 
     @pytest.mark.skipif(
         sys.platform == "win32", reason="Windows checks the resolved long name"

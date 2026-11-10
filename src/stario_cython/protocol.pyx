@@ -553,7 +553,10 @@ cdef int _h2_on_header(
     try:
         if proto._h2_on_header(frame.hd.stream_id, name, namelen, value, valuelen):
             # nghttp2 resets the stream and skips the rest of the block
-            # without validating it.
+            # without validating it. No client sends such a block by
+            # accident, and each one still cost a decode up to the cutoff:
+            # they draw from the reset budget too.
+            proto._h2_count_cancelled_handler()
             return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE
     except Exception:
         _log.exception("HTTP/2 stream callback failed; resetting the stream")
@@ -3340,7 +3343,10 @@ cdef class CHttpProtocol(HttpConnection):
             self._arm_timeout(TIMEOUT_IDLE, self.keep_alive_timeout)
 
     cdef void _h2_count_cancelled_handler(self):
-        """Rate-limit streams that close while their handler is running.
+        """Rate-limit streams the server had to give up on.
+
+        Called for a stream that closes while its handler is running, and
+        for a header block rejected or cut off mid-way.
 
         nghttp2's reset limit counts RST_STREAM frames the client sends. A
         client can also make the server reset a stream it already dispatched

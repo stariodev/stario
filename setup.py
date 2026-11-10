@@ -16,7 +16,9 @@ Development build: ``uv pip install -e .`` or ``python setup.py build_ext --inpl
 ``STARIO_PGO=1`` (GCC only) builds twice: once instrumented, a run of
 ``scripts/pgo_train.py`` against that build, then the real build with the
 recorded profile. If the compiler is not GCC or training fails, the build
-goes on without a profile.
+goes on without a profile. ``STARIO_PGO=require`` fails the build instead
+(release wheels: a wheel must not lose its profile unnoticed, and a
+training run that crashes is a bug in the build it ran).
 """
 
 import glob
@@ -170,8 +172,16 @@ class native_build_ext(build_ext):
             ext.libraries.extend(libraries)
             ext.extra_compile_args.extend([*own_compile, *compile_args])
             ext.extra_link_args.extend([*own_link, *link_args])
-        if os.environ.get("STARIO_PGO") == "1" and not msvc and self._is_gcc():
-            self._build_extensions_with_profile()
+        pgo = os.environ.get("STARIO_PGO", "")
+        if pgo not in ("", "0", "1", "require"):
+            raise RuntimeError(f"STARIO_PGO must be 1 or require, got {pgo!r}")
+        if pgo in ("1", "require") and not msvc and self._is_gcc():
+            self._build_extensions_with_profile(required=pgo == "require")
+        elif pgo == "require":
+            raise RuntimeError(
+                "STARIO_PGO=require needs GCC; this build uses "
+                f"{self.compiler.compiler_type}"
+            )
         else:
             super().build_extensions()
 
@@ -188,7 +198,7 @@ class native_build_ext(build_ext):
             return False
         return "Free Software Foundation" in banner
 
-    def _build_extensions_with_profile(self) -> None:
+    def _build_extensions_with_profile(self, *, required: bool) -> None:
         """Instrumented build, training run, then the build that uses the profile.
 
         GCC keeps each object's counters (.gcda) next to the object in
@@ -215,10 +225,16 @@ class native_build_ext(build_ext):
                 del ext.extra_compile_args[-len(generate) :]
                 del ext.extra_link_args[-1]
         if trained:
+            print("stario: PGO training run finished; building with its profile")
             for ext in self.extensions:
                 ext.extra_compile_args.extend(use)
+        elif required:
+            raise RuntimeError("STARIO_PGO=require: the training run failed")
         else:
-            print("stario: PGO training failed; building without a profile")
+            print(
+                "stario: PGO training failed; building without a profile",
+                file=sys.stderr,
+            )
         super().build_extensions()
         self.force = force
 
@@ -241,7 +257,7 @@ class native_build_ext(build_ext):
                 stdout=subprocess.DEVNULL,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            print(f"stario: PGO training run: {exc}")
+            print(f"stario: PGO training run: {exc}", file=sys.stderr)
             return False
         return True
 

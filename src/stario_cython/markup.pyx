@@ -474,22 +474,6 @@ def check_raw_text(str text not None, str tag not None):
     _check_raw_text(text, tag)
 
 
-cdef bint _opens_markup(object text):
-    """True if ``text`` has ``<`` followed by a letter, ``/``, ``!`` or ``?``."""
-    cdef int kind = PyUnicode_KIND(text)
-    cdef const void* data = PyUnicode_DATA(text)
-    cdef Py_ssize_t n = PyUnicode_GET_LENGTH(text)
-    cdef Py_ssize_t i
-    cdef unsigned int c
-    for i in range(n - 1):
-        if PyUnicode_READ(kind, data, i) != 60:
-            continue
-        c = <unsigned int>PyUnicode_READ(kind, data, i + 1)
-        if c == 47 or c == 33 or c == 63 or 65 <= (c | 32) - 32 <= 90:
-            return True
-    return False
-
-
 cdef int _check_raw_text(object text, object tag) except -1:
     cdef object lowered = text.lower()
     cdef object name = tag.lower()  # Tag("SCRIPT", raw_text=True) ends at "</script" too
@@ -506,20 +490,6 @@ cdef int _check_raw_text(object text, object tag) except -1:
                 "control the bytes."
             ),
             example='h.Script("const tag = \'<\\\\/script>\';")',
-        )
-    if name == "style" and _opens_markup(text):
-        # Inside <svg> or <math> the parser reads <style> content as markup,
-        # not raw text, so `<img onerror=...>` there becomes a live element.
-        # CSS has no use for `<` before a name (`width < 600px` has a space).
-        raise StarioError(
-            "Text inside <style> contains '<' followed by a tag-like name",
-            context={"tag": tag, "text": text[:100]},
-            help_text=(
-                "Under <svg> or <math> a browser parses <style> content as "
-                "markup, so it must not contain '<' followed by a letter, "
-                "'/', '!' or '?'. In a CSS string write it as '\\3c '."
-            ),
-            example='h.Style(".a::before { content: \'\\\\3c b\'; }")',
         )
     return 0
 

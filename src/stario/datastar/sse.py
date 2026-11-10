@@ -37,8 +37,6 @@ _PATCH_MODE_HELP = "Use one of: " + ", ".join(_PATCH_MODE_NAMES) + "."
 _NAMESPACES = ("svg", "mathml")
 _EVENT_PATCH_ELEMENTS = b"event: datastar-patch-elements"
 _EVENT_PATCH_SIGNALS = b"event: datastar-patch-signals"
-_PATCH_ELEMENTS_PREFIX = _EVENT_PATCH_ELEMENTS + b"\ndata: elements "
-_PATCH_SIGNALS_PREFIX = _EVENT_PATCH_SIGNALS + b"\ndata: signals "
 # Datastar SDK default; `retry=1000` means "do not emit the field".
 _SSE_RETRY_DEFAULT = 1000
 
@@ -169,7 +167,11 @@ class SSE:
                 # One data line: the same bytes as the general path,
                 # without building the line list.
                 self._prepare_headers()
-                self.w.write(_PATCH_ELEMENTS_PREFIX + html_bytes + b"\n\n")
+                self.w.write(
+                    b"event: datastar-patch-elements\ndata: elements "
+                    + html_bytes
+                    + b"\n\n"
+                )
                 return
             lines = [_EVENT_PATCH_ELEMENTS]
         else:
@@ -226,7 +228,9 @@ class SSE:
         ):
             # The common event: one data line (see patch_elements).
             self._prepare_headers()
-            self.w.write(_PATCH_SIGNALS_PREFIX + json_bytes + b"\n\n")
+            self.w.write(
+                b"event: datastar-patch-signals\ndata: signals " + json_bytes + b"\n\n"
+            )
             return
         lines = [_EVENT_PATCH_SIGNALS, *_sse_event_meta(event_id, retry)]
         if only_if_missing:

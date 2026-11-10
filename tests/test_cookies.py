@@ -351,3 +351,7 @@ async def test_signed_cookie_through_the_test_client() -> None:
         await client.post("/logout")
         after = await client.get("/me")
     assert (before.text, during.text, after.text) == ("nobody", "ada", "nobody")
+
+
+def test_parse_cookie_headers_skips_a_line_that_is_not_latin1() -> None:
+    assert cookies.parse_cookie_headers(["a=€; b=2", "c=3"]) == {"c": "3"}
