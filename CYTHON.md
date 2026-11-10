@@ -145,6 +145,12 @@ put a process-global increment on that path.
   bound once per connection (no `threading.local` lookup per request).
 - The connection interface the exchange calls is `cdef` (no Python-override
   check per call); `get_buffer` / `buffer_updated` call C directly.
+- `c.req.body()` on a body that is already complete (≤ 256 KiB with a
+  Content-Length) returns the bytes without awaiting a second coroutine
+  (`RequestExchange.c_read_now`).
+- HTTP/2 DATA frames up to 4 KiB are copied into the outbound scratch with
+  their header, so a small response is one `write` of one bytes object;
+  bigger frames still go out as a zero-copy memoryview.
 - `w.drain()`: write backpressure (transport `pause_writing`, HTTP/2 stream
   window). Used by `Files` / `Assets`.
 - A complete Brotli body (`respond()`) uses the one-shot

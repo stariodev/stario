@@ -442,8 +442,9 @@ Do not mutate.
 
 ### 4. Telemetry
 
-Json/SQLite sinks already use `queue.Queue` + a writer thread. `on_end`
-from N request threads is the design they have.
+Json/SQLite sinks already use a bounded deque under one lock + a writer
+thread. `on_end` from N request threads is the design they have: the lock
+covers only the length check and the append.
 
 `RecordingSpan` is mutated on the request thread (`attr`, `event`,
 `end`) with no lock. That is fine if **only that thread** touches the
