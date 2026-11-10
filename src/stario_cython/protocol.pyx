@@ -2600,6 +2600,10 @@ cdef class CHttpProtocol(HttpConnection):
 
     cdef void _abort_reading_and_pending(self) noexcept:
         cdef RequestExchange exchange = self.reading_exchange
+        # Cleared first: the abort may recycle the exchange, and
+        # ``connection_lost`` must not abort it again once it serves
+        # another request.
+        self.reading_exchange = None
         if exchange is not None:
             exchange.c_abort()
             if not exchange.handler_started:
@@ -2731,6 +2735,19 @@ cdef class CHttpProtocol(HttpConnection):
                 self._set_pause_reason(PAUSE_REJECTED, True)
                 return
 
+            if exchange is not None and (
+                exchange._status_code >= 0 or exchange._completed
+            ):
+                # The failing request already has its response on the wire,
+                # or complete (a handler that answered before reading the
+                # rest of a body that then turned out malformed). A second
+                # status would be an unsolicited response that the client,
+                # or a front end that reuses the connection, reads as the
+                # answer to its next request. Its handler path owns the span.
+                self._abort_reading_and_pending()
+                transport.close()
+                return
+
             # HTTP/2 setup failures must not emit HTTP/1 text. A response
             # already on the wire must not get a second status spliced in.
             if (
@@ -2755,7 +2772,6 @@ cdef class CHttpProtocol(HttpConnection):
             )
             self._finish_protocol_span(status, span, method, path)
             self._abort_reading_and_pending()
-            self.reading_exchange = None
             if status == 413:
                 # The client is likely still sending the body.
                 self.close_lingering()
