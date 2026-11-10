@@ -735,6 +735,11 @@ cdef class Request:
             return self._body
         if self._body is _BODY_GONE:
             raise StarioRuntime(BODY_GONE_ERROR)
+        if type(self._body) is RequestExchange:
+            # A complete body needs no second coroutine for read().
+            data = (<RequestExchange>self._body).c_read_now(max_size)
+            if data is not None:
+                return data
         data = await self._body.read(max_size=max_size)
         return data
 
@@ -3197,7 +3202,14 @@ cdef class RequestExchange:
             self._connection.set_body_paused(self, False)
             await self._wait_for_body_data()
 
-    async def read(self, max_size=None):
+    cdef object c_read_now(self, object max_size):
+        """``read()`` when it need not wait, without a coroutine; else None.
+
+        Bodies up to 256 KiB complete before dispatch, so ``c.req.body()``
+        normally lands here. Returns None, having changed nothing, when the
+        body is still arriving: ``read()`` then runs the same checks again
+        and waits.
+        """
         cdef Py_ssize_t limit
         if self._discard_body:
             raise StarioRuntime(
@@ -3219,12 +3231,37 @@ cdef class RequestExchange:
         if self._cached is not None:
             self._consumed_as = CONSUMED_BODY
             return self._cached
+        if not self._body_complete:
+            return None
+        self._start_read(limit)
+        return self._finish_read(limit)
 
+    cdef void _start_read(self, Py_ssize_t limit):
         self._consumed_as = CONSUMED_BODY
         self._read_max_size = limit
         if self._adopt_expected_body_buffer() != 0:
             raise MemoryError()
         self._maybe_continue()
+
+    cdef object _finish_read(self, Py_ssize_t limit):
+        if self._connection is not None:
+            self._connection.set_body_paused(self, False)
+        if self._abort_reason != ABORT_NONE:
+            self._raise_abort()
+        if self._cached is None:
+            self._cached = self._body_to_bytes()
+        if PyBytes_GET_SIZE(self._cached) > limit:
+            raise RequestBodyError(413, "Request body too large")
+        return self._cached
+
+    async def read(self, max_size=None):
+        cdef Py_ssize_t limit
+        cdef object data = self.c_read_now(max_size)
+        if data is not None:
+            return data
+        # Still arriving: c_read_now checked everything and changed nothing.
+        limit = self._read_limit(max_size)
+        self._start_read(limit)
 
         while not self._body_complete:
             if self._abort_reason != ABORT_NONE:
@@ -3240,15 +3277,7 @@ cdef class RequestExchange:
                 break
             await self._wait_for_body_data()
 
-        if self._connection is not None:
-            self._connection.set_body_paused(self, False)
-        if self._abort_reason != ABORT_NONE:
-            self._raise_abort()
-        if self._cached is None:
-            self._cached = self._body_to_bytes()
-        if PyBytes_GET_SIZE(self._cached) > limit:
-            raise RequestBodyError(413, "Request body too large")
-        return self._cached
+        return self._finish_read(limit)
 
 
 @cython.final
