@@ -1485,7 +1485,8 @@ async def test_h2_data_frames_around_inline_size_keep_order() -> None:
         assert stream_ended(frames, 1)
         assert stream_data(frames, 3) == b"tiny"
         assert stream_ended(frames, 3)
-        assert not has_rst(frames, 1) and not has_rst(frames, 3)
+        assert not has_rst(frames, 1)
+        assert not has_rst(frames, 3)
     finally:
         proto.connection_lost(None)
         await app.drain_tasks()
