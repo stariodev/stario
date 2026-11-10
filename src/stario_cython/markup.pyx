@@ -764,19 +764,19 @@ cdef object _attr_fragment(object key, object value):
     """`` key="value"`` for one scalar value, or None to omit (matches ``wire``)."""
     cdef object value_type = type(value)
     if value_type is str:
-        return f' {key}="{c_escape_attr(value)}"'
+        return _pair_string(key, c_escape_attr(value))
     if value_type is SafeString:
-        return f' {key}="{(<SafeString>value).rendered}"'
+        return _pair_string(key, (<SafeString>value).rendered)
     if value is True:
         return f" {key}"
     if value is None or value is False:
         return None
     if value_type is int or value_type is float:
-        return f' {key}="{value}"'
+        return _pair_string(key, str(value))
     raise _bad_attr_value_error(key, value)
 
 
-def splice_attribute(key, value):
+def splice_attribute(str key not None, value):
     """One ``@baked`` whole-value attribute slot (``""`` to omit)."""
     fragment = _attr_fragment(key, value)
     return "" if fragment is None else fragment
