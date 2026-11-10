@@ -33,10 +33,9 @@ def test_vendored_llhttp_is_9_4_3_or_newer() -> None:
     # 9.4.3 rejects an empty Transfer-Encoding (smuggling); 9.4.2 fixes a tab
     # after `connection: close`. Do not vendor an older release.
     header = (ROOT / "vendor/llhttp/include/llhttp.h").read_text()
-    version = tuple(
-        int(re.search(rf"#define LLHTTP_VERSION_{part} (\d+)", header).group(1))
-        for part in ("MAJOR", "MINOR", "PATCH")
-    )
+    found = re.findall(r"#define LLHTTP_VERSION_(?:MAJOR|MINOR|PATCH) (\d+)", header)
+    version = tuple(int(digits) for digits in found)
+    assert len(version) == 3
     assert version >= (9, 4, 3)
 
 

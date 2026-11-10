@@ -104,7 +104,7 @@ def test_parsed_cookies_get_reads_bytes_like_lines_as_bytes(line) -> None:
 
 def test_parsed_cookies_rejects_lines_that_are_not_text_or_bytes() -> None:
     with pytest.raises(TypeError):
-        ParsedCookies([12345])
+        ParsedCookies([12345])  # pyrefly: ignore[bad-argument-type]
 
 
 # --- RequestHeaders re-initialisation ---------------------------------------
@@ -168,9 +168,9 @@ class _CountingTransport(RecordingTransport):
         self.calls += 1
         super().write(data)
 
-    def writelines(self, parts) -> None:
+    def writelines(self, list_of_data) -> None:
         self.calls += 1
-        for part in parts:
+        for part in list_of_data:
             super().write(part)
 
 
@@ -280,7 +280,9 @@ async def test_list_body_is_counted_and_sent_from_one_iteration(mode: str) -> No
 
 
 @pytest.mark.asyncio
-async def test_http10_close_delimited_stream_closes_even_without_connection_header() -> None:
+async def test_http10_close_delimited_stream_closes_even_without_connection_header() -> (
+    None
+):
     """An HTTP/1.0 streamed body ends only when the connection closes. The
     close was keyed on ``connection: close`` in ``w.headers`` at completion;
     a handler that removed it kept the connection open behind a body with
