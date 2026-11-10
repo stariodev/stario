@@ -61,7 +61,9 @@ def _sse_payload_lines(data: bytes) -> list[bytes]:
     Rendered markup and compact JSON carry no line breaks, so the common
     case is one `data:` line and no copies of the payload.
     """
-    if b"\n" not in data and b"\r" not in data:
+    # Byte values, not b"\n": `int in bytes` is one memchr, while a bytes
+    # needle goes through the buffer protocol (several times slower).
+    if 10 not in data and 13 not in data:  # LF, CR
         return [data]
     return data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n")
 
