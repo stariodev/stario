@@ -210,6 +210,7 @@ from stario_cython.nghttp2 cimport (
     nghttp2_session_want_write,
     nghttp2_settings_entry,
     nghttp2_strerror,
+    nghttp2_session_terminate_session,
     nghttp2_submit_goaway,
     nghttp2_submit_headers,
     nghttp2_submit_ping,
@@ -547,7 +548,10 @@ cdef int _h2_on_header(
 ) noexcept:
     cdef CHttpProtocol proto = <CHttpProtocol>user_data
     try:
-        proto._h2_on_header(frame.hd.stream_id, name, namelen, value, valuelen)
+        if proto._h2_on_header(frame.hd.stream_id, name, namelen, value, valuelen):
+            # nghttp2 resets the stream and skips the rest of the block
+            # without validating it.
+            return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE
     except Exception:
         _log.exception("HTTP/2 stream callback failed; resetting the stream")
         return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE
@@ -924,6 +928,8 @@ cdef class CHttpProtocol(HttpConnection):
     cdef bint h2_goaway_pending
     # 0.0 = arm on the next tick; the final GOAWAY goes out at the deadline.
     cdef double h2_goaway_deadline
+    cdef double h2_cancel_tokens
+    cdef double h2_cancel_ts
     # Streams holding their WINDOW_UPDATE (body backpressure).
     cdef int h2_paused_streams
     # Set while a lingering close drops input (``close_lingering``); the
@@ -975,6 +981,8 @@ cdef class CHttpProtocol(HttpConnection):
         self.h2_out_used = 0
         self.h2_in_recv = False
         self.h2_in_send = False
+        self.h2_cancel_tokens = H2_RST_BURST
+        self.h2_cancel_ts = 0.0
         self.h2_goaway_sent = False
         self.h2_goaway_pending = False
         self.h2_goaway_deadline = 0.0
@@ -1941,6 +1949,10 @@ cdef class CHttpProtocol(HttpConnection):
         http_minor = <int>llhttp_get_http_minor(self.parser)
         method = <int>llhttp_get_method(self.parser)
         exchange._head_request = method == 2
+        if http_minor == 0 and http_major == 1:
+            # RFC 9110 10.1.1: ignore the expectation in an HTTP/1.0 request,
+            # whose sender may take a 1xx for the final response.
+            exchange._req_expect_continue = False
         has_body = (
             (flags & F_CHUNKED) != 0
             or ((flags & F_CONTENT_LENGTH) != 0 and content_length > 0)
@@ -3035,6 +3047,25 @@ cdef class CHttpProtocol(HttpConnection):
         ex._h2_head_bytes += add
         return False
 
+    cdef bint _h2_ignored_header(
+        self,
+        RequestExchange ex,
+        size_t namelen,
+        size_t valuelen,
+    ) noexcept:
+        """Count a field nobody reads; True once the block must stop."""
+        cdef Py_ssize_t limit = <Py_ssize_t>self.max_header_bytes
+        cdef Py_ssize_t add = (
+            <Py_ssize_t>namelen + <Py_ssize_t>valuelen + HEADER_FIELD_OVERHEAD
+        )
+        if add < 0:
+            return False
+        if ex._h2_head_bytes <= 2 * limit - add:
+            ex._h2_head_bytes += add
+            return False
+        self._h2_reject_stream(ex._h2_stream_id, NGHTTP2_ENHANCE_YOUR_CALM)
+        return True
+
     cdef void _h2_protocol_status(self, RequestExchange ex, int status) noexcept:
         """Write a protocol HTTP status on this stream (431 / similar). No handler."""
         cdef object method
@@ -3061,90 +3092,97 @@ cdef class CHttpProtocol(HttpConnection):
             _log.exception("Failed to write an HTTP/2 protocol status")
             self._h2_reject_stream(ex._h2_stream_id, NGHTTP2_ENHANCE_YOUR_CALM)
 
-    cdef void _h2_on_header(
+    cdef bint _h2_on_header(
         self,
         int32_t stream_id,
         const uint8_t* name,
         size_t namelen,
         const uint8_t* value,
         size_t valuelen,
-    ) except *:
+    ) except? -1:
         cdef RequestExchange ex = self._h2_stream_ex(stream_id)
         cdef const char* hn = <const char*>name
         cdef const char* hv = <const char*>value
-        if ex is None or ex._h2_dispatched or ex._h2_headers_done:
-            return
-        if ex._h2_headers_too_large:
-            return
+        if ex is None:
+            return False
+        if ex._h2_dispatched or ex._h2_headers_done or ex._h2_headers_too_large:
+            # Ignored fields (trailers, or a block already over the limit)
+            # still cost nghttp2 a validation pass each, and an HPACK index
+            # can name a 4 KiB value in one byte. Past twice the header
+            # limit, stop the block instead of reading it out.
+            return self._h2_ignored_header(ex, namelen, valuelen)
         if self._h2_header_oversize(ex, namelen, valuelen):
             ex._h2_headers_too_large = True
-            return
+            ex._h2_head_bytes = <Py_ssize_t>self.max_header_bytes
+            return False
 
         if namelen > 0 and name[0] == 58:
             # Pseudo-headers: validated here, bound at dispatch.
             if namelen == 7 and memcmp(hn, ":method", 7) == 0:
                 if ex._h2_got_method:
                     self._h2_reject_stream(stream_id, NGHTTP2_PROTOCOL_ERROR)
-                    return
+                    return True
                 if valuelen == 7 and memcmp(hv, "CONNECT", 7) == 0:
                     self._h2_reject_stream(stream_id, NGHTTP2_PROTOCOL_ERROR)
-                    return
+                    return True
                 ex._h2_got_method = True
                 ex._h2_method = _method_from_bytes(hv, valuelen)
                 if ex._h2_method is METH_HEAD:
                     ex._head_request = True
-                return
+                return False
 
             if namelen == 5 and memcmp(hn, ":path", 5) == 0:
                 if ex._h2_got_path:
                     self._h2_reject_stream(stream_id, NGHTTP2_PROTOCOL_ERROR)
-                    return
+                    return True
                 ex._h2_got_path = True
                 if ex.append_request_url(hv, valuelen) != 0:
                     ex._h2_headers_too_large = True
-                return
+                return False
 
             if namelen == 10 and memcmp(hn, ":authority", 10) == 0:
                 if ex._h2_got_authority:
                     self._h2_reject_stream(stream_id, NGHTTP2_PROTOCOL_ERROR)
-                    return
+                    return True
                 if not host_value_ok(hv, valuelen):
                     self._h2_reject_stream(stream_id, NGHTTP2_PROTOCOL_ERROR)
-                    return
+                    return True
                 if ex._req_host_index >= 0:
                     if not ex.header_value_equals(ex._req_host_index, hv, valuelen):
                         self._h2_reject_stream(stream_id, NGHTTP2_PROTOCOL_ERROR)
-                    else:
-                        ex._h2_got_authority = True
-                    return
+                        return True
+                    ex._h2_got_authority = True
+                    return False
                 ex._h2_got_authority = True
                 if ex.append_request_header("host", 4, hv, valuelen, True) != 0:
                     ex._h2_headers_too_large = True
-                return
+                return False
 
             if namelen == 9 and memcmp(hn, ":protocol", 9) == 0:
                 # Extended CONNECT / WebSocket — not supported.
                 self._h2_reject_stream(stream_id, NGHTTP2_PROTOCOL_ERROR)
-                return
-            return
+                return True
+            return False
 
         if not _h2_header_name_ok(hn, namelen):
             self._h2_reject_stream(stream_id, NGHTTP2_PROTOCOL_ERROR)
-            return
+            return True
 
         if namelen == 4 and memcmp(hn, "host", 4) == 0:
             if not host_value_ok(hv, valuelen):
                 self._h2_reject_stream(stream_id, NGHTTP2_PROTOCOL_ERROR)
-                return
+                return True
             if ex._req_host_index >= 0:
                 if not ex.header_value_equals(ex._req_host_index, hv, valuelen):
                     self._h2_reject_stream(stream_id, NGHTTP2_PROTOCOL_ERROR)
-                return
+                    return True
+                return False
             if ex.append_request_header(hn, namelen, hv, valuelen, True) != 0:
                 ex._h2_headers_too_large = True
-            return
+            return False
         if ex.append_request_header(hn, namelen, hv, valuelen, True) != 0:
             ex._h2_headers_too_large = True
+        return False
 
     cdef void _h2_on_data(self, int32_t stream_id, const uint8_t* data, size_t length) except *:
         cdef RequestExchange ex = self._h2_stream_ex(stream_id)
@@ -3283,6 +3321,7 @@ cdef class CHttpProtocol(HttpConnection):
                     # Recycle from on_handler_done after CancelledError so
                     # the handler cannot touch a pooled exchange.
                     task.cancel()
+                self._h2_count_cancelled_handler()
             elif not ex.handler_started:
                 ex.cancel_before_start()
             else:
@@ -3296,6 +3335,32 @@ cdef class CHttpProtocol(HttpConnection):
 
         if not self.h2_streams and not self.rejected:
             self._arm_timeout(TIMEOUT_IDLE, self.keep_alive_timeout)
+
+    cdef void _h2_count_cancelled_handler(self):
+        """Rate-limit streams that close while their handler is running.
+
+        nghttp2's reset limit counts RST_STREAM frames the client sends. A
+        client can also make the server reset a stream it already dispatched
+        (MadeYouReset, CVE-2025-8671: a DATA frame past content-length,
+        malformed trailers, a window overflow), which starts and cancels a
+        handler per stream under any concurrency limit. Both kinds draw
+        from this bucket; an empty one ends the connection.
+        """
+        cdef double now
+        if self.h2 == NULL or self.rejected:
+            return
+        now = self.loop.time()
+        self.h2_cancel_tokens += (now - self.h2_cancel_ts) * H2_RST_RATE
+        if self.h2_cancel_tokens > H2_RST_BURST:
+            self.h2_cancel_tokens = H2_RST_BURST
+        self.h2_cancel_ts = now
+        if self.h2_cancel_tokens >= 1.0:
+            self.h2_cancel_tokens -= 1.0
+            return
+        # Queued here (this runs inside nghttp2 callbacks); the send that
+        # follows every recv writes the GOAWAY, and the connection closes
+        # once nghttp2 has nothing left to read or write.
+        nghttp2_session_terminate_session(self.h2, NGHTTP2_ENHANCE_YOUR_CALM)
 
     cdef void _h2_final_goaway(self):
         self.h2_goaway_pending = False
@@ -3507,7 +3572,7 @@ cdef class CHttpProtocol(HttpConnection):
                 continue
             if nl == 12 and memcmp(np, "keep-alive: ", 12) == 0:
                 continue
-            if nl == 19 and memcmp(np, "proxy-connection: ", 19) == 0:
+            if nl == 18 and memcmp(np, "proxy-connection: ", 18) == 0:
                 continue
             if nl == 9 and memcmp(np, "upgrade: ", 9) == 0:
                 continue

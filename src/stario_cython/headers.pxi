@@ -96,6 +96,7 @@ cdef extern from *:
         Py_ssize_t* out_n,
     ) except -1
     int stario_header_value_ok(const unsigned char* p, Py_ssize_t n) noexcept
+    void stario_hdr_lower_init() noexcept
 
 
 # Open-addressed name→index table: 0 is empty, else the intern index + 1.
@@ -187,6 +188,9 @@ cdef void _init_intern() noexcept:
 
 
 _init_intern()
+# Fill the name and value tables at import, under the import lock: a lazy
+# first use could race between threads on a free-threaded build.
+stario_hdr_lower_init()
 
 
 cdef int _fold_header_name(object name, char* buf, Py_ssize_t* out_n) except -1:

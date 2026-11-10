@@ -1707,7 +1707,10 @@ async def test_close_error_does_not_splice_status_into_started_response() -> Non
 
 
 @pytest.mark.asyncio
-async def test_unread_body_trickle_does_not_reset_idle_timeout() -> None:
+async def test_early_response_to_expect_closes_despite_body_trickle() -> None:
+    """A final response before 100 Continue leaves the body optional for the
+    client, so the connection is not reused: it lingers, then closes, and a
+    trickled body does not keep it open."""
     app = App()
 
     async def ignore_body(_c, w) -> None:
@@ -1727,9 +1730,9 @@ async def test_unread_body_trickle_does_not_reset_idle_timeout() -> None:
         )
         await _drain(app)
         assert response_status(transport.writes) == 200
-        assert not transport.is_closing()
+        assert b"connection: close" in b"".join(transport.writes).lower()
         proto.data_received(b"x")
-        await asyncio.sleep(_WAIT)
+        await asyncio.sleep(3.0)
         assert transport.is_closing()
     finally:
         if not transport.is_closing():

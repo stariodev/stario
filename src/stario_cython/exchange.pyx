@@ -270,6 +270,19 @@ cdef inline list _thread_pool():
     return <list>pool
 
 
+cdef inline Py_ssize_t _real_len(object obj) except -1:
+    """Length of the bytes a C pointer to `obj` covers.
+
+    `len()` would call a subclass's `__len__`; a wrong answer there would
+    read past the object or misstate Content-Length.
+    """
+    if isinstance(obj, bytes):
+        return PyBytes_GET_SIZE(obj)
+    if isinstance(obj, bytearray):
+        return PyByteArray_GET_SIZE(obj)
+    return len(obj)
+
+
 cdef inline bint _is_bytes_like(object obj) except -1:
     if isinstance(obj, (bytes, bytearray)):
         return True
@@ -449,9 +462,11 @@ cdef inline int _require_final_status(int status) except -1:
 cdef Py_ssize_t _parse_declared_length(object raw) except -1:
     cdef object parsed
     try:
-        parsed = int(raw)
-        if parsed < 0:
+        # Digits only, as the wire grammar: int() would also take "5_0",
+        # "+50", and padded forms, and a peer may read those differently.
+        if not isinstance(raw, bytes) or not (<bytes>raw).isdigit():
             raise ValueError()
+        parsed = int(raw)
         return parsed
     except (TypeError, ValueError, OverflowError) as exc:
         raise StarioError(
@@ -503,6 +518,13 @@ cdef inline object _wire_part(object part):
     if type(part) is bytes:
         return part
     _require_bytes_like(part)
+    if isinstance(part, bytes):
+        # A subclass: copy its storage, not what its __bytes__ returns.
+        return PyBytes_FromStringAndSize(PyBytes_AS_STRING(part), PyBytes_GET_SIZE(part))
+    if isinstance(part, bytearray):
+        return PyBytes_FromStringAndSize(
+            PyByteArray_AS_STRING(part), PyByteArray_GET_SIZE(part)
+        )
     return bytes(part)
 
 
@@ -1070,7 +1092,7 @@ cdef class RequestExchange:
         return 0
 
     cdef int _buf_bytes(self, object data) except -1:
-        cdef Py_ssize_t n = len(data)
+        cdef Py_ssize_t n = _real_len(data)
         cdef const char* p
         cdef Py_buffer view
         if n == 0:
@@ -1895,12 +1917,12 @@ cdef class RequestExchange:
         if body is None:
             return 0
         if _is_bytes_like(body):
-            return <Py_ssize_t>len(body)
+            return _real_len(body)
         if isinstance(body, (list, tuple)):
             total = 0
             for part in body:
                 _require_bytes_like(part)
-                total += <Py_ssize_t>len(part)
+                total += _real_len(part)
             return total
         raise TypeError(BODY_TYPE_ERROR)
 
@@ -1944,7 +1966,7 @@ cdef class RequestExchange:
         size_t* out_len,
     ) except -1:
         cdef const char* ptr = data
-        cdef size_t n = <size_t>len(data)
+        cdef size_t n = <size_t>_real_len(data)
         if encoding == b"br":
             # Whole body known: the one-shot API skips the stream encoder.
             if stario_brotli_compress_borrowed(
@@ -1981,7 +2003,7 @@ cdef class RequestExchange:
                 )
             finally:
                 PyBuffer_Release(&view)
-        return self._block_raw(data, <size_t>len(data), out, out_len)
+        return self._block_raw(data, <size_t>_real_len(data), out, out_len)
 
     cdef int _block_raw(
         self,
@@ -2177,6 +2199,17 @@ cdef class RequestExchange:
                 help_text="Content-Type must be a header value without CR or LF.",
             ) from exc
 
+        if (
+            self._expect_continue
+            and not self._http2
+            and self._body_active
+            and not self._body_complete
+        ):
+            # A final response before 100 Continue: the client may or may
+            # not send the body (RFC 9110 10.1.1), so the next bytes cannot
+            # be framed. Close instead of reading a request as a body.
+            self._keep_alive = False
+            self.headers.c_set(b"connection", b"close")
         self._expect_continue = False
         if not _may_have_body(status):
             body = b""
@@ -2412,6 +2445,8 @@ cdef class RequestExchange:
         elif raw_length is not None:
             headers.c_remove(b"transfer-encoding")
             self._declared_length = _parse_declared_length(raw_length)
+            # One canonical field: drops duplicates and leading zeros.
+            headers.c_set(b"content-length", _dec(<size_t>self._declared_length))
         elif self._head_request:
             # RFC 9110 9.3.2: a HEAD response may omit Content-Length, which
             # GET only learns while streaming. Everything else matches GET.
@@ -2430,6 +2465,15 @@ cdef class RequestExchange:
             else:
                 headers.c_set(b"transfer-encoding", b"chunked")
             self._stream_encoding(headers, True)
+        if (
+            self._expect_continue
+            and not self._http2
+            and self._body_active
+            and not self._body_complete
+        ):
+            # As in respond(): the body may never come, so do not reuse.
+            self._keep_alive = False
+            headers.c_set(b"connection", b"close")
         self._expect_continue = False
 
         if self._http2:
@@ -2707,6 +2751,15 @@ cdef class RequestExchange:
         return PyByteArray_AS_STRING(self._body_buf)
 
     cdef int _body_reserve(self, Py_ssize_t need) noexcept:
+        # The allocations below raise on failure. In a noexcept function
+        # that would be reported as "unraisable" and returned as 0, and the
+        # caller would copy body bytes into a buffer that is not there.
+        try:
+            return self._body_reserve_checked(need)
+        except BaseException:
+            return -1
+
+    cdef int _body_reserve_checked(self, Py_ssize_t need) except? -1:
         cdef object buf
         cdef Py_ssize_t cap
         if need <= 0:
@@ -2801,6 +2854,12 @@ cdef class RequestExchange:
 
     cdef int _adopt_expected_body_buffer(self) noexcept:
         """Grow the one body buffer to the declared Content-Length."""
+        try:
+            return self._adopt_expected_body_checked()
+        except BaseException:
+            return -1
+
+    cdef int _adopt_expected_body_checked(self) except? -1:
         cdef object buf
         if self._expected_size <= 0 or self._consumed_as == CONSUMED_STREAM:
             return 0
@@ -3007,7 +3066,11 @@ cdef class RequestExchange:
             return 0
 
         used = self._body_used + <Py_ssize_t>length
-        if self._body_reserve(used) != 0:
+        if (
+            self._body_reserve(used) != 0
+            or self._body_buf is None
+            or used > self._body_cap
+        ):
             return -1
         if length:
             memcpy(

@@ -448,7 +448,9 @@ cdef class RequestExchange:
     cdef void _clear_body_storage(self) noexcept
     cdef char* _body_ptr(self) noexcept
     cdef int _body_reserve(self, Py_ssize_t need) noexcept
+    cdef int _body_reserve_checked(self, Py_ssize_t need) except? -1
     cdef int _adopt_expected_body_buffer(self) noexcept
+    cdef int _adopt_expected_body_checked(self) except? -1
     cdef object _body_to_bytes(self)
     cdef object _body_take(self, Py_ssize_t max_n)
     cdef void reset_response(self, int encoding)
