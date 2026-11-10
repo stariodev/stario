@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import threading
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,9 @@ from stario import App, Route
 from stario.exceptions import StarioError
 from stario_cython.codecs import (
     BrotliDecoder,
+    BrotliEncoder,
     ZstdDecoder,
+    ZstdEncoder,
     brotli_compress,
     brotli_decompress,
     zstd_compress,
@@ -120,3 +123,34 @@ def test_brotli_decoder_rejects_bytes_after_the_stream() -> None:
     assert decoder.is_finished()
     with pytest.raises(StarioError):
         decoder.decompress(b"junk")
+
+
+def _hammer(encoder, barrier: threading.Barrier, errors: list[BaseException]) -> None:
+    barrier.wait()
+    try:
+        for _ in range(50):
+            encoder.block(b"x" * 512)
+        encoder.finish(b"end")
+    except StarioError as exc:  # another thread finished it first
+        errors.append(exc)
+
+
+def test_stream_encoder_survives_concurrent_use() -> None:
+    """Free-threaded builds: two threads on one encoder raced on its C state,
+    and two finish() calls could both return it to the pool (a later double
+    use). With the GIL this only checks the results stay consistent."""
+    for cls in (ZstdEncoder, BrotliEncoder):
+        for _ in range(20):
+            encoder = cls(3)
+            start = threading.Barrier(4)
+            errors: list[BaseException] = []
+            threads = [
+                threading.Thread(target=_hammer, args=(encoder, start, errors))
+                for _ in range(4)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            assert encoder.finish() == b""
+            assert all("finished" in str(exc) for exc in errors)
