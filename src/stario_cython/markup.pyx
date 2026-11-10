@@ -1889,9 +1889,18 @@ cdef int _grow(Buf* b, Py_ssize_t need) except -1:
 
 
 cdef inline int _write(Buf* b, const char* s, Py_ssize_t n) except -1:
+    cdef Py_ssize_t i
+    cdef char* d
     if b.len + n > b.cap:
         _grow(b, n)
-    memcpy(b.data + b.len, s, n)
+    d = b.data + b.len
+    if n <= 16:
+        # Tag names and short text: a loop the compiler keeps inline,
+        # cheaper than a memcpy call for a few bytes.
+        for i in range(n):
+            d[i] = s[i]
+    else:
+        memcpy(d, s, n)
     b.len += n
     return 0
 
