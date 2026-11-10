@@ -1801,6 +1801,60 @@ def aria(attrs):
 
 
 # ---------------------------------------------------------------------------
+# styles()
+
+cdef bint _css_breakout(object s, bint colon):
+    """True if ``s`` has ``; { } \\`` (and ``:`` when ``colon``): text that
+    could end the declaration or open a block."""
+    cdef int kind = PyUnicode_KIND(s)
+    cdef const void* data = PyUnicode_DATA(s)
+    cdef Py_ssize_t i
+    cdef Py_UCS4 c
+    for i in range(PyUnicode_GET_LENGTH(s)):
+        c = PyUnicode_READ(kind, data, i)
+        if c == 59 or c == 123 or c == 125 or c == 92 or (colon and c == 58):
+            return True
+    return False
+
+
+def styles(declarations):
+    """Return a pre-rendered `style` attribute fragment."""
+    cdef list parts = []
+    cdef object value_type, key_type, rendered_value
+    # Only the plain case runs here: str keys and str / int / float values
+    # that need no error. Anything else goes to the Python version in
+    # stario.markup.attributes, which owns the checks and their messages
+    # (and raises the same error it always did).
+    for key, value in declarations.items():
+        if value is None or value is False:
+            continue
+        key_type = type(key)
+        value_type = type(value)
+        if (
+            key_type is not str
+            or PyUnicode_GET_LENGTH(key) == 0
+            or PyUnicode_READ_CHAR(key, 0) == 64  # "@"
+            or _css_breakout(key, True)
+        ):
+            return _styles_checked(declarations)
+        if value_type is str:
+            rendered_value = c_escape_attr(value)
+            if _css_breakout(rendered_value, False):
+                return _styles_checked(declarations)
+        elif value_type is int or value_type is float:
+            rendered_value = str(value)
+        else:
+            return _styles_checked(declarations)
+        PyList_Append(parts, f"{c_escape_attr(key)}:{rendered_value};")
+    return Attrs.__new__(Attrs, f' style="{"".join(parts)}"')
+
+
+cdef object _styles_checked(object declarations):
+    from stario.markup.attributes import _styles_checked as checked
+    return checked(declarations)
+
+
+# ---------------------------------------------------------------------------
 # Render: depth-first into one UTF-8 buffer
 
 cdef struct Buf:
