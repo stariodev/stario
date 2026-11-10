@@ -497,13 +497,29 @@ cdef object _status_line(int status):
     return b"HTTP/1.1 %d \r\n" % status
 
 
+cdef inline Py_ssize_t _format_dec(char* end, size_t n) noexcept:
+    """Write ``n`` in decimal ending just before ``end``; return the digit count.
+
+    The caller's buffer must hold 20 bytes (``SIZE_MAX`` has 20 digits).
+    """
+    cdef char* p = end
+    while True:
+        p -= 1
+        p[0] = <char>(48 + n % 10)
+        n //= 10
+        if n == 0:
+            break
+    return end - p
+
+
 cdef object _dec(size_t n):
-    cdef char buf[16]
-    cdef int i
+    cdef char buf[24]
+    cdef Py_ssize_t k
     if n < 1024:
         return _DEC_SMALL[n]
-    i = sprintf(buf, "%zu", n)
-    return PyBytes_FromStringAndSize(buf, i)
+    # A declared Content-Length reaches here with up to 19 digits.
+    k = _format_dec(buf + 24, n)
+    return PyBytes_FromStringAndSize(buf + 24 - k, k)
 
 
 cdef object _chunk_header(Py_ssize_t n):
@@ -1116,9 +1132,9 @@ cdef class RequestExchange:
         cdef int i
         if base == 16:
             i = sprintf(tmp, "%zx", n)
-        else:
-            i = sprintf(tmp, "%zu", n)
-        return self._buf_add(tmp, i)
+            return self._buf_add(tmp, i)
+        i = <int>_format_dec(tmp + 24, n)
+        return self._buf_add(tmp + 24 - i, i)
 
     cdef void _flush(self):
         cdef object payload
@@ -2474,6 +2490,9 @@ cdef class RequestExchange:
                 headers.c_remove(b"transfer-encoding")
                 headers.c_set(b"connection", b"close")
                 self._close_delimited = True
+                # The body ends at the close; do not rely on the header
+                # (a handler can still edit w.headers) to make it happen.
+                self._keep_alive = False
             else:
                 headers.c_set(b"transfer-encoding", b"chunked")
             self._stream_encoding(headers, True)

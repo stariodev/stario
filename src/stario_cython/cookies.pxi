@@ -257,8 +257,17 @@ cdef class ParsedCookies:
         for line in lines:
             if isinstance(line, str):
                 self._lines.append((<str>line).encode("latin-1"))
-            elif line:
+            elif not line:
+                continue
+            elif type(line) is bytes:
                 self._lines.append(line)
+            elif isinstance(line, (bytes, bytearray, memoryview)):
+                # Scanned through PyBytes_AS_STRING: store an exact bytes copy.
+                self._lines.append(_wire_part(line))
+            else:
+                raise TypeError(
+                    "cookie lines must be str or bytes, got " + type(line).__name__
+                )
 
     cdef list _cookie_lines(self):
         cdef object headers
@@ -276,11 +285,9 @@ cdef class ParsedCookies:
             values = (<RequestHeaders>headers).c_getlist_n("cookie", 6)
             out.extend(values)
         else:
-            for value in headers.getlist("cookie"):
-                if isinstance(value, str):
-                    out.append((<str>value).encode("latin-1"))
-                elif value:
-                    out.append(value)
+            self._lines = out
+            self._extend_lines(headers.getlist("cookie"))
+            return self._lines
         self._lines = out
         return out
 
