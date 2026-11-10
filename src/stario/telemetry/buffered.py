@@ -1,9 +1,9 @@
 """Shared bounded queue, writer thread, and self-metrics for Json/SQLite sinks."""
 
-import queue
 import sys
 import threading
 import time
+from collections import deque
 from typing import Any, Self, cast
 
 from .core import Attributes, Span, TelemetryStats, Tracer
@@ -35,6 +35,7 @@ class _BufferedTracer:
         "_max_pending_spans",
         "_metrics_lock",
         "_pending",
+        "_pending_lock",
         "_running",
         "_serialization_error_count",
         "_stop_requested",
@@ -69,9 +70,10 @@ class _BufferedTracer:
         self._max_pending_spans = max_pending_spans
         self._max_batch_spans = min(max_batch_spans, max_pending_spans)
         self._wake_batch_spans = self._max_batch_spans
-        self._pending: queue.Queue[RecordingSpan] = queue.Queue(
-            maxsize=max_pending_spans
-        )
+        # A deque under a plain lock: queue.Queue's Condition bookkeeping cost
+        # ~1.4 µs per finished span on the request thread.
+        self._pending: deque[RecordingSpan] = deque()
+        self._pending_lock = threading.Lock()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
         self._running = False
@@ -199,23 +201,29 @@ class _BufferedTracer:
                 return
 
     def _enqueue_finished(self, span: RecordingSpan) -> None:
-        try:
-            self._pending.put_nowait(span)
-        except queue.Full:
+        with self._pending_lock:
+            pending = self._pending
+            size = len(pending)
+            if size < self._max_pending_spans:
+                pending.append(span)
+                size += 1
+            else:
+                size = -1
+        wake = self._wake
+        if size < 0:
             self._report_dropped(span)
-            self._wake.set()
+            wake.set()
             return
-        if self._pending.qsize() >= self._wake_batch_spans:
-            self._wake.set()
+        # Event.set takes a Condition; skip it while the writer is already
+        # signalled (it clears the flag before taking the batch).
+        if size >= self._wake_batch_spans and not wake.is_set():
+            wake.set()
 
     def _take_pending(self) -> list[RecordingSpan]:
-        batch: list[RecordingSpan] = []
-        while True:
-            try:
-                batch.append(self._pending.get_nowait())
-            except queue.Empty:
-                break
-        return batch
+        with self._pending_lock:
+            pending = self._pending
+            self._pending = deque()
+        return list(pending)
 
     def _report_dropped(self, span: RecordingSpan) -> None:
         """Count a span the full queue dropped; say so at most once a second."""
