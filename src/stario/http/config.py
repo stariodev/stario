@@ -96,7 +96,9 @@ class RequestPolicy:
             ("keep_alive_timeout", keep_alive_timeout),
             ("write_timeout", write_timeout),
         ):
-            if value <= 0:
+            # `not >`: NaN compares false to every deadline, so a NaN
+            # timeout would never fire (no slow-client protection).
+            if not value > 0:
                 raise StarioError(
                     f"{field} must be greater than 0",
                     help_text="Use a positive timeout in seconds.",
@@ -210,7 +212,7 @@ class ServerConfig:
                 "port must be between 1 and 65535",
                 help_text="Use a valid TCP port number.",
             )
-        if graceful_shutdown_timeout < 0:
+        if not graceful_shutdown_timeout >= 0:
             raise StarioError(
                 "graceful_shutdown_timeout must be greater than or equal to 0",
                 help_text="Use zero for immediate shutdown or a positive drain window in seconds.",

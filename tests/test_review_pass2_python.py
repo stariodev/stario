@@ -11,8 +11,9 @@ from urllib.parse import quote
 
 import pytest
 
-from stario.exceptions import RequestBodyError
+from stario.exceptions import RequestBodyError, StarioError
 from stario.forms import read_form
+from stario.http.config import RequestPolicy, ServerConfig, request_policy_from_env
 from stario.relay import Relay
 from tests.helpers import make_request
 
@@ -160,3 +161,27 @@ async def test_filename_star_still_counts_against_max_files() -> None:
     with pytest.raises(RequestBodyError) as info:
         await read_form(req, max_files=2)
     assert info.value.status_code == 413
+
+
+# --- config ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["header_timeout", "body_timeout", "keep_alive_timeout", "write_timeout"],
+)
+def test_request_policy_rejects_nan_timeouts(field: str) -> None:
+    # Every deadline comparison with NaN is false: the timeout never fires.
+    with pytest.raises(StarioError, match=field):
+        RequestPolicy(**{field: float("nan")})
+
+
+def test_nan_timeout_from_env_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STARIO_REQUESTS_HEADER_TIMEOUT", "nan")
+    with pytest.raises(StarioError, match="header_timeout"):
+        request_policy_from_env()
+
+
+def test_server_config_rejects_nan_shutdown_timeout() -> None:
+    with pytest.raises(StarioError, match="graceful_shutdown_timeout"):
+        ServerConfig(graceful_shutdown_timeout=float("nan"))
