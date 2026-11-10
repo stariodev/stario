@@ -269,6 +269,13 @@ cdef bint _bound = False
 # time it reads one, and every thread reads these on every call.
 cdef dict _VALID_KEYS = <dict>stario_shared_dict()
 cdef int _VALID_KEYS_MAX = 4096
+# Cache entries live as long as the process (and are immortal on
+# free-threaded builds), so a cap on their number alone does not bound the
+# memory: a name or class list from user data could be megabytes, and 1024
+# such entries would pin gigabytes. Only short strings are remembered;
+# longer ones validate or render on every call.
+cdef Py_ssize_t _CACHE_MAX_LEN = 256
+cdef Py_ssize_t _CLASSES_CACHE_MAX_LEN = 1024
 
 # Rendered ``class`` fragments keyed by token tuples of str / None / False
 # (Tailwind lists repeat). Same bound rule. ``stario.markup.attributes`` exposes the dict.
@@ -749,7 +756,7 @@ cdef inline object _valid_key(object raw_key):
         Py_DECREF(key)  # ``key`` holds its own reference now
         return key
     key = _validate_attribute_key(raw_key)
-    if len(_VALID_KEYS) < _VALID_KEYS_MAX:
+    if len(_VALID_KEYS) < _VALID_KEYS_MAX and PyUnicode_GET_LENGTH(key) <= _CACHE_MAX_LEN:
         # setdefault: the first insert wins and is never replaced, so no
         # reader can see an entry freed under it.
         key = stario_shared_str(key)
@@ -1712,7 +1719,11 @@ def classes(*tokens):
             raise _class_token_error(token, 'h.Div(classes("btn", "primary"))')
 
     text = ' class="' + " ".join(rendered) + '"'
-    if not cacheable or len(_classes_cache) >= _CLASSES_CACHE_MAX:
+    if (
+        not cacheable
+        or len(_classes_cache) >= _CLASSES_CACHE_MAX
+        or PyUnicode_GET_LENGTH(text) > _CLASSES_CACHE_MAX_LEN
+    ):
         return Attrs.__new__(Attrs, text)
     # Every thread gets the cached fragment, and each element built with it
     # holds its string: on free-threaded builds both are immortal (an
@@ -1739,7 +1750,7 @@ cdef object _prefixed_key(object prefix, object key):
     if stario_dict_get_ref(_PREFIXED_KEYS, prefix, &hit):
         names = <object>hit
         Py_DECREF(names)
-    elif len(_PREFIXED_KEYS) < 64:
+    elif len(_PREFIXED_KEYS) < 64 and PyUnicode_GET_LENGTH(prefix) <= _CACHE_MAX_LEN:
         names = _PREFIXED_KEYS.setdefault(stario_shared_str(prefix), stario_shared_dict())
     else:
         cached = False
@@ -1748,7 +1759,7 @@ cdef object _prefixed_key(object prefix, object key):
         Py_DECREF(wire_key)
         return wire_key
     wire_key = prefix + "-" + _valid_key(key)
-    if cached and len(names) < _VALID_KEYS_MAX:
+    if cached and len(names) < _VALID_KEYS_MAX and PyUnicode_GET_LENGTH(wire_key) <= _CACHE_MAX_LEN:
         wire_key = (<dict>names).setdefault(
             stario_shared_str(key), stario_shared_str(wire_key)
         )
