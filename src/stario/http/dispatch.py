@@ -149,6 +149,26 @@ def _wrap(handler: Handler, middleware: Sequence[Middleware]) -> Handler:
     return wrapped
 
 
+def _memoized_na(
+    factory: MethodNotAllowedHandler, middleware: tuple[Middleware, ...]
+) -> MethodNotAllowedHandler:
+    """`factory` with `middleware` applied, built once per allowed-method set.
+
+    The compiled router calls this on every 405 under a scope that has
+    middleware or a custom handler; without the cache each one rebuilt the
+    wrapper chain (and re-inspected a custom handler).
+    """
+    built: dict[frozenset[str], Handler] = {}
+
+    def resolve(allowed: frozenset[str]) -> Handler:
+        handler = built.get(allowed)
+        if handler is None:
+            handler = built[allowed] = _wrap(factory(allowed), middleware)
+        return handler
+
+    return resolve
+
+
 def _path_step(node: Node, kind: str, name: str) -> Node | None:
     if kind == "exact":
         return node.exact.get(name)
@@ -361,16 +381,9 @@ class Router:
         if method_na is not None and not scoped:
             out.method_not_allowed_handler = method_na
         elif scoped or method_na is not None:
-            factory = method_na or method_not_allowed_handler
-
-            def wrapped_na(
-                allowed: frozenset[str],
-                f: MethodNotAllowedHandler = factory,
-                mws: tuple[Middleware, ...] = scoped,
-            ) -> Handler:
-                return _wrap(f(allowed), mws)
-
-            out.method_not_allowed_handler = wrapped_na
+            out.method_not_allowed_handler = _memoized_na(
+                method_na or method_not_allowed_handler, scoped
+            )
         if node.endpoints:
             out.endpoints = {}
             for method, endpoint in node.endpoints.items():
@@ -510,7 +523,9 @@ class Router:
             require_async_handler(resolved, what="Method-not-allowed handler")
             return resolved
 
-        self._policy_node(pattern).method_not_allowed_handler = checked
+        self._policy_node(pattern).method_not_allowed_handler = _memoized_na(
+            checked, ()
+        )
         self._invalidate_lookup()
 
     def add(

@@ -8,6 +8,7 @@ without the whole body in memory. `read_form` decides what to keep.
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from functools import lru_cache
 from urllib.parse import unquote
 
 _PREAMBLE = 0
@@ -18,6 +19,8 @@ _DONE = 4
 
 # The rest of a delimiter line: optional transport padding, then CRLF.
 _MAX_DELIMITER_LINE = 1024
+# `filename*` charsets decoded as Latin-1; every other one is read as UTF-8.
+_LATIN1_CHARSETS = frozenset(("iso-8859-1", "latin-1", "latin1"))
 
 
 class MultipartError(ValueError):
@@ -89,7 +92,19 @@ def parse_options(
     return head.strip().lower(), params
 
 
+# Part header blocks up to this size are memoized: a form posts the same
+# few blocks (`form-data; name="title"`) on every submission.
+_CACHED_HEADER_BYTES = 512
+
+
 def _parse_part_headers(block: bytes) -> PartStart:
+    """The `PartStart` of one part header block (`MultipartError` if invalid)."""
+    if len(block) <= _CACHED_HEADER_BYTES:
+        return _parse_part_headers_cached(block)
+    return _parse_part_headers_uncached(block)
+
+
+def _parse_part_headers_uncached(block: bytes) -> PartStart:
     disposition: str | None = None
     content_type: str | None = None
     for line in block.split(b"\r\n"):
@@ -113,12 +128,17 @@ def _parse_part_headers(block: bytes) -> PartStart:
     elif "filename*" in params:
         # RFC 5987 (charset''percent-encoded), which RFC 7578 forbids but
         # some non-browser clients still send.
+        # Only the charsets RFC 8187 requires: the client must not choose
+        # the codec (punycode decodes in quadratic time; idna raises).
         charset, _, encoded = params["filename*"].partition("''")
-        try:
-            filename = unquote(encoded, encoding=charset or "utf-8", errors="replace")
-        except LookupError:
-            filename = unquote(encoded, errors="replace")
+        if charset.strip().lower() not in _LATIN1_CHARSETS:
+            charset = "utf-8"
+        filename = unquote(encoded, encoding=charset, errors="replace")
     return PartStart(_unescape_quoted(params["name"]), filename, content_type)
+
+
+# PartStart is frozen, and an invalid block raises, which is not cached.
+_parse_part_headers_cached = lru_cache(maxsize=256)(_parse_part_headers_uncached)
 
 
 def _unescape_quoted(value: str) -> str:

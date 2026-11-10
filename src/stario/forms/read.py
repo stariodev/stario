@@ -6,7 +6,7 @@ read the query string; other methods read the body by its `Content-Type`
 """
 
 import re
-from functools import partial
+from functools import lru_cache, partial
 from tempfile import SpooledTemporaryFile
 
 from stario.exceptions import RequestBodyError
@@ -81,8 +81,7 @@ async def read_form(
     raw_type = req.headers.get("content-type")
     if raw_type is None:
         raise RequestBodyError(415, "Expected a form body")
-    media_type, params = parse_options(raw_type)
-    charset = params.get("charset", "utf-8").lower()
+    media_type, charset, boundary = _content_type(raw_type)
     if charset not in ("utf-8", "utf8"):
         raise RequestBodyError(415, "Form charset must be UTF-8")
     if media_type == _URLENCODED:
@@ -93,7 +92,6 @@ async def read_form(
             raise RequestBodyError(413, "Too many form fields")
         return _fields_form(ParsedQuery(body).items(), max_fields)
     if media_type == _MULTIPART:
-        boundary = params.get("boundary", "")
         if _BOUNDARY.fullmatch(boundary) is None:
             raise RequestBodyError(400, "Invalid multipart boundary")
         return await _read_multipart(
@@ -108,6 +106,27 @@ async def read_form(
             max_part_header_bytes=max_part_header_bytes,
         )
     raise RequestBodyError(415, "Expected a form body")
+
+
+def _content_type(raw: str) -> tuple[str, str, str]:
+    """Media type, lowercased charset, and boundary of a `Content-Type` value."""
+    if len(raw) <= 256:
+        return _content_type_cached(raw)
+    return _parse_content_type(raw)
+
+
+def _parse_content_type(raw: str) -> tuple[str, str, str]:
+    media_type, params = parse_options(raw)
+    return (
+        media_type,
+        params.get("charset", "utf-8").lower(),
+        params.get("boundary", ""),
+    )
+
+
+# One app sees few distinct Content-Type values; a browser's multipart
+# boundary changes per submission, so this only spares the parse on repeats.
+_content_type_cached = lru_cache(maxsize=64)(_parse_content_type)
 
 
 def _too_many_pairs(body: bytes, limit: int) -> bool:

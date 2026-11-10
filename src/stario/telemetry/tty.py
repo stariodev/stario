@@ -357,6 +357,13 @@ def _uuid_tail(uid: UUID) -> str:
     return s[-8:] if len(s) >= 8 else s
 
 
+# Unicode bidirectional embeddings, overrides, isolates and marks: a terminal
+# that honours them reorders the text after them on the line.
+_BIDI_CONTROLS = frozenset(
+    "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+)
+
+
 def _sanitize(text: object, *, multiline: bool, newline: str = "↵") -> str:
     """Make a user-supplied string terminal-safe.
 
@@ -372,6 +379,9 @@ def _sanitize(text: object, *, multiline: bool, newline: str = "↵") -> str:
             out.append("\n" if multiline else newline)
         elif unicodedata.category(ch) == "Cc":
             out.append(f"\\x{ord(ch):02x}")
+        elif ch in _BIDI_CONTROLS:
+            # A request path with U+202E would reverse the rest of the line.
+            out.append(f"\\u{ord(ch):04x}")
         else:
             out.append(ch)
     return "".join(out)
