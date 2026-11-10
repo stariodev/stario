@@ -8,6 +8,7 @@ without the whole body in memory. `read_form` decides what to keep.
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from functools import lru_cache
 from urllib.parse import unquote
 
 _PREAMBLE = 0
@@ -91,7 +92,19 @@ def parse_options(
     return head.strip().lower(), params
 
 
+# Part header blocks up to this size are memoized: a form posts the same
+# few blocks (`form-data; name="title"`) on every submission.
+_CACHED_HEADER_BYTES = 512
+
+
 def _parse_part_headers(block: bytes) -> PartStart:
+    """The `PartStart` of one part header block (`MultipartError` if invalid)."""
+    if len(block) <= _CACHED_HEADER_BYTES:
+        return _parse_part_headers_cached(block)
+    return _parse_part_headers_uncached(block)
+
+
+def _parse_part_headers_uncached(block: bytes) -> PartStart:
     disposition: str | None = None
     content_type: str | None = None
     for line in block.split(b"\r\n"):
@@ -122,6 +135,10 @@ def _parse_part_headers(block: bytes) -> PartStart:
             charset = "utf-8"
         filename = unquote(encoded, encoding=charset, errors="replace")
     return PartStart(_unescape_quoted(params["name"]), filename, content_type)
+
+
+# PartStart is frozen, and an invalid block raises, which is not cached.
+_parse_part_headers_cached = lru_cache(maxsize=256)(_parse_part_headers_uncached)
 
 
 def _unescape_quoted(value: str) -> str:
