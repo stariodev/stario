@@ -36,25 +36,6 @@ class _Uuid7State(threading.local):
 _uuid7_state = _Uuid7State()
 
 
-def _uuid7_random(state: _Uuid7State, n: int) -> bytes:
-    """The next `n` bytes of this thread's pool; refills from `os.urandom`."""
-    pos = state.pos
-    end = pos + n
-    if end > len(state.pool):
-        state.pool = os.urandom(_RANDOM_POOL_BYTES)
-        pos, end = 0, n
-    state.pos = end
-    return state.pool[pos:end]
-
-
-def _uuid7_get_counter_and_tail(state: _Uuid7State) -> tuple[int, int]:
-    rand = int.from_bytes(_uuid7_random(state, 10))
-    # 42-bit counter with MSB set to 0
-    counter = (rand >> 32) & 0x1FF_FFFF_FFFF
-    tail = rand & 0xFFFF_FFFF
-    return counter, tail
-
-
 def _span_id() -> UUID:
     """UUIDv7 for span and trace ids. Same bits as CPython 3.14 `uuid.uuid7`.
 
@@ -65,30 +46,47 @@ def _span_id() -> UUID:
     state = _uuid7_state
     timestamp_ms = time.time_ns() // 1_000_000
     last_timestamp = state.last_timestamp
-
-    if last_timestamp is None or timestamp_ms > last_timestamp:
-        counter, tail = _uuid7_get_counter_and_tail(state)
-    else:
+    pool = state.pool
+    pos = state.pos
+    if last_timestamp is not None and timestamp_ms <= last_timestamp:
         if timestamp_ms < last_timestamp:
             timestamp_ms = last_timestamp + 1
         counter = state.last_counter + 1
-        if counter > 0x3FF_FFFF_FFFF:
-            timestamp_ms += 1
-            counter, tail = _uuid7_get_counter_and_tail(state)
-        else:
-            tail = int.from_bytes(_uuid7_random(state, 4))
-
-    unix_ts_ms = timestamp_ms & 0xFFFF_FFFF_FFFF
-    counter_hi = (counter >> 30) & 0x0FFF
-    counter_lo = counter & 0x3FFF_FFFF
-    value = unix_ts_ms << 80
-    value |= counter_hi << 64
-    value |= counter_lo << 32
-    value |= tail & 0xFFFF_FFFF
-    value |= _RFC_4122_VERSION_7_FLAGS
+        if counter <= 0x3FF_FFFF_FFFF:
+            # Same millisecond: next counter, 4 fresh random bytes of tail.
+            end = pos + 4
+            if end > len(pool):
+                state.pool = pool = os.urandom(_RANDOM_POOL_BYTES)
+                pos, end = 0, 4
+            state.pos = end
+            state.last_timestamp = timestamp_ms
+            state.last_counter = counter
+            return UUID(
+                int=((timestamp_ms & 0xFFFF_FFFF_FFFF) << 80)
+                | ((counter >> 30) << 64)
+                | ((counter & 0x3FFF_FFFF) << 32)
+                | int.from_bytes(pool[pos:end])
+                | _RFC_4122_VERSION_7_FLAGS
+            )
+        timestamp_ms += 1
+    # New millisecond (or counter overflow): random 42-bit counter (MSB 0)
+    # and 32-bit tail from 10 pool bytes.
+    end = pos + 10
+    if end > len(pool):
+        state.pool = pool = os.urandom(_RANDOM_POOL_BYTES)
+        pos, end = 0, 10
+    rand = int.from_bytes(pool[pos:end])
+    counter = (rand >> 32) & 0x1FF_FFFF_FFFF
+    state.pos = end
     state.last_timestamp = timestamp_ms
     state.last_counter = counter
-    return UUID(int=value)
+    return UUID(
+        int=((timestamp_ms & 0xFFFF_FFFF_FFFF) << 80)
+        | ((counter >> 30) << 64)
+        | ((counter & 0x3FFF_FFFF) << 32)
+        | (rand & 0xFFFF_FFFF)
+        | _RFC_4122_VERSION_7_FLAGS
+    )
 
 
 @dataclass(slots=True, eq=False)

@@ -61,9 +61,20 @@ def _sse_payload_lines(data: bytes) -> list[bytes]:
     Rendered markup and compact JSON carry no line breaks, so the common
     case is one `data:` line and no copies of the payload.
     """
-    if b"\n" not in data and b"\r" not in data:
+    # Byte values, not b"\n": `int in bytes` is one memchr, while a bytes
+    # needle goes through the buffer protocol (several times slower).
+    if 10 not in data and 13 not in data:  # LF, CR
         return [data]
     return data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n")
+
+
+def _html_bytes(content: Any) -> bytes:
+    """`patch_elements` content as bytes: trusted HTML as is, markup rendered."""
+    if isinstance(content, bytes):
+        return content
+    if isinstance(content, str):
+        return content.encode("utf-8")
+    return render_bytes(content)
 
 
 def _sse_event_meta(event_id: str | None, retry: int | None) -> list[bytes]:
@@ -141,27 +152,48 @@ class SSE:
                 help_text="Use 'svg', 'mathml', or omit namespace.",
             )
 
-        lines = [_EVENT_PATCH_ELEMENTS, *_sse_event_meta(event_id, retry)]
-        if mode is not None:
-            lines.append(f"data: mode {mode}".encode("ascii"))
-        if selector:
-            lines.append(b"data: selector " + _sse_field_value("selector", selector))
-        if namespace:
-            lines.append(f"data: namespace {namespace}".encode("ascii"))
-        if view_transition:
-            lines.append(b"data: useViewTransition true")
-        if view_transition_selector is not None:
-            lines.append(
-                b"data: viewTransitionSelector "
-                + _sse_field_value("viewTransitionSelector", view_transition_selector)
-            )
-
-        if isinstance(content, bytes):
-            html_bytes = content
-        elif isinstance(content, str):
-            html_bytes = content.encode("utf-8")
+        if (
+            mode is None
+            and not selector
+            and namespace is None
+            and not view_transition
+            and view_transition_selector is None
+            and event_id is None
+            and retry is None
+        ):
+            # The common event: no options, so nothing else to check.
+            html_bytes = _html_bytes(content)
+            if 10 not in html_bytes and 13 not in html_bytes:  # LF, CR
+                # One data line: the same bytes as the general path,
+                # without building the line list.
+                self._prepare_headers()
+                self.w.write(
+                    b"event: datastar-patch-elements\ndata: elements "
+                    + html_bytes
+                    + b"\n\n"
+                )
+                return
+            lines = [_EVENT_PATCH_ELEMENTS]
         else:
-            html_bytes = render_bytes(content)
+            lines = [_EVENT_PATCH_ELEMENTS, *_sse_event_meta(event_id, retry)]
+            if mode is not None:
+                lines.append(f"data: mode {mode}".encode("ascii"))
+            if selector:
+                lines.append(
+                    b"data: selector " + _sse_field_value("selector", selector)
+                )
+            if namespace:
+                lines.append(f"data: namespace {namespace}".encode("ascii"))
+            if view_transition:
+                lines.append(b"data: useViewTransition true")
+            if view_transition_selector is not None:
+                lines.append(
+                    b"data: viewTransitionSelector "
+                    + _sse_field_value(
+                        "viewTransitionSelector", view_transition_selector
+                    )
+                )
+            html_bytes = _html_bytes(content)
 
         # SSE represents multiline payloads as repeated `data:` lines.
         # Split on CR, LF, and CRLF: a bare CR is a line terminator in the
@@ -187,6 +219,19 @@ class SSE:
         """
         data = expand_signal_paths(require_mapping("patch_signals", payload))
         json_bytes = json_dumps_bytes(data)
+        if (
+            not only_if_missing
+            and event_id is None
+            and retry is None
+            and 10 not in json_bytes
+            and 13 not in json_bytes
+        ):
+            # The common event: one data line (see patch_elements).
+            self._prepare_headers()
+            self.w.write(
+                b"event: datastar-patch-signals\ndata: signals " + json_bytes + b"\n\n"
+            )
+            return
         lines = [_EVENT_PATCH_SIGNALS, *_sse_event_meta(event_id, retry)]
         if only_if_missing:
             lines.append(b"data: onlyIfMissing true")
@@ -286,7 +331,12 @@ class SSE:
 
         if w.started:
             content_type = w.headers.unsafe_get(b"content-type")
-            if content_type is None or b"text/event-stream" not in content_type.lower():
+            # Runs on every event. find(), not `in`: a bytes needle with
+            # `in` goes through the buffer protocol (see _sse_payload_lines).
+            if (
+                content_type is None
+                or content_type.lower().find(b"text/event-stream") < 0
+            ):
                 raise StarioRuntime(
                     "Cannot send Datastar SSE events: response already started without "
                     "Content-Type: text/event-stream",

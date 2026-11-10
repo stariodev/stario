@@ -1259,6 +1259,40 @@ class TestUntrustedFiles:
         assert missing.headers.get("content-security-policy") is None
         assert missing.headers.get("content-disposition") is None
 
+    async def test_untrusted_scripts_and_styles_lose_their_media_type(
+        self, tmp_path: Path
+    ) -> None:
+        # A page can load an upload as <script>, a service worker, or a
+        # stylesheet whatever its disposition; nosniff plus a non-script
+        # media type is what makes the browser refuse.
+        for name in ("evil.js", "evil.mjs", "evil.css", "evil.html", "evil.svg"):
+            (tmp_path / name).write_text("x")
+        (tmp_path / "note.txt").write_text("plain")
+        files = Files(tmp_path, untrusted=True)
+
+        async with TestClient(_app(files)) as client:
+            for name in ("evil.js", "evil.mjs", "evil.css", "evil.html", "evil.svg"):
+                r = await client.get(f"/data/{name}")
+                assert r.status_code == 200, name
+                assert r.headers.get("content-type") == "application/octet-stream"
+                assert r.headers.get("x-content-type-options") == "nosniff"
+            note = await client.get("/data/note.txt")
+        assert note.headers.get("content-type", "").startswith("text/plain")
+        async with TestClient(_app(Files(tmp_path))) as client:
+            trusted = await client.get("/data/evil.js")
+        assert "javascript" in trusted.headers.get("content-type", "")
+
+    async def test_untrusted_covers_legacy_javascript_type_names(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "a.js").write_text("x")
+        files = Files(
+            tmp_path, untrusted=True, content_types={".js": "text/x-javascript"}
+        )
+        async with TestClient(_app(files)) as client:
+            r = await client.get("/data/a.js")
+        assert r.headers.get("content-type") == "application/octet-stream"
+
     async def test_untrusted_headers_on_304_206_and_416(self, tmp_path: Path) -> None:
         (tmp_path / "page.html").write_text("<p>hi</p>")
         files = Files(tmp_path, untrusted=True)
@@ -1470,15 +1504,78 @@ class TestWindowsNames:
 
 
 class TestPathHardening:
-    def test_alias_shaped_segments_must_be_listed(self, tmp_path: Path) -> None:
-        (tmp_path / ".git").mkdir()
+    def test_alias_shaped_segments_must_be_listed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The alias answers to lstat() but is missing from the listing.
+        (tmp_path / "GIT~1").mkdir()
         (tmp_path / "data~1.txt").write_text("real")
         (tmp_path / "css").mkdir()
+        (tmp_path / "css" / "APP~1.CSS").write_text("a{}")
+        aliases = {"GIT~1", "APP~1.CSS"}
+        real_listdir = os.listdir
+        monkeypatch.setattr(
+            filesystem.os,
+            "listdir",
+            lambda path: [n for n in real_listdir(path) if n not in aliases],
+        )
 
         assert filesystem._short_name_alias(tmp_path, "GIT~1/config")
         assert filesystem._short_name_alias(tmp_path, "css/APP~1.CSS")
         assert not filesystem._short_name_alias(tmp_path, "data~1.txt")
         assert not filesystem._short_name_alias(tmp_path, "css/app.css")
+
+    def test_missing_alias_shaped_name_lists_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def no_listing(path: object) -> list[str]:
+            raise AssertionError("listed a directory for a missing name")
+
+        monkeypatch.setattr(filesystem.os, "listdir", no_listing)
+
+        assert not filesystem._short_name_alias(tmp_path, "x~1")
+        assert not filesystem._short_name_alias(tmp_path, "x~1/y~2.txt")
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="needs symlinks")
+    async def test_followed_symlink_cannot_name_a_dotfile(self, tmp_path: Path) -> None:
+        (tmp_path / ".env").write_text("SECRET")
+        (tmp_path / "pub.txt").symlink_to(tmp_path / ".env")
+        (tmp_path / "ok.txt").write_text("fine")
+        (tmp_path / "link.txt").symlink_to(tmp_path / "ok.txt")
+
+        async with TestClient(_app(Files(tmp_path, follow_symlinks=True))) as client:
+            hidden = await client.get("/data/pub.txt")
+            plain = await client.get("/data/link.txt")
+
+        assert hidden.status_code == 404
+        assert (plain.status_code, plain.content) == (200, b"fine")
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs FIFOs")
+    def test_open_regular_does_not_block_on_a_fifo(self, tmp_path: Path) -> None:
+        os.mkfifo(tmp_path / "pipe")
+        result: list[object] = []
+        # In a thread: a regression would block in open() forever.
+        opener = threading.Thread(
+            target=lambda: result.append(filesystem._open_regular(tmp_path / "pipe")),
+            daemon=True,
+        )
+        opener.start()
+        opener.join(5)
+        if opener.is_alive():
+            # Unblock the stuck open() so the thread can end.
+            os.close(os.open(tmp_path / "pipe", os.O_WRONLY | os.O_NONBLOCK))
+            pytest.fail("open() blocked on a FIFO")
+        assert result == [None]
+
+    @pytest.mark.skipif(not hasattr(os, "O_NONBLOCK"), reason="POSIX open flag")
+    def test_open_regular_returns_a_blocking_fd(self, tmp_path: Path) -> None:
+        (tmp_path / "f.txt").write_text("x")
+        opened = filesystem._open_regular(tmp_path / "f.txt")
+        assert opened is not None
+        try:
+            assert os.get_blocking(opened[0])
+        finally:
+            os.close(opened[0])
 
     @pytest.mark.skipif(
         sys.platform == "win32", reason="Windows checks the resolved long name"

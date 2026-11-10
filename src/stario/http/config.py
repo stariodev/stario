@@ -74,10 +74,11 @@ class RequestPolicy:
                 "max_header_bytes must be at least 256",
                 help_text="Increase the limit or use the default Server settings.",
             )
-        if max_header_bytes > 2_147_483_647:
+        if max_header_bytes > 1_073_741_824:
             raise StarioError(
-                "max_header_bytes must be at most 2^31-1",
-                help_text="The Cython protocol stores this cap as a 32-bit int.",
+                "max_header_bytes must be at most 2^30",
+                help_text="The Cython protocol counts header bytes in a 32-bit "
+                "int; the cap leaves room for the field that crosses the limit.",
             )
         if max_body_bytes < 1:
             raise StarioError(

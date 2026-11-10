@@ -448,7 +448,9 @@ cdef class RequestExchange:
     cdef void _clear_body_storage(self) noexcept
     cdef char* _body_ptr(self) noexcept
     cdef int _body_reserve(self, Py_ssize_t need) noexcept
+    cdef int _body_reserve_checked(self, Py_ssize_t need) except? -1
     cdef int _adopt_expected_body_buffer(self) noexcept
+    cdef int _adopt_expected_body_checked(self) except? -1
     cdef object _body_to_bytes(self)
     cdef object _body_take(self, Py_ssize_t max_n)
     cdef void reset_response(self, int encoding)
@@ -488,6 +490,9 @@ cdef class RequestExchange:
     cdef void _maybe_pause(self)
     cdef Py_ssize_t _feed_limit(self) noexcept
     cdef Py_ssize_t _read_limit(self, object max_size) except -1
+    cdef object c_read_now(self, object max_size)
+    cdef void _start_read(self, Py_ssize_t limit)
+    cdef object _finish_read(self, Py_ssize_t limit)
 
 cdef class RequestHeaders:
     # Live view of the exchange arena while the request runs; owns a copy

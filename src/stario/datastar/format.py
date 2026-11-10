@@ -28,7 +28,7 @@ type TimeValue = int | float | str
 
 def require_mapping(name: str, payload: object) -> Mapping[str, Any]:
     """Reject non-mapping signal payloads with a stable TypeError."""
-    if not isinstance(payload, Mapping):
+    if type(payload) is not dict and not isinstance(payload, Mapping):
         raise TypeError(f"{name} payload must be a mapping")
     return cast(Mapping[str, Any], payload)
 
@@ -165,7 +165,10 @@ def string_literal(value: str) -> str:
     ```
     """
     escaped = (
-        value.replace("\\", "\\\\")
+        # `\x5c`, not `\\`: Datastar's statement splitter reads `\"` and
+        # `\'` as an escaped quote without counting backslashes, so a value
+        # ending in an escaped backslash would hide the closing quote.
+        value.replace("\\", "\\x5c")
         .replace("<", "\\x3c")
         .replace("'", "\\'")
         .replace("\b", "\\b")
@@ -322,6 +325,77 @@ def signal_object(name: str, value_js: str) -> str:
     return inner
 
 
+def _signal_conflict(key: str) -> NoReturn:
+    raise StarioError(
+        f"Conflicting Datastar signal paths: {key!r}",
+        context={"signal_name": key},
+        help_text=(
+            "Do not set a signal both as a value and as the parent of "
+            "a dotted path, and do not set one signal twice."
+        ),
+    )
+
+
+def _is_mapping(value: object) -> bool:
+    # isinstance against the Mapping ABC costs ~150 ns even for an int, and
+    # this runs for every signal value on every patch: settle the common
+    # types by identity first.
+    t = type(value)
+    if t is dict:
+        return True
+    if t is str or t is int or t is float or t is bool or t is list or value is None:
+        return False
+    return isinstance(value, Mapping)
+
+
+def _check_signal_keys(mapping: Mapping[str, Any]) -> bool:
+    """Validate every key; True when some key (at any depth) has a dot."""
+    dotted = False
+    for key, value in mapping.items():
+        # The full check only matters for a dotted path (every segment
+        # non-empty); a plain name just has to be a non-empty str.
+        if type(key) is not str or not key:
+            check_signal_name(key)
+        elif "." in key:
+            check_signal_name(key)
+            dotted = True
+        if _is_mapping(value) and _check_signal_keys(cast(Mapping[str, Any], value)):
+            dotted = True
+    return dotted
+
+
+def _merge_signal(node: dict[str, Any], parts: list[str], value: Any, key: str) -> None:
+    for part in parts[:-1]:
+        if part in node:
+            child: Any = node[part]
+            if not isinstance(child, dict):
+                _signal_conflict(key)
+        else:
+            child = {}
+            node[part] = child
+        node = cast(dict[str, Any], child)
+    leaf = parts[-1]
+    if _is_mapping(value):
+        if leaf in node:
+            child = node[leaf]
+            if not isinstance(child, dict):
+                _signal_conflict(key)
+        else:
+            child = {}
+            node[leaf] = child
+        for sub_key, sub_value in cast(Mapping[str, Any], value).items():
+            _merge_signal(
+                cast(dict[str, Any], child),
+                sub_key.split("."),
+                sub_value,
+                sub_key,
+            )
+    else:
+        if leaf in node:
+            _signal_conflict(key)
+        node[leaf] = value
+
+
 def expand_signal_paths(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Expand dotted signal keys into nested objects.
 
@@ -335,72 +409,12 @@ def expand_signal_paths(payload: Mapping[str, Any]) -> dict[str, Any]:
     value — including `None`, which removes a signal — is a leaf.
     Conflicting paths raise `StarioError`.
     """
-
-    def conflict(key: str) -> NoReturn:
-        raise StarioError(
-            f"Conflicting Datastar signal paths: {key!r}",
-            context={"signal_name": key},
-            help_text=(
-                "Do not set a signal both as a value and as the parent of "
-                "a dotted path, and do not set one signal twice."
-            ),
-        )
-
-    def check_keys(mapping: Mapping[str, Any]) -> bool:
-        dotted = False
-        for key, value in mapping.items():
-            # The full check only matters for a dotted path (every segment
-            # non-empty); a plain name just has to be a non-empty str.
-            if type(key) is not str or not key:
-                check_signal_name(key)
-            elif "." in key:
-                check_signal_name(key)
-                dotted = True
-            if (type(value) is dict or isinstance(value, Mapping)) and check_keys(
-                cast(Mapping[str, Any], value)
-            ):
-                dotted = True
-        return dotted
-
-    def merge_into(
-        node: dict[str, Any], parts: list[str], value: Any, key: str
-    ) -> None:
-        for part in parts[:-1]:
-            if part in node:
-                child: Any = node[part]
-                if not isinstance(child, dict):
-                    conflict(key)
-            else:
-                child = {}
-                node[part] = child
-            node = cast(dict[str, Any], child)
-        leaf = parts[-1]
-        if isinstance(value, Mapping):
-            if leaf in node:
-                child = node[leaf]
-                if not isinstance(child, dict):
-                    conflict(key)
-            else:
-                child = {}
-                node[leaf] = child
-            for sub_key, sub_value in cast(Mapping[str, Any], value).items():
-                merge_into(
-                    cast(dict[str, Any], child),
-                    sub_key.split("."),
-                    sub_value,
-                    sub_key,
-                )
-        else:
-            if leaf in node:
-                conflict(key)
-            node[leaf] = value
-
-    if not check_keys(payload):
+    if not _check_signal_keys(payload):
         # No dot anywhere — patch_signals runs per SSE event, so keep this cheap.
         return dict(payload)
     tree: dict[str, Any] = {}
     for key, value in payload.items():
-        merge_into(tree, key.split("."), value, key)
+        _merge_signal(tree, key.split("."), value, key)
     return tree
 
 

@@ -10,6 +10,7 @@ functions must be safe to call from any thread.
 """
 
 import json as json_module
+import sysconfig
 import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, cast, overload
@@ -117,10 +118,21 @@ class StdlibJsonCodec:
         return json_module.loads(data)
 
 
-def _stdlib_encode(value: Any, /) -> str:
-    return json_module.dumps(
-        value, allow_nan=False, ensure_ascii=False, separators=(",", ":")
-    )
+_STDLIB_ENCODER = json_module.JSONEncoder(
+    allow_nan=False, ensure_ascii=False, separators=(",", ":")
+)
+if sysconfig.get_config_var("Py_GIL_DISABLED"):
+    # Free-threaded build: one shared encoder would have its refcount
+    # written by every thread on every call. An encoder per call scales.
+    def _stdlib_encode(value: Any, /) -> str:
+        return json_module.dumps(
+            value, allow_nan=False, ensure_ascii=False, separators=(",", ":")
+        )
+
+else:
+    # One shared encoder: `json.dumps` with these options builds a
+    # JSONEncoder on every call, and `encode()` keeps no state between calls.
+    _stdlib_encode = _STDLIB_ENCODER.encode
 
 
 def _stdlib_default_encode(value: Any, default: JsonDefault, /) -> str:

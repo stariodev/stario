@@ -109,6 +109,7 @@ cdef int _next_cookie_pair(
 ) noexcept:
     """Advance ``i`` to the next ``name=value`` pair. 1 found, 0 done."""
     cdef Py_ssize_t j
+    cdef bint quoted
     while i[0] < n:
         # Name: everything before '=' (or ';' / end — then it is junk to skip).
         while i[0] < n and _is_ows(s[i[0]]):
@@ -132,16 +133,22 @@ cdef int _next_cookie_pair(
         while i[0] < n and _is_ows(s[i[0]]):
             i[0] += 1
         val_start[0] = i[0]
+        quoted = False
         if i[0] < n and s[i[0]] == 34:
+            # A quoted value ends at its closing quote, but never spans a
+            # ';': browsers split pairs there whatever the quotes say, so a
+            # planted `a="x` ... `z=y"` must not swallow the cookies between.
             j = i[0] + 1
-            while j < n:
-                if s[j] == 92 and j + 1 < n:
+            while j < n and s[j] != 59:
+                if s[j] == 92 and j + 1 < n and s[j + 1] != 59:
                     j += 2
                     continue
                 if s[j] == 34:
                     j += 1
+                    quoted = True
                     break
                 j += 1
+        if quoted:
             val_end[0] = j
             while j < n and s[j] != 59:
                 j += 1
@@ -334,7 +341,11 @@ cdef class ParsedCookies:
         cdef object found
         if not isinstance(name, str):
             return default
-        _latin1_stack(name, buf, HEADER_NAME_STACK, &n)
+        try:
+            _latin1_stack(name, buf, HEADER_NAME_STACK, &n)
+        except (ValueError, UnicodeError):
+            # Too long or not Latin-1: no cookie has that name.
+            return default
         if self._headers is not None and isinstance(self._headers, RequestHeaders):
             found = self._get_arena(buf, n)
         else:

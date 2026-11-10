@@ -240,6 +240,25 @@ class TestReadForm:
             )
         assert (r.status_code, r.text) == (413, "Too many form fields")
 
+    async def test_urlencoded_flood_is_refused_before_decoding(self, monkeypatch):
+        def no_parse(body: bytes) -> object:
+            raise AssertionError("decoded a body over max_fields")
+
+        async with TestClient(form_app()) as client:
+            ok = await client.post(
+                "/form",
+                content=b"a=1&&b=2&c=3&",
+                headers={"content-type": "application/x-www-form-urlencoded"},
+            )
+            monkeypatch.setattr(forms_read, "ParsedQuery", no_parse)
+            r = await client.post(
+                "/form",
+                content=b"a&" * 100_000,
+                headers={"content-type": "application/x-www-form-urlencoded"},
+            )
+        assert ok.status_code == 200
+        assert (r.status_code, r.text) == (413, "Too many form fields")
+
     async def test_bytes_under_an_empty_filename_are_a_file(self):
         # A part with filename="" that carries bytes opens a spool when the
         # first byte arrives and counts toward max_files.

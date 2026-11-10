@@ -984,3 +984,24 @@ class TestDatastarScriptTag:
         html = render(ModuleScript("/static/vendor/datastar.js"))
 
         assert 'src="/static/vendor/datastar.js"' in html
+
+
+class TestBackslashNeverPrecedesAClosingQuote:
+    """Datastar's statement splitter takes `\\"` for an escaped quote without
+    counting backslashes; a value ending in one must not produce it."""
+
+    def test_string_literal(self) -> None:
+        from stario.datastar.format import string_literal
+
+        assert string_literal("evil\\") == "'evil\\x5c'"
+        assert string_literal("a\\'b") == "'a\\x5c\\'b'"
+
+    def test_signals_attribute(self) -> None:
+        import html
+        import json
+
+        payload = {"name": "evil\\", "bio": 'hi; "there"\\\\', "p": "a\\nb"}
+        rendered = str(data.signals(payload).rendered)
+        raw = html.unescape(rendered[len(" data-signals='") : -1])
+        assert '\\\\"' not in raw
+        assert json.loads(raw) == payload

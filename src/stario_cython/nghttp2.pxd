@@ -257,6 +257,9 @@ cdef extern from "nghttp2/nghttp2.h":
     )
     int32_t nghttp2_session_get_last_proc_stream_id(nghttp2_session* session)
     int nghttp2_submit_shutdown_notice(nghttp2_session* session)
+    int nghttp2_session_terminate_session(
+        nghttp2_session* session, uint32_t error_code
+    )
     int nghttp2_submit_ping(
         nghttp2_session* session, uint8_t flags, const uint8_t* opaque_data
     )

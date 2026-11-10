@@ -13,6 +13,7 @@ from stario_cython.markup import classes as classes
 from stario_cython.markup import classes_cache as _classes_cache
 from stario_cython.markup import data as data
 from stario_cython.markup import prefixed as prefixed
+from stario_cython.markup import styles as styles
 
 from .escape import escape_attribute_value
 from .slots import BakeSlot, slot_name
@@ -27,8 +28,10 @@ _CLASSES_CACHE: dict[tuple[Any, ...], Attrs] = _classes_cache
 _CLASSES_CACHE_MAX: int = _CLASSES_CACHE_MAX_C
 
 
-def styles(declarations: StyleDeclarations) -> Attrs:
-    """Return a pre-rendered `style` attribute fragment."""
+def _styles_checked(declarations: StyleDeclarations) -> Attrs:
+    """`styles()` with every check; `stario_cython.markup.styles` handles
+    the plain case itself and calls this for anything else, so the error
+    messages live here only."""
     parts: list[str] = []
 
     for key, value in declarations.items():

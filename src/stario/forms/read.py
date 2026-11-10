@@ -87,6 +87,10 @@ async def read_form(
         raise RequestBodyError(415, "Form charset must be UTF-8")
     if media_type == _URLENCODED:
         body = await req.body(max_size=max_size)
+        # Count before decoding: `a&a&a...` up to max_size would otherwise
+        # build millions of pairs just to be refused.
+        if _too_many_pairs(body, max_fields):
+            raise RequestBodyError(413, "Too many form fields")
         return _fields_form(ParsedQuery(body).items(), max_fields)
     if media_type == _MULTIPART:
         boundary = params.get("boundary", "")
@@ -104,6 +108,16 @@ async def read_form(
             max_part_header_bytes=max_part_header_bytes,
         )
     raise RequestBodyError(415, "Expected a form body")
+
+
+def _too_many_pairs(body: bytes, limit: int) -> bool:
+    # At most one pair more than there are separators, so the usual form is
+    # settled by one count; only a body with that many `&` is scanned.
+    if body.count(b"&") < limit:
+        return False
+    return any(
+        count > limit for count, _ in enumerate(re.finditer(rb"[^&]+", body), start=1)
+    )
 
 
 def _fields_form(items: list[tuple[str, str]], max_fields: int) -> Form:

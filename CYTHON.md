@@ -35,6 +35,51 @@ cd examples/hello-world && uv run python -m main   # serve the smallest example
 After editing a `.pyx` / `.pxd` / `.pxi` / `vendor/*.c`, rebuild in place
 with `uv run python setup.py build_ext --inplace`.
 
+`STARIO_PGO=1` makes a profile-guided build (GCC only; Linux wheels are
+built this way): `setup.py` compiles the extensions instrumented, runs
+`scripts/pgo_train.py` against them, and compiles again with the recorded
+branch profile. It doubles the build time and adds about two minutes of
+training. With another compiler, or if training fails, the build goes on
+without a profile; `STARIO_PGO=require` (what the wheel build sets) fails
+instead, so a wheel cannot lose its profile unnoticed and a training run
+that crashes stops the release. Branch counts differ from run to run, so
+two PGO builds of one commit are not byte-identical.
+
+The training run is both in-process benchmarks: `inproc.py` (the fast
+paths) and `inproc_paths.py` (query, cookies, headers, a real route table,
+misses and redirects, uploads, forms, streamed responses, assets,
+escaping-heavy and `@baked` pages, HTTP/2 uploads and multiplexing).
+Measured against a plain build, best of four interleaved rounds:
+
+| | profile from `inproc.py` only | profile from both |
+| --- | ---: | ---: |
+| `inproc.py` cases (geometric mean) | -8% | -6% to -10% |
+| `inproc_paths.py` cases (geometric mean) | -9% | -13% |
+| plaintext | -15% | -16% |
+| `GET /user/{id}` | -13% | -12% |
+| 50-row HTML page | -7% | -6% |
+| HTTP/2 plaintext | -10% | -16% |
+| slowest case against plain | +2% | +3% |
+
+The first column is the check for over-fitting: a profile that never saw
+the second benchmark still made its 28 cases 9% faster and none slower,
+because they share the parser, the header code and the writer with the
+trained paths. Training on both gains a little more there and loses
+nothing measurable on the fast paths. These are in-process numbers: over a
+socket the framework is a tenth to a fifth of a small request, so expect a
+few percent end to end. When a new kind of request path is added, add a
+case to `inproc_paths.py` so the profile covers it.
+
+```bash
+STARIO_PGO=1 uv run python setup.py build_ext --inplace --force
+```
+
+Every non-MSVC build passes `-fstack-protector` and `-D_FORTIFY_SOURCE=2`,
+and links with full RELRO and a non-executable stack on Linux, whether or
+not the interpreter's own flags carry them. `-fstack-protector-strong` was
+measured and left out: it guards most Cython functions (any address-taken
+local) and cost 5% on a plaintext request.
+
 The build leaves out debug info (`-g0`, and `-s` on Linux), so a wheel
 stays small. To debug the extensions with `gdb` or `perf`, rebuild with
 `STARIO_DEBUG_BUILD=1 uv run python setup.py build_ext --inplace`.
@@ -145,6 +190,12 @@ put a process-global increment on that path.
   bound once per connection (no `threading.local` lookup per request).
 - The connection interface the exchange calls is `cdef` (no Python-override
   check per call); `get_buffer` / `buffer_updated` call C directly.
+- `c.req.body()` on a body that is already complete (≤ 256 KiB with a
+  Content-Length) returns the bytes without awaiting a second coroutine
+  (`RequestExchange.c_read_now`).
+- HTTP/2 DATA frames up to 4 KiB are copied into the outbound scratch with
+  their header, so a small response is one `write` of one bytes object;
+  bigger frames still go out as a zero-copy memoryview.
 - `w.drain()`: write backpressure (transport `pause_writing`, HTTP/2 stream
   window). Used by `Files` / `Assets`.
 - A complete Brotli body (`respond()`) uses the one-shot

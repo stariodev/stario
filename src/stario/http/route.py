@@ -128,6 +128,9 @@ def _enc_path(value: object, name: str) -> str:
     text = _require(value, name, where="path")
     if "/" in text:
         _value_error("Route path parameter contains '/'", name, value=text)
+    # A browser resolves `.` and `..` in a link; the server answers 308.
+    if text == "." or text == "..":
+        _value_error("Route path parameter is a dot segment", name, value=text)
     return quote(text, safe="")
 
 
@@ -139,6 +142,10 @@ def _enc_catchall_path(value: object, name: str) -> str:
             "Route catchall parameter contains empty path segment",
             name,
             value=text,
+        )
+    if "." in parts or ".." in parts:
+        _value_error(
+            "Route catchall parameter contains a dot segment", name, value=text
         )
     return "/".join(quote(part, safe="") for part in parts)
 

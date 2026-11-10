@@ -1,5 +1,7 @@
 """Tests for the trie-based HTTP router."""
 
+import asyncio
+
 import pytest
 
 from stario.exceptions import StarioError
@@ -403,3 +405,37 @@ def test_registering_many_routes_compiles_once() -> None:
     assert router._cy_router is not None
     # 3000 routes took ~20 s when every add recompiled.
     assert time.perf_counter() - started < 2.0
+
+
+@pytest.mark.parametrize("value", [".", ".."])
+def test_href_rejects_dot_segment_parameters(value: str) -> None:
+    with pytest.raises(StarioError, match="dot segment"):
+        Route("GET /u/{id}/edit").href(value)
+    with pytest.raises(StarioError, match="dot segment"):
+        Route("GET /files/{p...}").href(p=f"a/{value}/b")
+    assert Route("GET /files/{p...}").href(p="a/..b/c.") == "/files/a/..b/c."
+
+
+async def test_empty_segment_does_not_match_a_parameter() -> None:
+    from stario import App
+    from tests.cython.http import RecordingTransport, make_protocol, response_statuses
+
+    app = App()
+    seen: list[object] = []
+
+    async def posts(c, w) -> None:
+        seen.append(c.match.params["id"])
+        w.text("ok")
+
+    app.add(Route("GET /users/{id}/posts"), posts)
+    proto = make_protocol(asyncio.get_running_loop(), app)
+    transport = RecordingTransport(proto)
+    proto.connection_made(transport)
+    proto.data_received(
+        b"GET /users//posts HTTP/1.1\r\nHost: a\r\n\r\n"
+        b"GET /users/7/posts HTTP/1.1\r\nHost: a\r\n\r\n"
+    )
+    await app.drain_tasks()
+    transport.close()
+    assert response_statuses(transport.writes) == [404, 200]
+    assert seen == ["7"]

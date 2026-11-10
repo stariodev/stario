@@ -1465,10 +1465,10 @@ async def test_lazy_cookies_and_query_from_arena() -> None:
     async def inspect(c, w):
         assert type(c.req.headers).__name__ == "RequestHeaders"
         assert c.req.cookies.get("a") == "2"
-        assert c.req.cookies.get("x") == "a;b"
+        assert c.req.cookies.get("x") == "a b"
         assert c.req.cookies.get("b") == "3"
         assert c.req.cookies.get("missing") is None
-        assert dict(c.req.cookies) == {"a": "2", "b": "3", "x": "a;b"}
+        assert dict(c.req.cookies) == {"a": "2", "b": "3", "x": "a b"}
         assert c.req.query.get("q") == "hello world"
         assert c.req.query.getlist("tag") == ["a", "b"]
         assert c.req.query.get("accent") == "é"
@@ -1499,7 +1499,7 @@ async def test_lazy_cookies_and_query_from_arena() -> None:
             b" HTTP/1.1\r\n"
             b"Host: stario.test\r\n"
             b"Authorization: Bearer abc\r\n"
-            b'Cookie: a=1; x="a;b"\r\n'
+            b'Cookie: a=1; x="a b"\r\n'
             b"Cookie: a=2; b=3\r\n"
             b"Connection: close\r\n\r\n"
         )

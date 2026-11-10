@@ -90,6 +90,21 @@ Use it to compare two checkouts on the same machine; a change of a few
 hundred nanoseconds on the plaintext case is visible. Record both numbers
 in a change that touches the request path or the markup builder.
 
+`server/inproc_paths.py` does the same for the paths `inproc.py` does not
+take: reading the query, cookies and headers, response headers and
+cookies, a route table of realistic size, 404 / 405 / 308, pipelining, a
+connection per request, chunked and streamed uploads, forms, streamed
+responses with each coding, static assets, an escaping-heavy page, a
+`@baked` page, and HTTP/2 uploads and multiplexing. Both files are the
+training workload of a `STARIO_PGO=1` build (see
+[`CYTHON.md`](../CYTHON.md)), so a new kind of request path belongs in one
+of them.
+
+```bash
+uv run benchmarks/server/inproc_paths.py           # all cases
+uv run benchmarks/server/inproc_paths.py cookies   # prefix match
+```
+
 ## HTTP server (`server/`)
 
 `server/bench.py` compares the current Stario checkout with other Python

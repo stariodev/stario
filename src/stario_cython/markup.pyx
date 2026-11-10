@@ -41,6 +41,7 @@ from libc.string cimport memcpy
 from stario.exceptions import StarioError
 
 cdef extern from "Python.h":
+    ctypedef unsigned short Py_UCS2
     int PyUnicode_KIND(object o)
     void* PyUnicode_DATA(object o)
     Py_ssize_t PyUnicode_GET_LENGTH(object o)
@@ -48,6 +49,7 @@ cdef extern from "Python.h":
     bint PyUnicode_IS_ASCII(object o)
     object PyUnicode_New(Py_ssize_t size, unsigned int maxchar)
     int PyUnicode_1BYTE_KIND
+    int PyUnicode_2BYTE_KIND
     Py_UCS4 PyUnicode_READ(int kind, const void* data, Py_ssize_t index)
     Py_UCS4 PyUnicode_READ_CHAR(object o, Py_ssize_t index)
     void PyUnicode_WRITE(int kind, void* data, Py_ssize_t index, Py_UCS4 value)
@@ -108,6 +110,19 @@ cdef extern from *:
     static const unsigned char stario_text_escape[256] = {
         ['&'] = 1, ['<'] = 1, ['>'] = 1,
     };
+
+    /* Bytes each character adds when escaped, per mode (ESC_TEXT,
+       ESC_DQUOTE, ESC_SQUOTE): a table sum, so the scan of clean text has
+       no branches and the compiler can vectorise it. */
+    static const unsigned char stario_escape_extra[3][256] = {
+        {[38] = 4, [60] = 3, [62] = 3},             /* & < > */
+        {[38] = 4, [60] = 3, [62] = 3, [34] = 5},   /* and " */
+        {[38] = 4, [60] = 3, [62] = 3, [39] = 4},   /* and ' */
+    };
+
+    /* type(o) as a borrowed pointer: Cython's type(o) takes a reference,
+       a refcount write on the type for every argument or node. */
+    #define stario_type(o) ((PyObject*)Py_TYPE(o))
 
     /* Free-threaded builds: make an object immortal, so that Py_INCREF and
        Py_DECREF on it from any thread only read its refcount instead of
@@ -226,6 +241,8 @@ cdef extern from *:
     int stario_disallow_instantiation(object t) except -1
     int stario_dict_get_ref(object d, object key, PyObject** out) except -1
     const unsigned char stario_text_escape[256]
+    const unsigned char stario_escape_extra[3][256]
+    PyObject* stario_type(PyObject* o)
     int stario_immortalize(object op)
     object stario_shared_str(object s)
     object stario_shared_tuple(object t)
@@ -311,16 +328,11 @@ cdef object _escape_1byte(object s, int mode):
     cdef Py_ssize_t w = 0
     cdef unsigned char c
     cdef unsigned char quote = 34 if mode == ESC_DQUOTE else (39 if mode == ESC_SQUOTE else 0)
+    cdef const unsigned char* table = stario_escape_extra[mode]
     cdef unsigned char* dst
     cdef object out
     for i in range(n):
-        c = src[i]
-        if c == 38:
-            extra += 4
-        elif c == 60 or c == 62:
-            extra += 3
-        elif c == quote and quote != 0:
-            extra += 5 if quote == 34 else 4
+        extra += table[src[i]]
     if extra == 0:
         return s
     out = PyUnicode_New(n + extra, PyUnicode_MAX_CHAR_VALUE(s))
@@ -359,16 +371,23 @@ cdef object _escape_wide(object s, int mode):
     cdef Py_ssize_t w = 0
     cdef Py_UCS4 c
     cdef Py_UCS4 quote = 34 if mode == ESC_DQUOTE else (39 if mode == ESC_SQUOTE else 0)
+    cdef const unsigned char* table = stario_escape_extra[mode]
+    cdef const Py_UCS2* src2
+    cdef const Py_UCS4* src4
     cdef void* dst
     cdef object out
-    for i in range(n):
-        c = PyUnicode_READ(kind, src, i)
-        if c == 38:
-            extra += 4
-        elif c == 60 or c == 62:
-            extra += 3
-        elif c == quote and quote != 0:
-            extra += 5 if quote == 34 else 4
+    # One loop per kind, so neither reads through the kind switch; only
+    # characters below 0x80 can need escaping.
+    if kind == PyUnicode_2BYTE_KIND:
+        src2 = <const Py_UCS2*>src
+        for i in range(n):
+            if src2[i] < 128:
+                extra += table[src2[i]]
+    else:
+        src4 = <const Py_UCS4*>src
+        for i in range(n):
+            if src4[i] < 128:
+                extra += table[src4[i]]
     if extra == 0:
         return s
     out = PyUnicode_New(n + extra, PyUnicode_MAX_CHAR_VALUE(s))
@@ -759,19 +778,19 @@ cdef object _attr_fragment(object key, object value):
     """`` key="value"`` for one scalar value, or None to omit (matches ``wire``)."""
     cdef object value_type = type(value)
     if value_type is str:
-        return f' {key}="{c_escape_attr(value)}"'
+        return _pair_string(key, c_escape_attr(value))
     if value_type is SafeString:
-        return f' {key}="{(<SafeString>value).rendered}"'
+        return _pair_string(key, (<SafeString>value).rendered)
     if value is True:
         return f" {key}"
     if value is None or value is False:
         return None
     if value_type is int or value_type is float:
-        return f' {key}="{value}"'
+        return _pair_string(key, str(value))
     raise _bad_attr_value_error(key, value)
 
 
-def splice_attribute(key, value):
+def splice_attribute(str key not None, value):
     """One ``@baked`` whole-value attribute slot (``""`` to omit)."""
     fragment = _attr_fragment(key, value)
     return "" if fragment is None else fragment
@@ -1512,7 +1531,8 @@ cdef class Tag:
         cdef bint has_children = False
         cdef bint has_attrs = False
         cdef bint has_mapping = False
-        cdef object arg, arg_type
+        cdef PyObject* arg
+        cdef PyObject* arg_type
         cdef object attrs = None
         cdef tuple children = None
         cdef Element e
@@ -1522,30 +1542,36 @@ cdef class Tag:
             return self.empty
 
         for i in range(n):
-            arg = <object>PyTuple_GET_ITEM(args, i)
-            arg_type = type(arg)
+            # Borrowed: ``args`` holds every item for the whole call, and
+            # the scan only compares pointers (no refcount writes).
+            arg = PyTuple_GET_ITEM(args, i)
+            arg_type = stario_type(arg)
             # Child content first: it is what most calls carry. A @baked
             # parameter is child content too while the builder runs.
             if (
-                arg_type is str
-                or arg_type is Element
-                or arg_type is SafeString
-                or arg_type is int
-                or arg_type is float
-                or arg_type is list
-                or arg_type is _BakeSlot
+                arg_type == <PyObject*>str
+                or arg_type == <PyObject*>Element
+                or arg_type == <PyObject*>SafeString
+                or arg_type == <PyObject*>int
+                or arg_type == <PyObject*>float
+                or arg_type == <PyObject*>list
+                or arg_type == <PyObject*>_BakeSlot
             ):
                 pass
-            elif arg is None:
+            elif arg == <PyObject*>None:
                 continue
-            elif arg_type is Attrs:
+            elif arg_type == <PyObject*>Attrs:
                 if has_children:
                     raise _attrs_before_children_error(self._repr())
                 has_attrs = True
                 continue
             elif (
-                arg_type is dict
-                or (arg_type is not bool and arg_type is not tuple and isinstance(arg, _Mapping))
+                arg_type == <PyObject*>dict
+                or (
+                    arg_type != <PyObject*>bool
+                    and arg_type != <PyObject*>tuple
+                    and isinstance(<object>arg, _Mapping)
+                )
             ):
                 if has_children:
                     raise _attrs_before_children_error(self._repr())
@@ -1553,7 +1579,7 @@ cdef class Tag:
                 has_mapping = True
                 continue
             else:
-                raise _bad_child_error(arg, self._repr())
+                raise _bad_child_error(<object>arg, self._repr())
             if not has_children:
                 has_children = True
                 first = i
@@ -1789,6 +1815,60 @@ def aria(attrs):
 
 
 # ---------------------------------------------------------------------------
+# styles()
+
+cdef bint _css_breakout(object s, bint colon):
+    """True if ``s`` has ``; { } \\`` (and ``:`` when ``colon``): text that
+    could end the declaration or open a block."""
+    cdef int kind = PyUnicode_KIND(s)
+    cdef const void* data = PyUnicode_DATA(s)
+    cdef Py_ssize_t i
+    cdef Py_UCS4 c
+    for i in range(PyUnicode_GET_LENGTH(s)):
+        c = PyUnicode_READ(kind, data, i)
+        if c == 59 or c == 123 or c == 125 or c == 92 or (colon and c == 58):
+            return True
+    return False
+
+
+def styles(declarations):
+    """Return a pre-rendered `style` attribute fragment."""
+    cdef list parts = []
+    cdef object value_type, key_type, rendered_value
+    # Only the plain case runs here: str keys and str / int / float values
+    # that need no error. Anything else goes to the Python version in
+    # stario.markup.attributes, which owns the checks and their messages
+    # (and raises the same error it always did).
+    for key, value in declarations.items():
+        if value is None or value is False:
+            continue
+        key_type = type(key)
+        value_type = type(value)
+        if (
+            key_type is not str
+            or PyUnicode_GET_LENGTH(key) == 0
+            or PyUnicode_READ_CHAR(key, 0) == 64  # "@"
+            or _css_breakout(key, True)
+        ):
+            return _styles_checked(declarations)
+        if value_type is str:
+            rendered_value = c_escape_attr(value)
+            if _css_breakout(rendered_value, False):
+                return _styles_checked(declarations)
+        elif value_type is int or value_type is float:
+            rendered_value = str(value)
+        else:
+            return _styles_checked(declarations)
+        PyList_Append(parts, f"{c_escape_attr(key)}:{rendered_value};")
+    return Attrs.__new__(Attrs, f' style="{"".join(parts)}"')
+
+
+cdef object _styles_checked(object declarations):
+    from stario.markup.attributes import _styles_checked as checked
+    return checked(declarations)
+
+
+# ---------------------------------------------------------------------------
 # Render: depth-first into one UTF-8 buffer
 
 cdef struct Buf:
@@ -1818,9 +1898,18 @@ cdef int _grow(Buf* b, Py_ssize_t need) except -1:
 
 
 cdef inline int _write(Buf* b, const char* s, Py_ssize_t n) except -1:
+    cdef Py_ssize_t i
+    cdef char* d
     if b.len + n > b.cap:
         _grow(b, n)
-    memcpy(b.data + b.len, s, n)
+    d = b.data + b.len
+    if n <= 16:
+        # Tag names and short text: a loop the compiler keeps inline,
+        # cheaper than a memcpy call for a few bytes.
+        for i in range(n):
+            d[i] = s[i]
+    else:
+        memcpy(d, s, n)
     b.len += n
     return 0
 
@@ -1890,6 +1979,8 @@ cdef int _render_element(Element e, Buf* b, int depth) except -1:
     cdef PyObject* tag = <PyObject*>e.tag
     cdef PyObject* attrs = <PyObject*>e._attrs
     cdef PyObject* children = <PyObject*>e._children
+    cdef PyObject* child
+    cdef PyObject* child_type
     cdef Py_ssize_t i
     if attrs == <PyObject*>None:
         if children == <PyObject*>None:
@@ -1909,21 +2000,29 @@ cdef int _render_element(Element e, Buf* b, int depth) except -1:
     if depth >= _MAX_DEPTH:
         raise RecursionError("HTML tree is nested too deeply")
     for i in range(e._first, PyTuple_GET_SIZE(<object>children)):
-        _render_node(<object>PyTuple_GET_ITEM(<object>children, i), b, depth + 1)
+        # Text and elements, the usual children, without the _render_node
+        # call (the tuple holds each child; type compared, not referenced).
+        child = PyTuple_GET_ITEM(<object>children, i)
+        child_type = stario_type(child)
+        if child_type == <PyObject*>str:
+            _write_text(b, <object>child)
+        elif child_type == <PyObject*>Element:
+            _render_element(<Element>child, b, depth + 1)
+        else:
+            _render_node(<object>child, b, depth + 1)
     return _write_str_ptr(b, <PyObject*>(<Tag>tag).closing_tag)
 
 
 cdef int _render_node(object node, Buf* b, int depth) except -1:
-    cdef object node_type = type(node)
-    cdef Py_ssize_t i
-    if node_type is str:
+    cdef PyObject* node_type = stario_type(<PyObject*>node)
+    if node_type == <PyObject*>str:
         return _write_text(b, node)
-    if node_type is Element:
+    if node_type == <PyObject*>Element:
         return _render_element(<Element>node, b, depth)
-    if node_type is SafeString:
+    if node_type == <PyObject*>SafeString:
         # Immutable, and held by the caller: a borrowed read (see above).
         return _write_str_ptr(b, <PyObject*>(<SafeString>node).rendered)
-    if node_type is list:
+    if node_type == <PyObject*>list:
         if depth >= _MAX_DEPTH:
             raise RecursionError("HTML tree is nested too deeply")
         # Cython's list loop reads the length on each step and takes a
@@ -1931,7 +2030,7 @@ cdef int _render_node(object node, Buf* b, int depth) except -1:
         for item in <list>node:
             _render_node(item, b, depth + 1)
         return 0
-    if node_type is int or node_type is float:
+    if node_type == <PyObject*>int or node_type == <PyObject*>float:
         return _write_str(b, str(node))
     if node is None:
         return 0

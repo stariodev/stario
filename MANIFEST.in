@@ -2,6 +2,9 @@ include CHANGELOG.md CYTHON.md
 include src/stario_cython/*.pyx src/stario_cython/*.pxd src/stario_cython/*.pxi
 exclude src/stario_cython/*.c
 recursive-include vendor *.c *.h LICENSE*
-recursive-include scripts *.sh *.ps1
+recursive-include scripts *.sh *.ps1 *.py
+# The training workload of a STARIO_PGO=1 build.
+include benchmarks/server/inproc.py benchmarks/server/inproc_paths.py
+include benchmarks/html/micro.py
 global-exclude *.so *.py[cod]
 prune tests
