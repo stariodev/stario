@@ -345,7 +345,20 @@ cdef list _CT_STATE = [
 ]
 
 
+cdef object _content_type_checked(object value):
+    """Validate a Content-Type outside the common-type cache (``respond()``)."""
+    try:
+        return _encode_value_bytes(value)
+    except ValueError as exc:
+        raise StarioError(
+            "Invalid Content-Type",
+            context={"content_type": repr(value)[:120]},
+            help_text="Content-Type must be a header value without CR or LF.",
+        ) from exc
+
+
 cdef inline object _content_type_bytes(object value):
+    """``respond()``'s Content-Type as wire bytes; StarioError if invalid."""
     cdef object cached
     cdef dict table
     if value is _CT_STATE[0]:
@@ -366,7 +379,7 @@ cdef inline object _content_type_bytes(object value):
         if cached is not None:
             _CT_STATE[0] = value
             return cached
-    value = _encode_value_bytes(value)
+    value = _content_type_checked(value)
     if type(value) is bytes:
         table = <dict>_CT_STATE[1]
         if len(table) < 64:
