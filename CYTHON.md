@@ -7,7 +7,7 @@ optional (`uvloop.run(serve(bootstrap))`). The free-threaded runtime
 (`STARIO_THREADS`, `SO_REUSEPORT`, CPU pinning):
 [`docs/free-threading.md`](docs/free-threading.md).
 
-Building needs `pkg-config`, nghttp2 1.66+ (older distro builds that carry
+Building needs `pkg-config`, nghttp2 1.68.1+ (older distro builds that carry
 the security backports: set `STARIO_ALLOW_OLD_NGHTTP2=1`), Brotli with the
 CVE-2026-111497 fix (1.0.10+, 1.1.1+, or 1.2.1+; `STARIO_ALLOW_OLD_BROTLI=1`
 only when the distro backports that fix without a version bump), and zstd

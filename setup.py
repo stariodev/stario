@@ -1,12 +1,12 @@
 """Build the Cython HTTP runtime (``stario_cython``).
 
-Native libraries come from pkg-config: nghttp2 1.66+ (MadeYouReset,
-CVE-2025-8671), Brotli with the CVE-2026-111497 fix (1.0.10+, 1.1.1+, or
+Native libraries come from pkg-config: nghttp2 1.68.1+ (MadeYouReset,
+CVE-2025-8671; CVE-2026-27135), Brotli with the CVE-2026-111497 fix (1.0.10+, 1.1.1+, or
 1.2.1+), and zstd. Gzip links system zlib (on Windows, zlib from pkg-config
 too). llhttp is vendored. ``PKG_CONFIG`` names the pkg-config binary (default
 ``pkg-config``); on Windows, scripts/build-native-deps.ps1 builds every
 library with vcpkg and prints the variables to set.
-A distro nghttp2 older than 1.66 that carries the security backports can be
+A distro nghttp2 older than 1.68.1 that carries the security backports can be
 used with ``STARIO_ALLOW_OLD_NGHTTP2=1``. ``STARIO_ALLOW_OLD_BROTLI=1`` is
 the same escape for a Brotli package that backports CVE-2026-111497 without
 a version bump.
@@ -43,7 +43,11 @@ _NATIVE_PACKAGES = (
     "libzstd",
     *(("zlib",) if WINDOWS else ()),
 )
-_MIN_NGHTTP2 = (1, 66)
+# 1.66: MadeYouReset (CVE-2025-8671). 1.68.1: CVE-2026-27135, an assertion
+# failure (abort) when frames keep arriving after
+# nghttp2_session_terminate_session(), which the HTTP/2 reset budget calls
+# from inside nghttp2's receive callbacks.
+_MIN_NGHTTP2 = (1, 68, 1)
 _PKG_CONFIG = os.environ.get("PKG_CONFIG") or "pkg-config"
 
 
@@ -133,12 +137,12 @@ def _require_nghttp2_version() -> None:
         capture_output=True,
         text=True,
     ).stdout.strip()
-    version = tuple(int(part) for part in raw.split(".")[:2] if part.isdigit())
-    if version < _MIN_NGHTTP2:
+    if _version_tuple(raw) < _MIN_NGHTTP2:
         wanted = ".".join(map(str, _MIN_NGHTTP2))
         raise RuntimeError(
             f"stario needs nghttp2 {wanted}+ (found {raw}): older releases lack "
-            "the MadeYouReset (CVE-2025-8671) fix. Install a newer libnghttp2, "
+            "the MadeYouReset (CVE-2025-8671) or CVE-2026-27135 fix. Install a "
+            "newer libnghttp2, "
             "build one with scripts/build-native-deps.sh, or set "
             "STARIO_ALLOW_OLD_NGHTTP2=1 if your distro backports the fix."
         )

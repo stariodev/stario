@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import re
 import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -154,3 +156,30 @@ def test_stream_encoder_survives_concurrent_use() -> None:
                 thread.join()
             assert encoder.finish() == b""
             assert all("finished" in str(exc) for exc in errors)
+
+
+def _setup_namespace() -> dict[str, Any]:
+    # Importing setup.py runs setuptools: exec only the pieces under test.
+    source = (ROOT / "setup.py").read_text()
+    namespace: dict[str, Any] = {}
+    exec("import os, sys\nfrom collections.abc import Callable\n", namespace)
+    for start, end in (
+        ("def _version_tuple", "def _brotli_has_cve_2026_111497_fix"),
+        ("\ndebug_build = ", "\ninclude_dirs = "),
+    ):
+        exec(source[source.index(start) : source.index(end)], namespace)
+    line = source.split("\n_MIN_NGHTTP2 = ", 1)[1].split("\n", 1)[0]
+    namespace["_MIN_NGHTTP2"] = ast.literal_eval(line)
+    return namespace
+
+
+def test_nghttp2_floor_has_the_cve_2026_27135_fix() -> None:
+    # nghttp2 <= 1.68.0 kept reading after nghttp2_session_terminate_session()
+    # and could hit an assertion (abort) on the next malformed frame; the
+    # HTTP/2 reset budget calls it from inside nghttp2's receive callbacks.
+    ns = _setup_namespace()
+    version = ns["_version_tuple"]
+    floor = ns["_MIN_NGHTTP2"]
+    assert floor >= (1, 68, 1)
+    assert version("1.68.0") < floor <= version("1.68.1")
+    assert version("1.70.0-DEV") >= floor
