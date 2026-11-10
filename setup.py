@@ -260,10 +260,13 @@ def _compiler_args(*, msvc: bool, sse42: bool) -> tuple[list[str], list[str]]:
     # -g0 overrides the -g that Python's own CFLAGS add: a wheel ships no debug info.
     compile_args = ["-O3", "-fno-strict-aliasing", "-g" if debug_build else "-g0"]
     # Hardening the interpreter's own CFLAGS may or may not carry (manylinux
-    # Pythons do not): stack canaries on every function with a buffer, and
+    # Pythons do not): stack canaries on functions with a char buffer, and
     # checked libc string/memory calls where the object size is known.
+    # Not -fstack-protector-strong: it adds a canary to every function with
+    # an address-taken local, which is most of Cython's output, and cost 5%
+    # on a plaintext request.
     compile_args += [
-        "-fstack-protector-strong",
+        "-fstack-protector",
         "-U_FORTIFY_SOURCE",
         "-D_FORTIFY_SOURCE=2",
     ]

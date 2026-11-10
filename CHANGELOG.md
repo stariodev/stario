@@ -4,6 +4,107 @@ All notable changes to Stario are documented in this file.
 
 The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+Results of a security and performance review of the whole tree. Timings are
+`benchmarks/server/inproc.py` on one pinned CPU, best of three interleaved
+rounds against 5.8.0.
+
+### Security
+
+- **HTTP/2: server-side resets are rate limited (MadeYouReset,
+  CVE-2025-8671).** nghttp2's reset limit counts only RST_STREAM frames the
+  client sends. A DATA frame past `content-length`, or malformed trailers,
+  made the server reset a stream whose handler had already started, without
+  bound. Streams that close while their handler runs now draw from one
+  budget (100 burst, 33/s), whoever reset them; an empty budget ends the
+  connection with GOAWAY(ENHANCE_YOUR_CALM).
+- **HTTP/2: an HPACK reference flood no longer stalls the loop.** One index
+  byte can name a 4 KiB table entry, and nghttp2 validated every field of a
+  block the server had already given up on: a 100 KB read blocked the loop
+  for 289 ms. A block is now cut off (RST_STREAM) once its ignored fields
+  decode to twice `max_header_bytes`, and at once when a field is rejected.
+  A request just over the limit still gets its 431.
+- **HTTP/1: a final response before `100 Continue` closes the connection.**
+  A handler that answered 401/403 without reading the body left the
+  connection open; a front end that then skipped the body had its next
+  request read as that body (request smuggling). `Expect: 100-continue` in
+  an HTTP/1.0 request is now ignored (RFC 9110 10.1.1).
+- **Request body: a failed allocation fails the read.** It was reported as
+  success, and body bytes were copied through a missing or short buffer
+  (a crash under a memory limit, with a client-chosen `Content-Length`).
+- **Cookies: a quoted value never spans `;`.** Two planted cookies
+  (`a="x` ... `z=y"`) could swallow the cookies between them into one
+  value an app might echo. `parse_cookie_headers` now runs the same scan
+  as `c.req.cookies`.
+- **`Files(untrusted=True)`** serves scripts, stylesheets, wasm, HTML, SVG
+  and XML as `application/octet-stream`. A browser ignores
+  `content-disposition` and the sandbox CSP when a page loads an upload as
+  a script, service worker, or stylesheet.
+- **`Files`:** an 8.3-alias-shaped name (`x~1`) lists its directory only
+  when it exists (a made-up one cost a `listdir` of the whole directory per
+  request); files open with `O_NONBLOCK`, so a FIFO cannot hang an executor
+  thread; with `follow_symlinks`, a link that resolves to a dotfile is
+  hidden on every platform.
+- **`read_form`** counts urlencoded pairs before decoding them. A 10 MB
+  `a&a&a...` body used 570 MB and 0.7 s before its 413.
+- **`h.Style`** refuses `<` followed by a letter, `/`, `!` or `?`. Under
+  `<svg>` or `<math>` a browser parses `<style>` content as markup.
+- **Datastar:** `string_literal` and `data.signals` never write an escaped
+  backslash before a closing quote, which Datastar's statement splitter
+  reads as an escaped quote; a value ending in `\` broke the expression.
+- **Response writer:** lengths of `bytes` / `bytearray` subclasses come
+  from their storage, not `__len__` / `__bytes__`; `write_headers()`
+  accepts only digits in `Content-Length` and sends one canonical field;
+  `proxy-connection` is dropped from HTTP/2 responses.
+- `Route.href()` rejects `.` and `..` parameter values.
+- Builds pass `-fstack-protector` and `-D_FORTIFY_SOURCE=2` and link with
+  full RELRO and a non-executable stack on Linux, whatever the
+  interpreter's own flags.
+
+### Performance
+
+| case | 5.8.0 | now | now, PGO build |
+| --- | ---: | ---: | ---: |
+| plaintext | 2.41 µs | 2.24 | 1.99 |
+| json | 5.47 | 3.58 | 3.04 |
+| `GET /user/{id}` | 6.66 | 4.41 | 3.76 |
+| JSON POST | 11.64 | 9.22 | 7.51 |
+| 50-row HTML page | 47.31 | 44.33 | 40.32 |
+| traced json | 17.06 | 11.97 | 10.90 |
+| SSE `patch_signals` | 7.07 | 2.87 | 2.93 |
+| SSE `patch_elements`, zstd | 3.09 | 2.11 | 2.06 |
+| HTTP/2 plaintext | 5.94 | 5.24 | 4.37 |
+| HTTP/2 json | 10.01 | 7.08 | 6.07 |
+
+- **Profile-guided builds.** `STARIO_PGO=1` (GCC) compiles instrumented,
+  runs `scripts/pgo_train.py`, and compiles again with the profile; Linux
+  wheels are built this way. See `CYTHON.md`.
+- **JSON** goes straight to CPython's C encoder instead of `json.dumps`,
+  which built a `JSONEncoder` per call (3.4 → 1.2 µs for a small dict).
+- **Tracing:** pending spans sit in a deque under one lock, span ids skip
+  `UUID.__init__`, and `JsonTracer` formats a span's fixed fields directly.
+- **HTTP/2:** DATA frames up to 4 KiB are copied behind their header into
+  the outbound buffer: a small response is one `write`.
+- **`c.req.body()`** returns a complete body without a second coroutine.
+- **Datastar SSE:** `patch_signals` / `patch_elements` skip per-call
+  closures, ABC `isinstance` checks, and the line split for one-line
+  payloads.
+- **Markup:** the tag-call argument scan and the render walk compare
+  borrowed type pointers (no refcount writes), `styles()` runs its plain
+  case in C (1.19 → 0.54 µs), and escaping counts growth with a table sum.
+
+### Changed
+
+- A cookie value such as `x="a;b"` now reads as `"a` (browsers send it that
+  way only when something planted it). Stario's own `set_cookie` writes
+  `;` as an octal escape and round-trips as before.
+- An empty path segment or host label no longer matches a `{param}`:
+  `/users//posts` against `/users/{id}/posts` is 404, not `id == ""`.
+- `c.req.cookies.get()` returns the default for a name that is too long or
+  not Latin-1 instead of raising.
+- `max_header_bytes` is capped at 2^30 (was 2^31-1).
+
 ## 5.8.0 - 2026-11-09
 
 ### Performance

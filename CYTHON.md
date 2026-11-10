@@ -49,9 +49,11 @@ without a profile.
 STARIO_PGO=1 uv run python setup.py build_ext --inplace --force
 ```
 
-Every non-MSVC build passes `-fstack-protector-strong` and
-`-D_FORTIFY_SOURCE=2`, and links with full RELRO and a non-executable stack
-on Linux, whether or not the interpreter's own flags carry them.
+Every non-MSVC build passes `-fstack-protector` and `-D_FORTIFY_SOURCE=2`,
+and links with full RELRO and a non-executable stack on Linux, whether or
+not the interpreter's own flags carry them. `-fstack-protector-strong` was
+measured and left out: it guards most Cython functions (any address-taken
+local) and cost 5% on a plaintext request.
 
 The build leaves out debug info (`-g0`, and `-s` on Linux), so a wheel
 stays small. To debug the extensions with `gdb` or `perf`, rebuild with
