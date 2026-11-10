@@ -265,6 +265,19 @@ cdef object _span_path(const char* url, Py_ssize_t n):
     return out
 
 
+cdef inline bint _task_clean(object task):
+    """A done task that neither raised nor was cancelled.
+
+    One ``result()`` call instead of ``cancelled()`` plus ``exception()``;
+    either way the outcome counts as retrieved.
+    """
+    try:
+        task.result()
+    except BaseException:
+        return False
+    return True
+
+
 def _cancel_unless_cancelling(task):
     """Cancel ``task`` unless an ``alive()`` cancel is already in flight."""
     if not task.done() and task.cancelling() == 0:
@@ -1352,6 +1365,13 @@ cdef class CHttpProtocol(HttpConnection):
         self.timeout_kind = kind
         # Sweeper fills now+seconds on the next Date tick. Avoid loop.time()
         # on every keep-alive request.
+        self.timeout_deadline = 0.0
+
+    cdef inline void _arm_timeout_open(self, int kind, double seconds) noexcept:
+        """``_arm_timeout`` for a caller that just saw the transport open."""
+        if self.timeout_cleanup == CLEANUP_OFF or seconds <= 0:
+            return
+        self.timeout_kind = kind
         self.timeout_deadline = 0.0
 
     cdef void _cancel_timeout(self):
@@ -2465,15 +2485,12 @@ cdef class CHttpProtocol(HttpConnection):
         if _task_done(task):
             # Skip only a clean NoOp success. Write-then-raise / cancel / an
             # incomplete response must still hit on_handler_done (log + abort).
-            if (
-                not exchange._completed
-                or self.noop_span is None
-                or task.cancelled()
-                or task.exception() is not None
-            ):
+            if not exchange._completed or self.noop_span is None:
                 exchange.on_handler_done(task)
-            else:
+            elif _task_clean(task):
                 exchange.handler_finished()
+            else:
+                exchange.on_handler_done(task)
         else:
             tasks = self._tasks if self._tasks is not None else self.app.tasks
             tasks.add(task)
@@ -2580,7 +2597,8 @@ cdef class CHttpProtocol(HttpConnection):
             self.timeout_kind != TIMEOUT_HEADER
             and self.timeout_kind != TIMEOUT_BODY
         ):
-            self._arm_timeout(TIMEOUT_IDLE, self.keep_alive_timeout)
+            # ``_closing()`` was checked above and nothing since can close.
+            self._arm_timeout_open(TIMEOUT_IDLE, self.keep_alive_timeout)
 
     cdef void _finish_protocol_span(
         self,
