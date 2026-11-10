@@ -245,6 +245,9 @@ cdef CNode _take_param(
 ):
     cdef object decoded
     if node.wildcard is not None and node.wildcard_name is not None:
+        if seglen == 0:
+            # `/users//posts`, or an empty host label: `{id}` promises a value.
+            return None
         decoded = _decode_param(seg, seglen)
         if decoded is None:
             return None

@@ -114,12 +114,7 @@ _PAIR = re.compile(rb"[^&]+")
 
 
 def _too_many_pairs(body: bytes, limit: int) -> bool:
-    count = 0
-    for _ in _PAIR.finditer(body):
-        count += 1
-        if count > limit:
-            return True
-    return False
+    return any(count > limit for count, _ in enumerate(_PAIR.finditer(body), start=1))
 
 
 def _fields_form(items: list[tuple[str, str]], max_fields: int) -> Form:

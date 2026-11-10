@@ -58,11 +58,20 @@ class TestRequestCookies:
         assert req.cookies.get("session") == "new"
         assert req.cookies.get("a") == "3"
 
+    def test_get_takes_any_name(self):
+        hdrs = Headers()
+        hdrs.add("Cookie", "a=1")
+        req = Request(method="GET", path="/", headers=hdrs, body=b"")
+        assert req.cookies.get("x" * 300) is None
+        assert req.cookies.get("ż", "fallback") == "fallback"
+        assert ("x" * 300) not in req.cookies
+        assert "ż" not in req.cookies
+
     def test_get_quoted_semicolon_value(self):
         hdrs = Headers()
         hdrs.add("Cookie", 'x="a;b"; y=2')
         req = Request(method="GET", path="/", headers=hdrs, body=b"")
-        assert req.cookies.get("x") == "a;b"
+        assert req.cookies.get("x") == '"a'
         assert req.cookies.get("y") == "2"
 
     def test_empty_value_is_present(self):

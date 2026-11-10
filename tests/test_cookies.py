@@ -86,9 +86,28 @@ def test_delete_cookie_clears_with_matching_scope() -> None:
     assert "samesite=strict" in combined
 
 
-def test_parse_cookie_headers_quoted_semicolon() -> None:
+def test_parse_cookie_headers_semicolon_ends_a_quoted_value() -> None:
+    # Browsers split pairs at every ';'. Honouring the quotes would let two
+    # planted cookies (`theme="x` ... `z=y"`) swallow the ones between them.
     parsed = cookies.parse_cookie_headers(['x="a;b"; y=2'])
-    assert parsed == {"x": "a;b", "y": "2"}
+    assert parsed == {"x": '"a', "y": "2"}
+    parsed = cookies.parse_cookie_headers(
+        ['theme="x; __Host-session=SECRET; z=y"; lang="en"']
+    )
+    assert parsed == {
+        "theme": '"x',
+        "__Host-session": "SECRET",
+        "z": 'y"',
+        "lang": "en",
+    }
+
+
+def test_set_cookie_semicolon_round_trips() -> None:
+    w = make_writer()
+    cookies.set_cookie(w, "x", "a;b")
+    pair = (w.headers.get("set-cookie") or "").split("; ", 1)[0]
+    assert ";" not in pair
+    assert cookies.parse_cookie_headers([pair]) == {"x": "a;b"}
 
 
 def test_parse_cookie_headers_later_header_wins() -> None:

@@ -1526,9 +1526,7 @@ class TestPathHardening:
         assert not filesystem._short_name_alias(tmp_path, "x~1/y~2.txt")
 
     @pytest.mark.skipif(sys.platform == "win32", reason="needs symlinks")
-    async def test_followed_symlink_cannot_name_a_dotfile(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_followed_symlink_cannot_name_a_dotfile(self, tmp_path: Path) -> None:
         (tmp_path / ".env").write_text("SECRET")
         (tmp_path / "pub.txt").symlink_to(tmp_path / ".env")
         (tmp_path / "ok.txt").write_text("fine")

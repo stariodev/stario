@@ -21,6 +21,7 @@ from stario.exceptions import StarioError
 from stario.http.request import Request
 from stario.http.writer import Writer
 from stario.json import dumps_bytes, loads
+from stario_cython.exchange import ParsedCookies
 
 _SAMESITE = frozenset(("lax", "strict", "none"))
 
@@ -43,14 +44,11 @@ def morsels_from_lines(
 def parse_cookie_headers(cookie_strings: Iterable[str]) -> dict[str, str]:
     """Parse `Cookie` header value(s) into a name→value mapping.
 
-      Uses `http.cookies.SimpleCookie` (RFC 6265 cookie-value quoting and
-      unquoting). Later header lines win; within one line, later pairs override
-    earlier. Malformed lines are skipped (no cookies extracted from that line).
+    The same scan as `c.req.cookies`: later header lines win; within one
+    line, later pairs override earlier. A `;` always ends a pair, as in
+    browsers, so a quoted value never spans one.
     """
-    cookies: dict[str, str] = {}
-    for name, morsel in morsels_from_lines(cookie_strings):
-        cookies[name] = morsel.value
-    return cookies
+    return ParsedCookies([line for line in cookie_strings if line]).as_dict()
 
 
 def _check_prefix(name: str, *, secure: bool, path: str, domain: str | None) -> None:
