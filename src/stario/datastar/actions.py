@@ -15,8 +15,9 @@ attributes like `data.on(...)`. Build the URL with `route.href()`, then
 pick `at.get` / `at.post` / … at the call site.
 """
 
+import math
 from collections.abc import Mapping
-from typing import Any, Literal, TypedDict, Unpack
+from typing import Any, Literal, TypedDict, Unpack, cast
 from urllib.parse import urlencode
 
 from stario.exceptions import StarioError
@@ -51,6 +52,36 @@ class FetchOptions(TypedDict, total=False):
     retry_max_wait_ms: int | None
     retry_max_count: int | None
     request_cancellation: RequestCancellation | str | None
+
+
+def _js_number(option: str, value: object, *, integer: bool = False) -> str:
+    """A number for the JS source: an int (or a finite float unless `integer`).
+
+    These options are pasted into the action expression as they are, so a
+    `str` here would be JavaScript.
+    """
+    value_type = type(value)
+    if value_type is int or (
+        not integer and value_type is float and math.isfinite(cast(float, value))
+    ):
+        return str(value)
+    raise StarioError(
+        f"Datastar option {option} must be "
+        + ("an int" if integer else "a finite int or float")
+        + f", not {value_type.__name__}",
+        context={"option": option, "value": repr(value)[:100]},
+    )
+
+
+def _quote_strings(value: Any) -> Any:
+    """`value` with every str, at any depth, as a JS string literal."""
+    if isinstance(value, str):
+        return string_literal(value)
+    if isinstance(value, dict):
+        return {k: _quote_strings(v) for k, v in cast(dict[Any, Any], value).items()}
+    if isinstance(value, (list, tuple)):
+        return [_quote_strings(v) for v in cast(list[Any], value)]
+    return value
 
 
 class DatastarActions:
@@ -139,7 +170,7 @@ class DatastarActions:
             parts.append(f"headers: {js_object(headers_dict)}")
 
         if open_when_hidden is not None:
-            parts.append(f"openWhenHidden: {str(open_when_hidden).lower()}")
+            parts.append(f"openWhenHidden: {'true' if open_when_hidden else 'false'}")
 
         if payload is not None:
             parts.append(f"payload: {js_object(payload)}")
@@ -148,16 +179,25 @@ class DatastarActions:
             parts.append(f"retry: {string_literal(str(retry))}")
 
         if retry_interval_ms is not None:
-            parts.append(f"retryInterval: {retry_interval_ms}")
+            parts.append(
+                "retryInterval: "
+                + _js_number("retry_interval_ms", retry_interval_ms, integer=True)
+            )
 
         if retry_scaler is not None:
-            parts.append(f"retryScaler: {retry_scaler}")
+            parts.append("retryScaler: " + _js_number("retry_scaler", retry_scaler))
 
         if retry_max_wait_ms is not None:
-            parts.append(f"retryMaxWait: {retry_max_wait_ms}")
+            parts.append(
+                "retryMaxWait: "
+                + _js_number("retry_max_wait_ms", retry_max_wait_ms, integer=True)
+            )
 
         if retry_max_count is not None:
-            parts.append(f"retryMaxCount: {retry_max_count}")
+            parts.append(
+                "retryMaxCount: "
+                + _js_number("retry_max_count", retry_max_count, integer=True)
+            )
 
         if request_cancellation is not None:
             parts.append(
@@ -286,11 +326,7 @@ class DatastarActions:
         intl_type = type
         action = f"@intl({string_literal(str(intl_type))}, {value}"
         if options is not None:
-            quoted = {
-                k: string_literal(v) if isinstance(v, str) else v
-                for k, v in options.items()
-            }
-            action += f", {js_object(quoted)}"
+            action += f", {js_object(_quote_strings(options))}"
         elif locale is not None:
             action += ", undefined"
         if locale is not None:
@@ -313,9 +349,19 @@ class DatastarActions:
         should_round: bool = False,
     ) -> str:
         """Build `@fit(...)` to remap a numeric expression. **Datastar Pro only.**"""
+        bounds = ", ".join(
+            _js_number(name, value)
+            for name, value in (
+                ("old_min", old_min),
+                ("old_max", old_max),
+                ("new_min", new_min),
+                ("new_max", new_max),
+            )
+        )
         return (
-            f"@fit({v}, {old_min}, {old_max}, {new_min}, {new_max}, "
-            f"{str(should_clamp).lower()}, {str(should_round).lower()})"
+            f"@fit({v}, {bounds}, "
+            f"{'true' if should_clamp else 'false'}, "
+            f"{'true' if should_round else 'false'})"
         )
 
 

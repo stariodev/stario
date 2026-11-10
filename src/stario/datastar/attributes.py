@@ -103,6 +103,8 @@ class DatastarAttributes:
         if not prefix:
             raise ValueError("Datastar attribute prefix cannot be empty.")
         self.prefix = prefix if prefix.endswith("-") else prefix + "-"
+        # Every helper writes the prefix into an attribute name.
+        validate_attribute_key(self.prefix)
 
     def attr(self, key: str, expression: str) -> Attrs:
         """Set one HTML attribute from a reactive expression.
@@ -384,6 +386,8 @@ class DatastarAttributes:
         if capture:
             modifiers.append("capture")
         if target is not None:
+            # Modifiers are part of the attribute name: check them like one.
+            validate_attribute_key(target)
             modifiers.append(target)
         if prevent:
             modifiers.append("prevent")
@@ -400,6 +404,7 @@ class DatastarAttributes:
 
         kebab_event = to_kebab_key(event)
         if case != "kebab":
+            validate_attribute_key(case)
             modifiers.append("case." + case)
         else:
             # `myEvent` has to travel as `my-event__case.camel`: the HTML
@@ -438,11 +443,11 @@ class DatastarAttributes:
         modifiers: list[str] = []
         if threshold is not None:
             if isinstance(threshold, str):
-                modifiers.append(
-                    threshold
-                    if threshold in ("half", "full")
-                    else "threshold." + threshold
-                )
+                if threshold in ("half", "full"):
+                    modifiers.append(threshold)
+                else:
+                    validate_attribute_key(threshold)
+                    modifiers.append("threshold." + threshold)
             elif 0.0 <= threshold <= 1.0:
                 modifiers.append(f"threshold.{round(threshold * 100)}")
             else:
@@ -842,11 +847,11 @@ class DatastarAttributes:
         """
         modifiers: list[str] = []
         if behavior is not None:
-            modifiers.append(behavior)
+            modifiers.append(validate_attribute_key(behavior))
         if horizontal is not None:
-            modifiers.append("h" + horizontal)
+            modifiers.append("h" + validate_attribute_key(horizontal))
         if vertical is not None:
-            modifiers.append("v" + vertical)
+            modifiers.append("v" + validate_attribute_key(vertical))
         if focus:
             modifiers.append("focus")
 
