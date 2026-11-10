@@ -109,6 +109,15 @@ cdef extern from *:
         ['&'] = 1, ['<'] = 1, ['>'] = 1,
     };
 
+    /* Bytes each character adds when escaped, per mode (ESC_TEXT,
+       ESC_DQUOTE, ESC_SQUOTE): a table sum, so the scan of clean text has
+       no branches and the compiler can vectorise it. */
+    static const unsigned char stario_escape_extra[3][256] = {
+        {[38] = 4, [60] = 3, [62] = 3},             /* & < > */
+        {[38] = 4, [60] = 3, [62] = 3, [34] = 5},   /* and " */
+        {[38] = 4, [60] = 3, [62] = 3, [39] = 4},   /* and ' */
+    };
+
     /* type(o) as a borrowed pointer: Cython's type(o) takes a reference,
        a refcount write on the type for every argument or node. */
     #define stario_type(o) ((PyObject*)Py_TYPE(o))
@@ -230,6 +239,7 @@ cdef extern from *:
     int stario_disallow_instantiation(object t) except -1
     int stario_dict_get_ref(object d, object key, PyObject** out) except -1
     const unsigned char stario_text_escape[256]
+    const unsigned char stario_escape_extra[3][256]
     PyObject* stario_type(PyObject* o)
     int stario_immortalize(object op)
     object stario_shared_str(object s)
@@ -316,16 +326,11 @@ cdef object _escape_1byte(object s, int mode):
     cdef Py_ssize_t w = 0
     cdef unsigned char c
     cdef unsigned char quote = 34 if mode == ESC_DQUOTE else (39 if mode == ESC_SQUOTE else 0)
+    cdef const unsigned char* table = stario_escape_extra[mode]
     cdef unsigned char* dst
     cdef object out
     for i in range(n):
-        c = src[i]
-        if c == 38:
-            extra += 4
-        elif c == 60 or c == 62:
-            extra += 3
-        elif c == quote and quote != 0:
-            extra += 5 if quote == 34 else 4
+        extra += table[src[i]]
     if extra == 0:
         return s
     out = PyUnicode_New(n + extra, PyUnicode_MAX_CHAR_VALUE(s))
