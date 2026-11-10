@@ -120,50 +120,9 @@ class StdlibJsonCodec:
 _STDLIB_ENCODER = json_module.JSONEncoder(
     allow_nan=False, ensure_ascii=False, separators=(",", ":")
 )
-_c_make_encoder = getattr(json_module.encoder, "c_make_encoder", None)
-
-
-def _c_encoder_usable() -> bool:
-    # `c_make_encoder` is CPython's own, undocumented entry point: check its
-    # argument list still matches before relying on it.
-    if _c_make_encoder is None:
-        return False
-    try:
-        probe = _c_make_encoder(
-            {},
-            _STDLIB_ENCODER.default,
-            json_module.encoder.encode_basestring,
-            None,
-            ":",
-            ",",
-            False,
-            False,
-            False,
-        )({"a": [1, "é"]}, 0)
-    except Exception:
-        return False
-    return "".join(probe) == '{"a":[1,"é"]}'
-
-
-if _c_make_encoder is None or not _c_encoder_usable():
-    # Pure-Python json build: the shared encoder has no per-call state.
-    _stdlib_encode = _STDLIB_ENCODER.encode
-else:
-    _encoder_default = _STDLIB_ENCODER.default
-    _encode_str = json_module.encoder.encode_basestring
-    _join = "".join
-
-    def _stdlib_encode(value: Any, /) -> str:
-        # What `_STDLIB_ENCODER.encode` runs for a one-shot encode, minus
-        # `json.dumps` building a JSONEncoder per call and `iterencode`'s
-        # Python setup: ~1.2 µs instead of ~3.4 µs for a small dict. A fresh
-        # `markers` dict per call keeps circular-reference detection and
-        # makes the call safe from any thread.
-        return _join(
-            _c_make_encoder(
-                {}, _encoder_default, _encode_str, None, ":", ",", False, False, False
-            )(value, 0)
-        )
+# One shared encoder: `json.dumps` with these options builds a JSONEncoder
+# on every call, and `encode()` keeps no state between calls.
+_stdlib_encode = _STDLIB_ENCODER.encode
 
 
 def _stdlib_default_encode(value: Any, default: JsonDefault, /) -> str:

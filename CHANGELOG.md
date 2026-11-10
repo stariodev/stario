@@ -64,29 +64,34 @@ rounds against 5.8.0.
 
 ### Performance
 
-| case | 5.8.0 | now | now, PGO build |
-| --- | ---: | ---: | ---: |
-| plaintext | 2.41 µs | 2.24 | 1.99 |
-| json | 5.47 | 3.58 | 3.04 |
-| `GET /user/{id}` | 6.66 | 4.41 | 3.76 |
-| JSON POST | 11.64 | 9.22 | 7.51 |
-| 50-row HTML page | 47.31 | 44.33 | 40.32 |
-| traced json | 17.06 | 11.97 | 10.90 |
-| SSE `patch_signals` | 7.07 | 2.87 | 2.93 |
-| SSE `patch_elements`, zstd | 3.09 | 2.11 | 2.06 |
-| HTTP/2 plaintext | 5.94 | 5.24 | 4.37 |
-| HTTP/2 json | 10.01 | 7.08 | 6.07 |
+| case | 5.8.0 | now |
+| --- | ---: | ---: |
+| plaintext | 2.28 µs | 2.37 |
+| json | 5.52 | 4.26 |
+| `GET /user/{id}` | 6.26 | 5.07 |
+| JSON POST | 11.57 | 9.72 |
+| 50-row HTML page | 47.31 | 44.33 |
+| traced json | 16.76 | 12.76 |
+| SSE `patch_signals` | 7.18 | 2.99 |
+| SSE `patch_elements`, zstd | 3.10 | 2.13 |
+| HTTP/2 plaintext | 5.87 | 5.31 |
+| HTTP/2 json | 10.00 | 8.40 |
 
-- **Profile-guided builds.** `STARIO_PGO=1` (GCC) compiles instrumented,
-  runs `scripts/pgo_train.py`, and compiles again with the profile; Linux
-  wheels are built this way. See `CYTHON.md`.
-- **JSON** goes straight to CPython's C encoder instead of `json.dumps`,
-  which built a `JSONEncoder` per call (3.4 → 1.2 µs for a small dict).
-- **Tracing:** pending spans sit in a deque under one lock, span ids skip
-  `UUID.__init__`, and `JsonTracer` formats a span's fixed fields directly.
+Plaintext is within run-to-run noise (-7% to +7% across runs).
+
+- **JSON** encodes with one shared `json.JSONEncoder`. `json.dumps` with
+  options built a new encoder on every call.
+- **Tracing:** pending spans sit in a deque under one lock, and
+  `JsonTracer` formats a span's fixed fields directly.
 - **HTTP/2:** DATA frames up to 4 KiB are copied behind their header into
   the outbound buffer: a small response is one `write`.
 - **`c.req.body()`** returns a complete body without a second coroutine.
+- **Profile-guided builds, opt-in.** `STARIO_PGO=1` (GCC) compiles
+  instrumented, runs `scripts/pgo_train.py`, and compiles again with the
+  profile: a further 10-20% on the cases the training run covers. Wheels
+  are not built this way yet: the training run is the in-process
+  benchmark, and paths it does not exercise have not been measured. See
+  `CYTHON.md`.
 - **Datastar SSE:** `patch_signals` / `patch_elements` skip per-call
   closures, ABC `isinstance` checks, and the line split for one-line
   payloads.

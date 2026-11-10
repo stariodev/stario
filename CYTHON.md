@@ -35,15 +35,19 @@ cd examples/hello-world && uv run python -m main   # serve the smallest example
 After editing a `.pyx` / `.pxd` / `.pxi` / `vendor/*.c`, rebuild in place
 with `uv run python setup.py build_ext --inplace`.
 
-`STARIO_PGO=1` makes a profile-guided build (GCC only; Linux wheels are
-built this way): `setup.py` compiles the extensions instrumented, runs
+`STARIO_PGO=1` makes a profile-guided build (GCC only, opt-in; wheels are
+not built this way): `setup.py` compiles the extensions instrumented, runs
 `scripts/pgo_train.py` (the in-process benchmarks) against them, and
 compiles again with the recorded branch profile. On the in-process
 benchmark that is 10-20% off small requests (plaintext 2.41 → 2.06 µs,
 `GET /user/{id}` 6.79 → 5.78, HTTP/2 plaintext 6.29 → 5.18) and about 10%
 off the HTML page. It doubles the build time plus about a minute of
 training. With another compiler, or if training fails, the build goes on
-without a profile.
+without a profile. The training run covers only what that benchmark does
+(small GET/POST, the HTML page, one SSE stream, HTTP/2); code it never
+reaches, such as query and cookie parsing, streamed uploads, and error
+paths, is laid out as cold and has not been measured under PGO. Widen
+`scripts/pgo_train.py` and compare those paths before shipping it.
 
 ```bash
 STARIO_PGO=1 uv run python setup.py build_ext --inplace --force

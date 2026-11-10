@@ -8,7 +8,7 @@ import time
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any
-from uuid import UUID, SafeUUID
+from uuid import UUID
 
 from .core import Attributes, EventBody, Span, Tracer
 from .formatters import format_exception_for_telemetry, serialize_event_body
@@ -37,20 +37,6 @@ _uuid7_state = _Uuid7State()
 
 
 _int_from_bytes = int.from_bytes
-_new_object = object.__new__
-_set_attr = object.__setattr__
-_SAFE_UNKNOWN = SafeUUID.unknown
-
-
-def _uuid_from_int(value: int) -> UUID:
-    """`UUID(int=value)` for a value already in range (CPython's `UUID._from_int`).
-
-    `UUID.__init__` re-checks every keyword form; that was a third of the id cost.
-    """
-    u = _new_object(UUID)
-    _set_attr(u, "int", value)
-    _set_attr(u, "is_safe", _SAFE_UNKNOWN)
-    return u
 
 
 def _span_id() -> UUID:
@@ -78,8 +64,8 @@ def _span_id() -> UUID:
             state.pos = end
             state.last_timestamp = timestamp_ms
             state.last_counter = counter
-            return _uuid_from_int(
-                ((timestamp_ms & 0xFFFF_FFFF_FFFF) << 80)
+            return UUID(
+                int=((timestamp_ms & 0xFFFF_FFFF_FFFF) << 80)
                 | ((counter >> 30) << 64)
                 | ((counter & 0x3FFF_FFFF) << 32)
                 | _int_from_bytes(pool[pos:end])
@@ -97,8 +83,8 @@ def _span_id() -> UUID:
     state.pos = end
     state.last_timestamp = timestamp_ms
     state.last_counter = counter
-    return _uuid_from_int(
-        ((timestamp_ms & 0xFFFF_FFFF_FFFF) << 80)
+    return UUID(
+        int=((timestamp_ms & 0xFFFF_FFFF_FFFF) << 80)
         | ((counter >> 30) << 64)
         | ((counter & 0x3FFF_FFFF) << 32)
         | (rand & 0xFFFF_FFFF)
