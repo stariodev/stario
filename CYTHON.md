@@ -76,9 +76,35 @@ STARIO_PGO=1 uv run python setup.py build_ext --inplace --force
 
 Every non-MSVC build passes `-fstack-protector` and `-D_FORTIFY_SOURCE=2`,
 and links with full RELRO and a non-executable stack on Linux, whether or
-not the interpreter's own flags carry them. `-fstack-protector-strong` was
-measured and left out: it guards most Cython functions (any address-taken
-local) and cost 5% on a plaintext request.
+not the interpreter's own flags carry them. On Linux it adds
+`-fstack-clash-protection` and, on x86-64, `-fcf-protection=full` (CET
+markers), each only if the compiler accepts it; neither cost anything
+measurable. `-DNDEBUG` is passed too: the interpreter's CFLAGS carry it,
+but a `CFLAGS` variable in the environment replaces those, and the
+CPython inline helpers would then keep their asserts.
+`-fvisibility=hidden` leaves `PyInit_*` as the only exported symbol, so
+calls into llhttp and `compression_buf.c` skip the PLT and no other
+library can interpose them: 2-5% off small in-process requests, 1% smaller.
+
+Measured and left out (best of four or more interleaved rounds, one
+pinned CPU on a shared machine, so differences under ~3% are noise):
+
+- `-fstack-protector-strong`: guards most Cython functions (any
+  address-taken local) and cost 5% on a plaintext request.
+- `-D_FORTIFY_SOURCE=3` (+4-9% on small requests) and
+  `-ftrivial-auto-var-init=zero` (+3-8%).
+- `-flto`: no measurable change; each extension is one large Cython
+  translation unit plus a little vendored C.
+- `-fomit-frame-pointer`: no gain (small requests measured slower); the
+  frame pointers the interpreter's CFLAGS ask for stay.
+- `-msse4.2` (the protocol module had it through 5.8.1): wheels
+  target the x86-64 baseline, and SSE 4.2 code is SIGILL on CPUs and VMs
+  without it. llhttp's SSE 4.2 header-value scan saves about 45 ns of
+  500 on a 600-byte browser request (parser alone), under 1% end to end,
+  and nothing on small requests. Bringing it back needs runtime dispatch
+  (a second, SSE 4.2 build of `llhttp.c` chosen by CPUID), not a global
+  flag. aarch64 keeps llhttp's NEON scan, which is baseline there.
+- `CYTHON_CLINE_IN_TRACEBACK=0`: already Cython 3's default.
 
 The build leaves out debug info (`-g0`, and `-s` on Linux), so a wheel
 stays small. To debug the extensions with `gdb` or `perf`, rebuild with

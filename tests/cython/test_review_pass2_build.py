@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import re
+import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -183,3 +184,22 @@ def test_nghttp2_floor_has_the_cve_2026_27135_fix() -> None:
     assert floor >= (1, 68, 1)
     assert version("1.68.0") < floor <= version("1.68.1")
     assert version("1.70.0-DEV") >= floor
+
+
+def test_gcc_clang_flags_keep_the_wheel_baseline_and_hardening() -> None:
+    compiler_args = _setup_namespace()["_compiler_args"]
+    compile_args, link_args = compiler_args(msvc=False, accepts=lambda flag: True)
+    # Not left to the interpreter's CFLAGS, which a CFLAGS variable replaces.
+    assert "-DNDEBUG" in compile_args
+    assert "-fvisibility=hidden" in compile_args
+    assert "-fstack-protector" in compile_args
+    assert compile_args.index("-D_FORTIFY_SOURCE=2") > compile_args.index(
+        "-U_FORTIFY_SOURCE"
+    )
+    # x86-64 wheels must run on the baseline ISA: no SSE 4.2, AVX or -march.
+    assert not [a for a in compile_args if a.startswith(("-msse", "-mavx", "-march"))]
+    unprobed, _ = compiler_args(msvc=False, accepts=lambda flag: False)
+    assert "-fcf-protection=full" not in unprobed
+    assert compiler_args(msvc=True, accepts=lambda flag: True)[0] in ([], ["/Zi"])
+    if sys.platform.startswith("linux"):
+        assert {"-Wl,-z,relro", "-Wl,-z,now", "-Wl,-z,noexecstack"} <= set(link_args)

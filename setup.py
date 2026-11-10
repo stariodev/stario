@@ -23,15 +23,17 @@ training run that crashes is a bug in the build it ran).
 
 import glob
 import os
-import platform
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
+from collections.abc import Callable
 
 from Cython.Build import cythonize
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
+from setuptools.errors import CompileError
 
 WINDOWS = sys.platform == "win32"
 # Windows has no system zlib: vcpkg installs one with a zlib.pc.
@@ -167,10 +169,8 @@ class native_build_ext(build_ext):
         compile_args = _pkg_config("--cflags-only-other")
         link_args = _pkg_config("--libs-only-other")
         msvc = self.compiler.compiler_type == "msvc"
+        own_compile, own_link = _compiler_args(msvc=msvc, accepts=self._accepts)
         for ext in self.extensions:
-            own_compile, own_link = _compiler_args(
-                msvc=msvc, sse42=ext.name == "stario_cython.protocol"
-            )
             ext.include_dirs.extend(include_dirs)
             ext.library_dirs.extend(library_dirs)
             ext.libraries.extend(libraries)
@@ -188,6 +188,24 @@ class native_build_ext(build_ext):
             )
         else:
             super().build_extensions()
+
+    def _accepts(self, flag: str) -> bool:
+        """True if the compiler builds an empty file with `flag`, warnings as errors.
+
+        Clang only warns about a flag that does not apply to the target
+        (`-fcf-protection` off x86); -Werror turns that into a no.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            source = os.path.join(tmp, "probe.c")
+            with open(source, "w") as f:
+                f.write("int stario_probe(void) { return 0; }\n")
+            try:
+                self.compiler.compile(
+                    [source], output_dir=tmp, extra_postargs=[flag, "-Werror"]
+                )
+            except CompileError:
+                return False
+        return True
 
     def _is_gcc(self) -> bool:
         # Clang writes .profraw files that need llvm-profdata; not handled.
@@ -270,15 +288,34 @@ class native_build_ext(build_ext):
 debug_build = os.environ.get("STARIO_DEBUG_BUILD") == "1"
 
 
-def _compiler_args(*, msvc: bool, sse42: bool) -> tuple[list[str], list[str]]:
-    """Compile and link flags for one extension, by compiler family."""
+def _compiler_args(
+    *, msvc: bool, accepts: Callable[[str], bool]
+) -> tuple[list[str], list[str]]:
+    """Compile and link flags for every extension, by compiler family.
+
+    `accepts(flag)` probes the compiler for flags that older GCC or Clang
+    releases lack.
+    """
     if msvc:
         # setuptools already passes /O2 /GL /MD /DNDEBUG, and MSVC does no
         # type-based alias analysis, so nothing mirrors -fno-strict-aliasing.
-        # llhttp's SSE 4.2 path keys on __SSE4_2__, which MSVC never defines.
         return (["/Zi"], ["/DEBUG"]) if debug_build else ([], [])
+    linux = sys.platform.startswith("linux")
     # -g0 overrides the -g that Python's own CFLAGS add: a wheel ships no debug info.
-    compile_args = ["-O3", "-fno-strict-aliasing", "-g" if debug_build else "-g0"]
+    # -DNDEBUG is in the interpreter's CFLAGS too, but a CFLAGS variable in
+    # the environment replaces those, and without it every CPython inline
+    # helper (PyTuple_SET_ITEM, PyBytes_AS_STRING, ...) keeps its assert().
+    compile_args = [
+        "-O3",
+        "-fno-strict-aliasing",
+        "-g" if debug_build else "-g0",
+        "-DNDEBUG",
+    ]
+    # Only PyInit_* leaves the module (Python's PyMODINIT_FUNC marks it
+    # visible). llhttp, compression_buf and Cython's helpers stay internal:
+    # calls between them skip the PLT and cannot be interposed by another
+    # library loaded RTLD_GLOBAL that has an llhttp of its own.
+    compile_args.append("-fvisibility=hidden")
     # Hardening the interpreter's own CFLAGS may or may not carry (manylinux
     # Pythons do not): stack canaries on functions with a char buffer, and
     # checked libc string/memory calls where the object size is known.
@@ -290,11 +327,22 @@ def _compiler_args(*, msvc: bool, sse42: bool) -> tuple[list[str], list[str]]:
         "-U_FORTIFY_SOURCE",
         "-D_FORTIFY_SOURCE=2",
     ]
-    if sse42 and platform.machine().lower() in {"x86_64", "amd64"}:
-        compile_args.append("-msse4.2")
+    if linux:
+        # Stack clash probes (large frames touch every page) and, on x86-64,
+        # CET branch/return markers: no measurable cost (CYTHON.md).
+        compile_args += [
+            flag
+            for flag in ("-fstack-clash-protection", "-fcf-protection=full")
+            if accepts(flag)
+        ]
+    # No -msse4.2: wheels target the x86-64 baseline, and an SSE 4.2
+    # instruction anywhere in the protocol module is SIGILL on a CPU or VM
+    # without it (AMD K10, QEMU's default qemu64). llhttp loses its SSE 4.2
+    # header-value scan: about 45 ns on a 600-byte browser request, under
+    # 1% end to end (CYTHON.md). aarch64 keeps llhttp's NEON path (baseline).
     # The linker drops the static symbol table too; Python finds PyInit_* in .dynsym.
-    link_args = ["-s"] if sys.platform.startswith("linux") and not debug_build else []
-    if sys.platform.startswith("linux"):
+    link_args = ["-s"] if linux and not debug_build else []
+    if linux:
         # Read-only relocations, resolved at load; no executable stack.
         link_args += ["-Wl,-z,relro", "-Wl,-z,now", "-Wl,-z,noexecstack"]
     return compile_args, link_args
