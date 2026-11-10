@@ -5,10 +5,12 @@ from __future__ import annotations
 import os
 import sys
 import threading
+from json.encoder import encode_basestring
 from pathlib import Path
 from typing import Any, TextIO
 from uuid import UUID
 
+import stario.json as _stario_json
 from stario._env import env_float, env_int, env_optional_str
 
 from .buffered import _BufferedTracer
@@ -82,6 +84,51 @@ def _serialize_span(span: RecordingSpan) -> dict[str, Any]:
         result["links"] = links
 
     return result
+
+
+def _stdlib_codec() -> bool:
+    """True while `stario.json` encodes with its standard-library default."""
+    return _stario_json._encode is _stario_json._stdlib_encode
+
+
+def _fast_line(span: RecordingSpan) -> str | None:
+    """`dumps_json(_serialize_span(span))` for the common span, or None.
+
+    Only valid with the standard-library codec. The fixed fields are
+    formatted directly (exact `str` / `int` only, so the text is what the
+    encoder would write) and only `attributes` goes through the encoder:
+    about half the cost on the writer thread, which holds the GIL while it
+    works. Spans with events or links, or anything unusual, take the
+    general path.
+    """
+    start_ns = span.start_ns
+    end_ns = span.end_ns
+    name = span.name
+    error = span.error
+    if (
+        type(start_ns) is not int
+        or type(end_ns) is not int
+        or type(name) is not str
+        or span.events
+        or span.links
+        or (error is not None and type(error) is not str)
+    ):
+        return None
+    span_id = _uuid_str(span.id)
+    trace_id = span_id if span.trace_id is span.id else _uuid_str(span.trace_id)
+    line = (
+        f'{{"span_id":"{span_id}","trace_id":"{trace_id}",'
+        f'"name":{encode_basestring(name)},"start_ns":{start_ns},'
+        f'"end_ns":{end_ns},"duration_ns":{end_ns - start_ns},'
+        f'"status":"{"ok" if error is None else "error"}"'
+    )
+    if span.parent_id is not None:
+        line += f',"parent_id":"{_uuid_str(span.parent_id)}"'
+    if error is not None:
+        line += f',"error":{encode_basestring(error)}'
+    if span.attributes:
+        line += f',"attributes":{dumps_json(span.attributes)}'
+    return line + "}"
 
 
 class JsonTracer(_BufferedTracer):
@@ -161,10 +208,13 @@ class JsonTracer(_BufferedTracer):
     def _write_batch(self, spans: list[RecordingSpan]) -> None:
         """Serialize and write one finished batch."""
         lines: list[str] = []
+        fast = _stdlib_codec()
         for span in spans:
             try:
-                data = _serialize_span(span)
-                lines.append(dumps_json(data))
+                line = _fast_line(span) if fast else None
+                if line is None:
+                    line = dumps_json(_serialize_span(span))
+                lines.append(line)
             except Exception as exc:
                 self._record_serialization_error()
                 self._emit_stderr(
