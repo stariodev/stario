@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from stario import App, Route
-from stario_cython.exchange import ParsedCookies
+from stario_cython.exchange import ParsedCookies, Request, RequestHeaders
 from tests.cython.http import RecordingTransport, make_protocol, response_status
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -105,6 +105,53 @@ def test_parsed_cookies_get_reads_bytes_like_lines_as_bytes(line) -> None:
 def test_parsed_cookies_rejects_lines_that_are_not_text_or_bytes() -> None:
     with pytest.raises(TypeError):
         ParsedCookies([12345])
+
+
+# --- RequestHeaders re-initialisation ---------------------------------------
+
+
+def test_request_headers_reinit_resets_hot_indexes() -> None:
+    """``__init__`` kept the old Host/Cookie/Authorization indexes when it
+    ran again, so they pointed past the new, shorter table
+    (``Request.host`` read that row without a bounds check)."""
+    first = {f"x-{i}": "v" for i in range(40)}
+    first["host"] = "old.example"
+    first["cookie"] = "a=1"
+    headers = RequestHeaders(first)
+    headers.__init__({"host": "new.example", "cookie": "b=2"})
+    assert headers.get("host") == "new.example"
+    assert headers.get("cookie") == "b=2"
+    assert Request(headers=headers).host == "new.example"
+    assert Request(headers=headers).cookies.get("b") == "2"
+    headers.__init__({"x": "y"})
+    assert headers.get("host") is None
+    assert Request(headers=headers).host == ""
+    headers.__init__()
+    assert len(headers) == 0
+
+
+@pytest.mark.asyncio
+async def test_live_request_headers_cannot_be_reinitialised() -> None:
+    app = App()
+    seen: list[str] = []
+
+    async def handler(c, w) -> None:
+        with pytest.raises(TypeError):
+            c.req.headers.__init__({"host": "evil"})
+        seen.append(c.req.host)
+        w.text("ok")
+
+    app.add(Route("GET /"), handler)
+    proto, transport = _attach(app)
+    try:
+        proto.data_received(b"GET / HTTP/1.1\r\nHost: t\r\n\r\n")
+        await _settle(app)
+        assert response_status(transport.writes) == 200
+        assert seen == ["t"]
+    finally:
+        if not transport.is_closing():
+            transport.close()
+        await _settle(app)
 
 
 # --- HTTP/1.0 close-delimited stream ----------------------------------------

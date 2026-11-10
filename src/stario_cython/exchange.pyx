@@ -689,7 +689,7 @@ cdef class Request:
             return
         index = view._host_index()
         arena = view._arena()
-        if index < 0 or arena == NULL:
+        if index < 0 or index >= view._count() or arena == NULL:
             self._host = ""
             return
         header = &view._headers()[index]
@@ -3400,6 +3400,7 @@ cdef class RequestHeaders:
         cdef object value
         cdef object item
         if headers is None:
+            self._own_pairs([])
             return
         if isinstance(headers, Headers):
             pairs = (<Headers>headers).unsafe_items()
@@ -3422,6 +3423,19 @@ cdef class RequestHeaders:
         cdef bytes name
         cdef bytes value
         cdef RawHeader* header
+        if self._ex is not None:
+            raise TypeError("a request's live headers cannot be re-initialised")
+        # ``__init__`` may run again: drop the old table and its hot indexes,
+        # which would otherwise point past the new, shorter table.
+        free(self._own_arena)
+        free(self._own_headers)
+        self._own_arena = NULL
+        self._own_headers = NULL
+        self._own_arena_len = 0
+        self._own_count = 0
+        self._own_host = -1
+        self._own_cookie = -1
+        self._own_auth = -1
         if count == 0:
             return 0
         for name, value in pairs:
