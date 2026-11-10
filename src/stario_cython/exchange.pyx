@@ -36,6 +36,7 @@ from cpython.exc cimport PyErr_Clear
 from cpython.mem cimport PyMem_Free, PyMem_Malloc, PyMem_Realloc
 from cpython.unicode cimport (
     PyUnicode_AsUTF8AndSize,
+    PyUnicode_AsUTF8String,
     PyUnicode_DecodeASCII,
     PyUnicode_DecodeLatin1,
     PyUnicode_DecodeUTF8,
@@ -159,6 +160,9 @@ cdef int BODY_HIGH_WATER = 64 * 1024
 cdef int STREAM_CHUNK_LIMIT = 1024 * 1024
 cdef int STREAM_CHUNK_CL = 256 * 1024
 cdef int OUTPUT_BUFFER_RETAIN_MAX = 64 * 1024
+# respond() with headers: a bytes body up to this size is copied behind the
+# head so the response leaves in one write; larger ones go as a second iovec.
+cdef Py_ssize_t RESPOND_COPY_MAX = 16 * 1024
 cdef int DEFAULT_STREAM_CHUNK = 64 * 1024
 # zlib memLevel for streamed gzip responses; a stream holds far less input
 # history than a one-shot body, so the default 8 wastes ~50 KiB per stream.
@@ -527,6 +531,21 @@ cdef object _chunk_header(Py_ssize_t n):
     cdef char buf[26]
     cdef int i = sprintf(buf, "%zx\r\n", <size_t>n)
     return PyBytes_FromStringAndSize(buf, i)
+
+
+cdef inline object _freeze_parts(object body):
+    """A list/tuple body as an exact tuple, iterated once.
+
+    The writer counts the parts for Content-Length / the chunk size, then
+    iterates them again to send. A list subclass's ``__iter__`` (or another
+    thread editing the list) could yield different parts the second time,
+    and bytes past the declared length would be read as the next response.
+    """
+    if type(body) is tuple or type(body) is bytes:
+        return body
+    if isinstance(body, (list, tuple)):
+        return tuple(body)
+    return body
 
 
 cdef inline object _wire_part(object part):
@@ -1136,15 +1155,20 @@ cdef class RequestExchange:
         i = <int>_format_dec(tmp + 24, n)
         return self._buf_add(tmp + 24 - i, i)
 
-    cdef void _flush(self):
-        cdef object payload
-        if self._out_len == 0:
-            return
-        payload = PyBytes_FromStringAndSize(
+    cdef object _take_out(self):
+        """The buffered output as one ``bytes``; the buffer is left empty."""
+        cdef object payload = PyBytes_FromStringAndSize(
             PyByteArray_AS_STRING(self._out_buf),
             self._out_len,
         )
         self._out_len = 0
+        return payload
+
+    cdef void _flush(self):
+        cdef object payload
+        if self._out_len == 0:
+            return
+        payload = self._take_out()
         if self._http2:
             self._connection.h2_write_data(self, payload, False)
             return
@@ -2195,6 +2219,8 @@ cdef class RequestExchange:
         cdef object existing_cl
         cdef Py_ssize_t nbytes
         cdef object wire
+        cdef list parts
+        cdef object part
         cdef const unsigned char* native_out = NULL
         cdef size_t native_len = 0
         if self._t_is_closing():
@@ -2211,14 +2237,8 @@ cdef class RequestExchange:
                 ),
             )
         _require_final_status(status)
-        try:
-            content_type = _content_type_bytes(content_type)
-        except ValueError as exc:
-            raise StarioError(
-                "Invalid Content-Type",
-                context={"content_type": repr(content_type)[:120]},
-                help_text="Content-Type must be a header value without CR or LF.",
-            ) from exc
+        # Raises StarioError("Invalid Content-Type") for a bad value.
+        content_type = _content_type_bytes(content_type)
 
         if (
             self._expect_continue
@@ -2236,6 +2256,7 @@ cdef class RequestExchange:
             body = b""
             nbytes = 0
         else:
+            body = _freeze_parts(body)
             nbytes = self._body_nbytes(body)
             if self._head_request:
                 body = b""
@@ -2394,16 +2415,25 @@ cdef class RequestExchange:
                 self._buf_bytes(CRLF2)
             else:
                 self._buf_bytes(CRLF)
-            self._flush()
-            self._status_code = status
 
-            if nbytes and not self._head_request:
-                # Snapshot like the fast path: the transport may hold the
-                # object past return, so mutation must not reach the wire.
+            # Head and body in one transport call (one send under uvloop):
+            # a small body is copied behind the head, a larger one goes out
+            # as the next iovec. Snapshot like the fast path: the transport
+            # may hold the object past return, so mutation must not reach
+            # the wire.
+            if not nbytes or self._head_request:
+                self._flush()
+            elif type(body) is bytes and nbytes <= RESPOND_COPY_MAX:
+                self._buf_add(PyBytes_AS_STRING(body), nbytes)
+                self._flush()
+            else:
+                parts = [self._take_out()]
                 if isinstance(body, (list, tuple)):
-                    self._t_writelines([_wire_part(p) for p in body])
+                    for part in body:
+                        parts.append(_wire_part(part))
                 else:
-                    self._transport.write(_wire_part(body))
+                    parts.append(_wire_part(body))
+                self._t_writelines(parts)
         self._status_code = status
         self._bytes_written = self._declared_length if self._declared_length > 0 else 0
         self._completed = True
@@ -2569,6 +2599,7 @@ cdef class RequestExchange:
             )
         if not data:
             return self
+        data = _freeze_parts(data)
         n = self._body_nbytes(data)
 
         if self._status_code < 0:
@@ -2685,6 +2716,7 @@ cdef class RequestExchange:
             self._completed = True
             self._done()
             return
+        data = _freeze_parts(data)
         if self._status_code < 0:
             if data is not None:
                 cl = _dec(<size_t>self._body_nbytes(data))
@@ -3753,6 +3785,13 @@ cdef object RESPONSE_FINISHED_ERROR = (
 )
 
 
+cdef inline object _utf8(object text):
+    """``text.encode("utf-8")``; an exact ``str`` skips the method call."""
+    if type(text) is str:
+        return PyUnicode_AsUTF8String(text)
+    return text.encode("utf-8")
+
+
 cdef inline void _raise_finished() except *:
     raise StarioRuntime(
         RESPONSE_FINISHED_ERROR,
@@ -3891,7 +3930,7 @@ cdef class RequestHandle:
 
     def text(self, body, status=200):
         """Send `body` as UTF-8 `text/plain` and finish the response."""
-        self.respond(body.encode("utf-8"), b"text/plain; charset=utf-8", status)
+        self.respond(_utf8(body), b"text/plain; charset=utf-8", status)
 
     def json(self, value, status=200):
         """Serialize `value` to compact UTF-8 JSON and finish the response."""
@@ -3911,7 +3950,7 @@ cdef class RequestHandle:
         if isinstance(content, bytes):
             body = content
         elif isinstance(content, str):
-            body = content.encode("utf-8")
+            body = _utf8(content)
         else:
             if _markup_render is None:
                 from stario.markup.render import render_bytes

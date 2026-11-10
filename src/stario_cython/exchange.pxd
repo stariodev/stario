@@ -458,6 +458,7 @@ cdef class RequestExchange:
     cdef int _buf_add(self, const char* src, Py_ssize_t n) except -1
     cdef int _buf_bytes(self, object data) except -1
     cdef int _buf_uint(self, size_t n, int base) except -1
+    cdef object _take_out(self)
     cdef void _flush(self)
     cdef Py_ssize_t _body_nbytes(self, object body) except -2
     cdef object _body_as_bytes(self, object body)

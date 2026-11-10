@@ -154,6 +154,128 @@ async def test_live_request_headers_cannot_be_reinitialised() -> None:
         await _settle(app)
 
 
+# --- respond() with headers: one transport call -----------------------------
+
+
+class _CountingTransport(RecordingTransport):
+    __slots__ = ("calls",)
+
+    def __init__(self, protocol) -> None:
+        super().__init__(protocol)
+        self.calls = 0
+
+    def write(self, data) -> None:
+        self.calls += 1
+        super().write(data)
+
+    def writelines(self, parts) -> None:
+        self.calls += 1
+        for part in parts:
+            super().write(part)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "make_body",
+    [
+        lambda: b"x" * 100,
+        lambda: b"y" * (40 * 1024),
+        lambda: [b"a" * 10, bytearray(b"b" * 20), memoryview(b"c" * 30)],
+        lambda: bytearray(b"z" * 50),
+    ],
+    ids=["small", "large", "parts", "bytearray"],
+)
+async def test_respond_with_headers_sends_head_and_body_in_one_call(make_body) -> None:
+    app = App()
+    sent: list = []
+
+    async def handler(_c, w) -> None:
+        body = make_body()
+        sent.append(
+            b"".join(bytes(p) for p in body) if isinstance(body, list) else bytes(body)
+        )
+        w.headers.set("x-test", "1")
+        w.respond(body, b"application/octet-stream")
+        # The transport may hold the object: later edits must not reach it.
+        if isinstance(body, bytearray):
+            body[:] = b"!" * len(body)
+        elif isinstance(body, list):
+            body[1][:] = b"!" * len(body[1])
+
+    app.add(Route("GET /"), handler)
+    proto = make_protocol(asyncio.get_running_loop(), app)
+    transport = _CountingTransport(proto)
+    proto.connection_made(transport)
+    try:
+        proto.data_received(b"GET / HTTP/1.1\r\nHost: t\r\n\r\n")
+        await _settle(app)
+        raw = b"".join(transport.writes)
+        head, _, body = raw.partition(b"\r\n\r\n")
+        assert b"\r\nx-test: 1\r\n" in head + b"\r\n"
+        assert f"content-length: {len(sent[0])}".encode() in head
+        assert body == sent[0]
+        assert transport.calls == 1
+    finally:
+        if not transport.is_closing():
+            transport.close()
+        await _settle(app)
+
+
+# --- list bodies are iterated once ------------------------------------------
+
+
+class _ShiftyParts(list):
+    """Yields one part when counted, an injected response when sent."""
+
+    def __init__(self) -> None:
+        super().__init__([b"aaaa"])
+        self.passes = 0
+
+    def __iter__(self):
+        self.passes += 1
+        if self.passes == 1:
+            return iter([b"aaaa"])
+        return iter([b"aaaa", b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["respond", "respond_headers", "chunked", "end"])
+async def test_list_body_is_counted_and_sent_from_one_iteration(mode: str) -> None:
+    """The writer counted a list body (Content-Length / chunk size), then
+    iterated it again to send: a list subclass whose second pass differed put
+    bytes past the declared length, read by the client as another response."""
+    app = App()
+
+    async def handler(_c, w) -> None:
+        if mode == "respond":
+            w.respond(_ShiftyParts(), b"text/plain")
+        elif mode == "respond_headers":
+            w.headers.set("x-a", "1")
+            w.respond(_ShiftyParts(), b"text/plain")
+        elif mode == "chunked":
+            w.write_headers(200)
+            w.write(_ShiftyParts())
+            w.end()
+        else:
+            w.end(_ShiftyParts())
+
+    app.add(Route("GET /"), handler)
+    proto, transport = _attach(app)
+    try:
+        proto.data_received(b"GET / HTTP/1.1\r\nHost: t\r\n\r\n")
+        await _settle(app)
+        raw = b"".join(transport.writes)
+        assert raw.count(b"HTTP/1.1 200") == 1, raw
+        if mode == "chunked":
+            assert raw.endswith(b"\r\n\r\n4\r\naaaa\r\n0\r\n\r\n"), raw
+        else:
+            assert raw.endswith(b"content-length: 4\r\n\r\naaaa"), raw
+    finally:
+        if not transport.is_closing():
+            transport.close()
+        await _settle(app)
+
+
 # --- HTTP/1.0 close-delimited stream ----------------------------------------
 
 
