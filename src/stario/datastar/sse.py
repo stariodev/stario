@@ -323,7 +323,9 @@ class SSE:
 
         if w.started:
             content_type = w.headers.unsafe_get(b"content-type")
-            if content_type is None or b"text/event-stream" not in content_type.lower():
+            # Runs on every event. find(), not `in`: a bytes needle with
+            # `in` goes through the buffer protocol (see _sse_payload_lines).
+            if content_type is None or content_type.lower().find(b"text/event-stream") < 0:
                 raise StarioRuntime(
                     "Cannot send Datastar SSE events: response already started without "
                     "Content-Type: text/event-stream",
