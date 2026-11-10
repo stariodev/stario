@@ -165,7 +165,10 @@ def string_literal(value: str) -> str:
     ```
     """
     escaped = (
-        value.replace("\\", "\\\\")
+        # `\x5c`, not `\\`: Datastar's statement splitter reads `\"` and
+        # `\'` as an escaped quote without counting backslashes, so a value
+        # ending in an escaped backslash would hide the closing quote.
+        value.replace("\\", "\\x5c")
         .replace("<", "\\x3c")
         .replace("'", "\\'")
         .replace("\b", "\\b")

@@ -624,8 +624,13 @@ class DatastarAttributes:
         # Attrs(" data-signals='{\"count\":0,\"open\":false}'")
         ```
         """
+        # A JSON backslash is always `\\`; write it as `\u005c` so no string
+        # ends in `\\"`, which Datastar's statement splitter takes for an
+        # escaped quote (it does not count the backslashes before it).
         value = escape_sq_attribute_value(
-            json_dumps(expand_signal_paths(require_mapping("signals", payload)))
+            json_dumps(
+                expand_signal_paths(require_mapping("signals", payload))
+            ).replace("\\\\", "\\u005c")
         )
         if if_missing:
             return Attrs(f" {self.prefix}signals__ifmissing='{value}'")

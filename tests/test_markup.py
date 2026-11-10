@@ -1205,3 +1205,29 @@ class TestRenderEdgeCases:
 
         with pytest.raises(StarioError, match="nested too deeply to flatten"):
             baked(builder)
+
+
+class TestStyleUnderForeignContent:
+    """Inside <svg> / <math> the parser reads <style> content as markup."""
+
+    @pytest.mark.parametrize(
+        "css",
+        [
+            "<img src=x onerror=alert(1)>",
+            "a{} <b>",
+            "x </p>",
+            "<!doctype html>",
+            "<?x",
+        ],
+    )
+    def test_tag_like_text_is_refused(self, css: str) -> None:
+        with pytest.raises(StarioError, match="tag-like"):
+            h.Style(css)
+
+    def test_plain_css_passes(self) -> None:
+        css = "@media (width < 600px) { a > b { content: '\\3c b'; } } x<1 <"
+        assert render(h.Style(css)) == f"<style>{css}</style>"
+
+    def test_script_comparisons_still_pass(self) -> None:
+        js = "for (let i=0;i<n;i++) {}"
+        assert render(h.Script(js)) == f"<script>{js}</script>"

@@ -177,7 +177,9 @@ class SSE:
             if mode is not None:
                 lines.append(f"data: mode {mode}".encode("ascii"))
             if selector:
-                lines.append(b"data: selector " + _sse_field_value("selector", selector))
+                lines.append(
+                    b"data: selector " + _sse_field_value("selector", selector)
+                )
             if namespace:
                 lines.append(f"data: namespace {namespace}".encode("ascii"))
             if view_transition:
@@ -185,7 +187,9 @@ class SSE:
             if view_transition_selector is not None:
                 lines.append(
                     b"data: viewTransitionSelector "
-                    + _sse_field_value("viewTransitionSelector", view_transition_selector)
+                    + _sse_field_value(
+                        "viewTransitionSelector", view_transition_selector
+                    )
                 )
             html_bytes = _html_bytes(content)
 
@@ -325,7 +329,10 @@ class SSE:
             content_type = w.headers.unsafe_get(b"content-type")
             # Runs on every event. find(), not `in`: a bytes needle with
             # `in` goes through the buffer protocol (see _sse_payload_lines).
-            if content_type is None or content_type.lower().find(b"text/event-stream") < 0:
+            if (
+                content_type is None
+                or content_type.lower().find(b"text/event-stream") < 0
+            ):
                 raise StarioRuntime(
                     "Cannot send Datastar SSE events: response already started without "
                     "Content-Type: text/event-stream",
