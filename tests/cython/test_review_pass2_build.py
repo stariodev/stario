@@ -9,6 +9,15 @@ from pathlib import Path
 import pytest
 
 from stario import App, Route
+from stario.exceptions import StarioError
+from stario_cython.codecs import (
+    BrotliDecoder,
+    ZstdDecoder,
+    brotli_compress,
+    brotli_decompress,
+    zstd_compress,
+    zstd_decompress,
+)
 from tests.cython.http import RecordingTransport, make_protocol, response_statuses
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -64,3 +73,50 @@ async def test_empty_transfer_encoding_is_rejected(head: bytes) -> None:
         if not transport.is_closing():
             transport.close()
         await app.drain_tasks()
+
+
+def test_zstd_decompress_reads_every_concatenated_frame() -> None:
+    # RFC 8878 3: a zstd stream is any number of frames. Only the first was
+    # returned; the rest was dropped without an error.
+    data = zstd_compress(b"first ") + zstd_compress(b"second")
+    assert zstd_decompress(data) == b"first second"
+
+
+def test_zstd_decoder_reads_every_frame_in_one_push() -> None:
+    decoder = ZstdDecoder()
+    data = zstd_compress(b"a" * 1000) + zstd_compress(b"b" * 1000)
+    assert decoder.decompress(data) == b"a" * 1000 + b"b" * 1000
+    assert decoder.is_finished()
+
+
+def test_zstd_decoder_is_unfinished_inside_a_second_frame() -> None:
+    decoder = ZstdDecoder()
+    second = zstd_compress(b"b" * 1000)
+    assert decoder.decompress(zstd_compress(b"a") + second[:5]) == b"a"
+    assert not decoder.is_finished()
+    assert decoder.decompress(second[5:]) == b"b" * 1000
+    assert decoder.is_finished()
+
+
+def test_zstd_decompress_rejects_trailing_garbage_and_truncation() -> None:
+    frame = zstd_compress(b"payload")
+    with pytest.raises(StarioError):
+        zstd_decompress(frame + b"\x00junk")
+    with pytest.raises(StarioError):
+        zstd_decompress(frame[:-2])
+
+
+def test_brotli_decompress_rejects_bytes_after_the_stream() -> None:
+    # A brotli stream ends at its last meta-block: bytes after it are not
+    # part of the body (the reference decoder rejects them).
+    with pytest.raises(StarioError):
+        brotli_decompress(brotli_compress(b"payload") + b"junk")
+    assert brotli_decompress(brotli_compress(b"payload")) == b"payload"
+
+
+def test_brotli_decoder_rejects_bytes_after_the_stream() -> None:
+    decoder = BrotliDecoder()
+    assert decoder.decompress(brotli_compress(b"payload")) == b"payload"
+    assert decoder.is_finished()
+    with pytest.raises(StarioError):
+        decoder.decompress(b"junk")
