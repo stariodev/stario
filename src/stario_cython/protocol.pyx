@@ -1267,6 +1267,11 @@ cdef class CHttpProtocol(HttpConnection):
             return
         if self.parse_mode != PARSE_H2 and self.parser == NULL:
             return
+        if not PyBytes_Check(data) and not PyByteArray_Check(data):
+            # Another buffer type (a memoryview from some transport): the
+            # parse paths take bytes or bytearray, and held input must not
+            # alias a buffer the transport reuses.
+            data = bytes(data)
         if self.timeout_kind == TIMEOUT_IDLE:
             if PyBytes_Check(data):
                 self._refresh_idle(PyBytes_AS_STRING(data), PyBytes_GET_SIZE(data))

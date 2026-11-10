@@ -293,3 +293,18 @@ async def test_h2_interleaved_small_uploads_past_the_budget_read_whole() -> None
         assert early == 1
     finally:
         await _finish(app, transport)
+
+
+@pytest.mark.asyncio
+async def test_data_received_accepts_a_memoryview() -> None:
+    """Input that is neither bytes nor bytearray was dropped without a word
+    (the parse step raised inside a noexcept function)."""
+    app = App()
+    app.add(Route("GET /"), _ok)
+    proto, transport = _attach(app)
+    try:
+        proto.data_received(memoryview(b"GET / HTTP/1.1\r\nHost: a\r\n\r\n"))
+        await asyncio.sleep(0)
+        assert response_statuses(transport.writes) == [200]
+    finally:
+        await _finish(app, transport)
