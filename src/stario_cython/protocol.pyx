@@ -250,6 +250,11 @@ cdef enum:
     # ``h2_out`` keeps its capacity between send passes up to this; a burst
     # that grew it further (many streams answered in one pass) gives it back.
     H2_OUT_RETAIN_MAX = 64 * 1024
+    # Small bodies (Content-Length <= SMALL_BODY) are read before their
+    # handler starts, with the receive windows open. Past this many such
+    # bytes on one connection, a stream dispatches at its next DATA frame
+    # instead, so its handler reads (or the body backpressure pauses it).
+    H2_DEFERRED_MAX = 1024 * 1024
 
 cdef bytes H2_PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 cdef object _settings_lock = Lock()
@@ -951,6 +956,8 @@ cdef class CHttpProtocol(HttpConnection):
     # 0.0 = arm on the next tick; the final GOAWAY goes out at the deadline.
     cdef double h2_goaway_deadline
     cdef double h2_cancel_tokens
+    # Body bytes held by streams whose handler has not been dispatched yet.
+    cdef Py_ssize_t h2_deferred_bytes
     cdef double h2_cancel_ts
     # Streams holding their WINDOW_UPDATE (body backpressure).
     cdef int h2_paused_streams
@@ -1005,6 +1012,7 @@ cdef class CHttpProtocol(HttpConnection):
         self.h2_in_send = False
         self.h2_cancel_tokens = H2_RST_BURST
         self.h2_cancel_ts = 0.0
+        self.h2_deferred_bytes = 0
         self.h2_goaway_sent = False
         self.h2_goaway_pending = False
         self.h2_goaway_deadline = 0.0
@@ -1188,6 +1196,7 @@ cdef class CHttpProtocol(HttpConnection):
         if self.h2 != NULL:
             nghttp2_session_del(self.h2)
             self.h2 = NULL
+        self.h2_deferred_bytes = 0
         for exchange in list(self.h2_streams.values()):
             # The session is gone, so no response bytes of this stream can
             # still be in flight: the exchange may recycle once its handler
@@ -3045,15 +3054,24 @@ cdef class CHttpProtocol(HttpConnection):
                 return <RequestExchange>ptr
         return self.h2_streams.get(stream_id)
 
+    cdef inline void _h2_settle(self, RequestExchange ex) noexcept:
+        """Mark the stream dispatched (or given up on): its body bytes stop
+        counting against ``H2_DEFERRED_MAX``."""
+        if ex._h2_dispatched:
+            return
+        ex._h2_dispatched = True
+        if ex._h2_headers_done:
+            self.h2_deferred_bytes -= ex._total_read
+
     cdef void _h2_dispatch_stream(self, RequestExchange ex) noexcept:
         if ex is None or ex._h2_dispatched or self.rejected:
             return
         if self.transport is None or self.transport.is_closing():
             return
+        self._h2_settle(ex)
         try:
             self._bind_request(ex)
             self._dispatch(ex)
-            ex._h2_dispatched = True
         except Exception:
             _log.exception("Failed to dispatch request")
             self._h2_fail_stream(ex._h2_stream_id)
@@ -3118,8 +3136,8 @@ cdef class CHttpProtocol(HttpConnection):
         if ex is None or self.rejected:
             return
         ex._h2_awaiting_headers = False
+        self._h2_settle(ex)
         try:
-            ex._h2_dispatched = True
             ex._h2_headers_done = True
             ex.mark_nobody()
             ex.start_response()
@@ -3231,6 +3249,7 @@ cdef class CHttpProtocol(HttpConnection):
 
     cdef void _h2_on_data(self, int32_t stream_id, const uint8_t* data, size_t length) except *:
         cdef RequestExchange ex = self._h2_stream_ex(stream_id)
+        cdef Py_ssize_t before
         if ex is None or length == 0:
             return
         if ex.in_pool or ex._h2_stream_id != stream_id:
@@ -3240,11 +3259,14 @@ cdef class CHttpProtocol(HttpConnection):
                 self._h2_reject_stream(stream_id, NGHTTP2_PROTOCOL_ERROR)
             return
 
+        before = ex._total_read
         if ex.c_feed(<const char*>data, length) != 0:
             nghttp2_submit_rst_stream(
                 self.h2, NGHTTP2_FLAG_NONE, stream_id, NGHTTP2_INTERNAL_ERROR
             )
             return
+        if not ex._h2_dispatched:
+            self.h2_deferred_bytes += ex._total_read - before
         if not ex._h2_flow_paused:
             self._h2_window_update(stream_id)
 
@@ -3260,7 +3282,10 @@ cdef class CHttpProtocol(HttpConnection):
         if (
             not ex._h2_dispatched
             and not self.rejected
-            and ex._total_read > SMALL_BODY
+            and (
+                ex._total_read > SMALL_BODY
+                or self.h2_deferred_bytes > H2_DEFERRED_MAX
+            )
         ):
             self._h2_dispatch_stream(ex)
 
@@ -3347,6 +3372,7 @@ cdef class CHttpProtocol(HttpConnection):
                 self._arm_timeout(TIMEOUT_IDLE, self.keep_alive_timeout)
             return
 
+        self._h2_settle(ex)
         ex._h2_outbound = False
         if ex._h2_flow_paused:
             ex._h2_flow_paused = False
@@ -3456,7 +3482,7 @@ cdef class CHttpProtocol(HttpConnection):
     cdef void _h2_reject_stream(self, int32_t stream_id, uint32_t error_code) noexcept:
         cdef RequestExchange ex = self.h2_streams.get(stream_id)
         if ex is not None:
-            ex._h2_dispatched = True
+            self._h2_settle(ex)
         if self.h2 != NULL:
             nghttp2_submit_rst_stream(self.h2, NGHTTP2_FLAG_NONE, stream_id, error_code)
 
