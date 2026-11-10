@@ -12,11 +12,18 @@ the same escape for a Brotli package that backports CVE-2026-111497 without
 a version bump.
 
 Development build: ``uv pip install -e .`` or ``python setup.py build_ext --inplace``.
+
+``STARIO_PGO=1`` (GCC only) builds twice: once instrumented, a run of
+``scripts/pgo_train.py`` against that build, then the real build with the
+recorded profile. If the compiler is not GCC or training fails, the build
+goes on without a profile.
 """
 
+import glob
 import os
 import platform
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -163,7 +170,80 @@ class native_build_ext(build_ext):
             ext.libraries.extend(libraries)
             ext.extra_compile_args.extend([*own_compile, *compile_args])
             ext.extra_link_args.extend([*own_link, *link_args])
+        if os.environ.get("STARIO_PGO") == "1" and not msvc and self._is_gcc():
+            self._build_extensions_with_profile()
+        else:
+            super().build_extensions()
+
+    def _is_gcc(self) -> bool:
+        # Clang writes .profraw files that need llvm-profdata; not handled.
+        try:
+            banner = subprocess.run(
+                [self.compiler.compiler_so[0], "--version"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+        except (OSError, subprocess.CalledProcessError, IndexError, AttributeError):
+            return False
+        return "Free Software Foundation" in banner
+
+    def _build_extensions_with_profile(self) -> None:
+        """Instrumented build, training run, then the build that uses the profile.
+
+        GCC keeps each object's counters (.gcda) next to the object in
+        build_temp, and both passes compile to the same object paths.
+        """
+        for stale in glob.glob(
+            os.path.join(self.build_temp, "**", "*.gcda"), recursive=True
+        ):
+            os.remove(stale)
+        generate = ["-fprofile-generate", "-fprofile-update=atomic"]
+        use = ["-fprofile-use", "-fprofile-correction", "-Wno-missing-profile"]
+        build_lib, inplace, force = self.build_lib, self.inplace, self.force
+        train_lib = os.path.join(self.build_temp, "pgo-lib")
+        for ext in self.extensions:
+            ext.extra_compile_args.extend(generate)
+            ext.extra_link_args.append("-fprofile-generate")
+        self.build_lib, self.inplace, self.force = train_lib, 0, 1
+        try:
+            super().build_extensions()
+            trained = self._train(train_lib)
+        finally:
+            self.build_lib, self.inplace = build_lib, inplace
+            for ext in self.extensions:
+                del ext.extra_compile_args[-len(generate) :]
+                del ext.extra_link_args[-1]
+        if trained:
+            for ext in self.extensions:
+                ext.extra_compile_args.extend(use)
+        else:
+            print("stario: PGO training failed; building without a profile")
         super().build_extensions()
+        self.force = force
+
+    def _train(self, train_lib: str) -> bool:
+        script = os.path.join("scripts", "pgo_train.py")
+        if not os.path.exists(script):
+            return False
+        # The instrumented extensions, under the package's own __init__.py.
+        package = os.path.join(train_lib, "stario_cython")
+        shutil.copy(os.path.join("src", "stario_cython", "__init__.py"), package)
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join([train_lib, "src"])
+        env["STARIO_TRACER"] = "noop"
+        try:
+            subprocess.run(
+                [sys.executable, script],
+                check=True,
+                env=env,
+                timeout=900,
+                stdout=subprocess.DEVNULL,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"stario: PGO training run: {exc}")
+            return False
+        return True
 
 
 # STARIO_DEBUG_BUILD=1 keeps debug info and symbols for gdb, perf, or WinDbg.
@@ -179,10 +259,21 @@ def _compiler_args(*, msvc: bool, sse42: bool) -> tuple[list[str], list[str]]:
         return (["/Zi"], ["/DEBUG"]) if debug_build else ([], [])
     # -g0 overrides the -g that Python's own CFLAGS add: a wheel ships no debug info.
     compile_args = ["-O3", "-fno-strict-aliasing", "-g" if debug_build else "-g0"]
+    # Hardening the interpreter's own CFLAGS may or may not carry (manylinux
+    # Pythons do not): stack canaries on every function with a buffer, and
+    # checked libc string/memory calls where the object size is known.
+    compile_args += [
+        "-fstack-protector-strong",
+        "-U_FORTIFY_SOURCE",
+        "-D_FORTIFY_SOURCE=2",
+    ]
     if sse42 and platform.machine().lower() in {"x86_64", "amd64"}:
         compile_args.append("-msse4.2")
     # The linker drops the static symbol table too; Python finds PyInit_* in .dynsym.
     link_args = ["-s"] if sys.platform.startswith("linux") and not debug_build else []
+    if sys.platform.startswith("linux"):
+        # Read-only relocations, resolved at load; no executable stack.
+        link_args += ["-Wl,-z,relro", "-Wl,-z,now", "-Wl,-z,noexecstack"]
     return compile_args, link_args
 
 

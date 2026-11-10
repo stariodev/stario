@@ -35,6 +35,24 @@ cd examples/hello-world && uv run python -m main   # serve the smallest example
 After editing a `.pyx` / `.pxd` / `.pxi` / `vendor/*.c`, rebuild in place
 with `uv run python setup.py build_ext --inplace`.
 
+`STARIO_PGO=1` makes a profile-guided build (GCC only; Linux wheels are
+built this way): `setup.py` compiles the extensions instrumented, runs
+`scripts/pgo_train.py` (the in-process benchmarks) against them, and
+compiles again with the recorded branch profile. On the in-process
+benchmark that is 10-20% off small requests (plaintext 2.41 → 2.06 µs,
+`GET /user/{id}` 6.79 → 5.78, HTTP/2 plaintext 6.29 → 5.18) and about 10%
+off the HTML page. It doubles the build time plus about a minute of
+training. With another compiler, or if training fails, the build goes on
+without a profile.
+
+```bash
+STARIO_PGO=1 uv run python setup.py build_ext --inplace --force
+```
+
+Every non-MSVC build passes `-fstack-protector-strong` and
+`-D_FORTIFY_SOURCE=2`, and links with full RELRO and a non-executable stack
+on Linux, whether or not the interpreter's own flags carry them.
+
 The build leaves out debug info (`-g0`, and `-s` on Linux), so a wheel
 stays small. To debug the extensions with `gdb` or `perf`, rebuild with
 `STARIO_DEBUG_BUILD=1 uv run python setup.py build_ext --inplace`.
