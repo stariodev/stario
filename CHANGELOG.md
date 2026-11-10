@@ -86,12 +86,16 @@ Plaintext is within run-to-run noise (-7% to +7% across runs).
 - **HTTP/2:** DATA frames up to 4 KiB are copied behind their header into
   the outbound buffer: a small response is one `write`.
 - **`c.req.body()`** returns a complete body without a second coroutine.
-- **Profile-guided builds, opt-in.** `STARIO_PGO=1` (GCC) compiles
-  instrumented, runs `scripts/pgo_train.py`, and compiles again with the
-  profile: a further 10-20% on the cases the training run covers. Wheels
-  are not built this way yet: the training run is the in-process
-  benchmark, and paths it does not exercise have not been measured. See
-  `CYTHON.md`.
+- **Profile-guided builds.** `STARIO_PGO=1` (GCC) compiles instrumented,
+  runs `scripts/pgo_train.py`, and compiles again with the profile; Linux
+  wheels are built this way. On top of the table above it takes 12-16% off
+  small requests in-process, 6% off the HTML page, and 13% (geometric mean)
+  off the 28 cases of the new `benchmarks/server/inproc_paths.py`. A
+  profile trained without those 28 cases still made them 9% faster and none
+  slower. See `CYTHON.md`.
+- `benchmarks/server/inproc_paths.py` measures the request paths
+  `inproc.py` does not take (query, cookies, routing misses, uploads,
+  forms, streamed responses, assets, HTTP/2 uploads).
 - **Datastar SSE:** `patch_signals` / `patch_elements` skip per-call
   closures, ABC `isinstance` checks, and the line split for one-line
   payloads.

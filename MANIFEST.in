@@ -4,6 +4,7 @@ exclude src/stario_cython/*.c
 recursive-include vendor *.c *.h LICENSE*
 recursive-include scripts *.sh *.ps1 *.py
 # The training workload of a STARIO_PGO=1 build.
-include benchmarks/server/inproc.py benchmarks/html/micro.py
+include benchmarks/server/inproc.py benchmarks/server/inproc_paths.py
+include benchmarks/html/micro.py
 global-exclude *.so *.py[cod]
 prune tests

@@ -1,7 +1,8 @@
 """Training run for a profile-guided build (``STARIO_PGO=1``, see setup.py).
 
 Drives the request path and the markup builder through the in-process
-benchmarks, so the compiler sees which branches a server takes. Runs
+benchmarks (the fast paths in `inproc.py`, everything else in
+`inproc_paths.py`), so the compiler sees which branches a server takes. Runs
 against the instrumented extensions setup.py puts first on PYTHONPATH.
 """
 
@@ -32,6 +33,13 @@ def main() -> None:
     inproc.N = 4000
     inproc.REPEAT = 2
     asyncio.run(inproc.main(None))
+    # The rest of what an application does: query, cookies, headers, a real
+    # route table, misses, uploads, forms, streamed responses, assets,
+    # escaping, HTTP/2 uploads. Without it those paths count as cold.
+    paths = _load("benchmarks/server/inproc_paths.py", "_pgo_paths")
+    paths.N = 2000
+    paths.REPEAT = 2
+    asyncio.run(paths.main(None))
     _load("benchmarks/html/micro.py", "_pgo_micro").main()
 
 

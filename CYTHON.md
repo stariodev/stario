@@ -35,19 +35,37 @@ cd examples/hello-world && uv run python -m main   # serve the smallest example
 After editing a `.pyx` / `.pxd` / `.pxi` / `vendor/*.c`, rebuild in place
 with `uv run python setup.py build_ext --inplace`.
 
-`STARIO_PGO=1` makes a profile-guided build (GCC only, opt-in; wheels are
-not built this way): `setup.py` compiles the extensions instrumented, runs
-`scripts/pgo_train.py` (the in-process benchmarks) against them, and
-compiles again with the recorded branch profile. On the in-process
-benchmark that is 10-20% off small requests (plaintext 2.41 → 2.06 µs,
-`GET /user/{id}` 6.79 → 5.78, HTTP/2 plaintext 6.29 → 5.18) and about 10%
-off the HTML page. It doubles the build time plus about a minute of
+`STARIO_PGO=1` makes a profile-guided build (GCC only; Linux wheels are
+built this way): `setup.py` compiles the extensions instrumented, runs
+`scripts/pgo_train.py` against them, and compiles again with the recorded
+branch profile. It doubles the build time and adds about two minutes of
 training. With another compiler, or if training fails, the build goes on
-without a profile. The training run covers only what that benchmark does
-(small GET/POST, the HTML page, one SSE stream, HTTP/2); code it never
-reaches, such as query and cookie parsing, streamed uploads, and error
-paths, is laid out as cold and has not been measured under PGO. Widen
-`scripts/pgo_train.py` and compare those paths before shipping it.
+without a profile.
+
+The training run is both in-process benchmarks: `inproc.py` (the fast
+paths) and `inproc_paths.py` (query, cookies, headers, a real route table,
+misses and redirects, uploads, forms, streamed responses, assets,
+escaping-heavy and `@baked` pages, HTTP/2 uploads and multiplexing).
+Measured against a plain build, best of four interleaved rounds:
+
+| | profile from `inproc.py` only | profile from both |
+| --- | ---: | ---: |
+| `inproc.py` cases (geometric mean) | -8% | -6% to -10% |
+| `inproc_paths.py` cases (geometric mean) | -9% | -13% |
+| plaintext | -15% | -16% |
+| `GET /user/{id}` | -13% | -12% |
+| 50-row HTML page | -7% | -6% |
+| HTTP/2 plaintext | -10% | -16% |
+| slowest case against plain | +2% | +3% |
+
+The first column is the check for over-fitting: a profile that never saw
+the second benchmark still made its 28 cases 9% faster and none slower,
+because they share the parser, the header code and the writer with the
+trained paths. Training on both gains a little more there and loses
+nothing measurable on the fast paths. These are in-process numbers: over a
+socket the framework is a tenth to a fifth of a small request, so expect a
+few percent end to end. When a new kind of request path is added, add a
+case to `inproc_paths.py` so the profile covers it.
 
 ```bash
 STARIO_PGO=1 uv run python setup.py build_ext --inplace --force
