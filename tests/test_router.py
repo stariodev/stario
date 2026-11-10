@@ -403,3 +403,12 @@ def test_registering_many_routes_compiles_once() -> None:
     assert router._cy_router is not None
     # 3000 routes took ~20 s when every add recompiled.
     assert time.perf_counter() - started < 2.0
+
+
+@pytest.mark.parametrize("value", [".", ".."])
+def test_href_rejects_dot_segment_parameters(value: str) -> None:
+    with pytest.raises(StarioError, match="dot segment"):
+        Route("GET /u/{id}/edit").href(value)
+    with pytest.raises(StarioError, match="dot segment"):
+        Route("GET /files/{p...}").href(p=f"a/{value}/b")
+    assert Route("GET /files/{p...}").href(p="a/..b/c.") == "/files/a/..b/c."

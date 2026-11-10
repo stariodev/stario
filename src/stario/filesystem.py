@@ -103,6 +103,9 @@ OPEN_FLAGS: Final = (
     | getattr(os, "O_BINARY", 0)
     | getattr(os, "O_CLOEXEC", 0)
     | getattr(os, "O_NOFOLLOW", 0)
+    # A FIFO swapped in for a file would block open() until a writer came;
+    # the S_ISREG check after the open rejects it. No effect on regular files.
+    | getattr(os, "O_NONBLOCK", 0)
 )
 # Windows reparse tags with the name-surrogate bit redirect a path to another
 # name, like a symlink (symlinks, junctions, WSL and container links); S_ISLNK
@@ -162,6 +165,11 @@ _ACTIVE_TYPES: Final = frozenset(
         b"application/ecmascript",
     }
 )
+# `untrusted` serves these as application/octet-stream. A browser ignores
+# `content-disposition` and the sandbox CSP when a page loads the URL as a
+# script, service worker, or stylesheet; with nosniff, the media type is what
+# stops it.
+_UNTRUSTED_REWRITE: Final = _ACTIVE_TYPES | {b"text/css", b"application/wasm"}
 
 
 UNSAT: Final = object()
@@ -241,13 +249,21 @@ def _short_name_alias(directory: Path, path: str) -> bool:
     """
     current = directory
     for part in path.split("/"):
+        following = current / part
         if SHORT_NAME.fullmatch(part):
+            # List the directory only for a name that exists: a miss is a 404
+            # either way, and a request must not buy a listing of a large
+            # directory with a made-up `x~1`.
+            try:
+                os.lstat(following)
+            except OSError:
+                return False
             try:
                 if part not in os.listdir(current):
                     return True
             except OSError:
                 return True
-        current = current / part
+        current = following
     return False
 
 
@@ -497,9 +513,14 @@ def _stat_validator(stat: stat_result) -> str:
 
 
 def _last_modified(modified: float) -> bytes:
-    return format_datetime(
-        datetime.fromtimestamp(int(modified), UTC), usegmt=True
-    ).encode("ascii")
+    return _http_date(int(modified))
+
+
+@functools.lru_cache(maxsize=1024)
+def _http_date(seconds: int) -> bytes:
+    return format_datetime(datetime.fromtimestamp(seconds, UTC), usegmt=True).encode(
+        "ascii"
+    )
 
 
 def _range_header(
@@ -843,12 +864,13 @@ class _Mount:
                 if not resolved.is_relative_to(root):
                     return None
             if (
-                WINDOWS
+                (WINDOWS or self.follow_symlinks)
                 and not self.include_hidden
                 and _is_hidden(resolved.relative_to(root).as_posix())
             ):
                 # An 8.3 short name (`GIT~1` for `.git`) has no leading dot;
-                # resolve() expands it to the long name.
+                # resolve() expands it to the long name. A followed symlink
+                # can name a dotfile the same way.
                 return None
             file_stat = resolved.stat()
         except FileNotFoundError:
@@ -1035,12 +1057,17 @@ class _Mount:
             if cached is not None
             else self._content_types.get(source.suffix.lower(), DEFAULT_TYPE)
         )
+        active = False
+        if untrusted:
+            media_type = content_type.split(b";", 1)[0].strip().lower()
+            active = media_type in _ACTIVE_TYPES
+            if media_type in _UNTRUSTED_REWRITE:
+                content_type = DEFAULT_TYPE
         self._headers(writer, content_type, etag, modified, encodings)
         if untrusted:
             headers = writer.headers
             headers.unsafe_set(b"content-security-policy", b"sandbox")
-            media_type = content_type.split(b";", 1)[0].strip().lower()
-            if media_type in _ACTIVE_TYPES:
+            if active:
                 headers.unsafe_set(b"content-disposition", b"attachment")
         if _fresh(request, etag, modified):
             writer.write_headers(304).end()
