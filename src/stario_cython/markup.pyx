@@ -159,24 +159,6 @@ cdef extern from *:
         return stario_clean_run_mode(p, n, 0);
     }
 
-    /* The UTF-8 a str already carries (PyUnicode_AsUTF8AndSize made it
-       earlier), or NULL. Builds with the GIL only: on free-threaded builds
-       another thread may be setting the pointer, so they always encode. */
-    static inline const char* stario_cached_utf8(PyObject* s, Py_ssize_t* n) {
-    #if defined(Py_GIL_DISABLED) || defined(Py_LIMITED_API)
-        (void)s; (void)n;
-        return NULL;
-    #else
-        PyCompactUnicodeObject* c;
-        if (!PyUnicode_IS_COMPACT(s) || PyUnicode_IS_ASCII(s)) {
-            return NULL;
-        }
-        c = (PyCompactUnicodeObject*)s;
-        *n = c->utf8_length;
-        return c->utf8;
-    #endif
-    }
-
     /* One character below 0x80 into d, escaped when `esc` and it is
        & < or >; returns the bytes written. */
     static inline Py_ssize_t stario_put_ascii(char* d, unsigned int c, int esc) {
@@ -369,7 +351,6 @@ cdef extern from *:
     const unsigned char stario_escape_extra[3][256]
     Py_ssize_t stario_clean_run(const unsigned char* p, Py_ssize_t n) nogil
     Py_ssize_t stario_clean_run_mode(const unsigned char* p, Py_ssize_t n, int mode) nogil
-    const char* stario_cached_utf8(object s, Py_ssize_t* n)
     Py_ssize_t stario_utf8_into(char* d, int kind, const void* p, Py_ssize_t n, int esc) nogil
     PyObject* stario_type(PyObject* o)
     int stario_immortalize(object op)
@@ -2109,10 +2090,9 @@ cdef int _write_escaped(Buf* b, const unsigned char* p, Py_ssize_t n) except -1:
 cdef int _write_utf8(Buf* b, object s, bint escape) except -1:
     """``s`` (not ASCII) as UTF-8, escaping ``& < >`` when ``escape``.
 
-    A str that already carries its UTF-8 (builds with the GIL) is copied
-    from that. Otherwise it is encoded straight into the buffer, rather
-    than through ``PyUnicode_AsUTF8AndSize``, which allocates a UTF-8 copy
-    and keeps it on the str: a fresh string per request pays for both. The
+    Encoded straight into the buffer, rather than through
+    ``PyUnicode_AsUTF8AndSize``, which allocates a UTF-8 copy and keeps it
+    on the str: a fresh string per request pays for both. The
     encode works in chunks of ``_TEXT_CHUNK`` characters that each reserve
     their worst case (5 bytes a character when escaping, else ``kind + 1``).
     A surrogate, which UTF-8 cannot encode, goes back to
@@ -2123,11 +2103,6 @@ cdef int _write_utf8(Buf* b, object s, bint escape) except -1:
     cdef const char* data
     cdef Py_ssize_t n, start = 0, stop, w, per
     b.ascii = False
-    data = stario_cached_utf8(s, &n)
-    if data != NULL:
-        if escape:
-            return _write_escaped(b, <const unsigned char*>data, n)
-        return _write(b, data, n)
     kind = PyUnicode_KIND(s)
     data = <const char*>PyUnicode_DATA(s)
     n = PyUnicode_GET_LENGTH(s)
@@ -2146,9 +2121,19 @@ cdef int _write_utf8(Buf* b, object s, bint escape) except -1:
 
 
 cdef inline int _write_str(Buf* b, object s) except -1:
+    """Copy trusted markup (tag pieces, attributes, ``SafeString``) as UTF-8.
+
+    These strings are mostly long-lived, so text that is not ASCII goes
+    through ``PyUnicode_AsUTF8AndSize``: CPython keeps the UTF-8 on the str
+    and the next render copies it.
+    """
+    cdef Py_ssize_t n
+    cdef const char* p
     if PyUnicode_IS_ASCII(s):
         return _write(b, <const char*>PyUnicode_DATA(s), PyUnicode_GET_LENGTH(s))
-    return _write_utf8(b, s, False)
+    b.ascii = False
+    p = PyUnicode_AsUTF8AndSize(s, &n)
+    return _write(b, p, n)
 
 
 cdef inline int _write_text(Buf* b, object s) except -1:

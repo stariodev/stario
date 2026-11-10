@@ -41,7 +41,7 @@ from stario.http.compression import (
     negotiate_content_encoding,
 )
 from stario.http.context import Context
-from stario.http.headers import RequestHeaders, encode_header_value
+from stario.http.headers import Headers, RequestHeaders, encode_header_value
 from stario.http.route import Route, append_query_fragment, public_prefix
 from stario.http.writer import Writer
 from stario_cython.xxh64 import xxh64
@@ -231,7 +231,6 @@ class _Ready:
         "etags",
         "hashed",
         "last_modified",
-        "lengths",
         "modified",
         "vary",
     )
@@ -245,10 +244,8 @@ class _Ready:
         self.last_modified = _last_modified(self.modified)
         self.vary = tuple(cached.encodings)
         self.etags: dict[bytes | None, bytes] = {None: _etag(hashed.digest, None)}
-        self.lengths: dict[bytes | None, bytes] = {None: b"%d" % len(cached.content)}
-        for encoding, body in cached.encodings.items():
+        for encoding in cached.encodings:
             self.etags[encoding] = _etag(hashed.digest, encoding)
-            self.lengths[encoding] = b"%d" % len(body)
 
 
 @functools.lru_cache(maxsize=256)
@@ -688,38 +685,61 @@ async def _stream(writer: Writer, fd: int, start: int, length: int) -> None:
     writer.end()
 
 
+def _set_file_headers(
+    headers: Headers,
+    cache_control: bytes,
+    content_type: bytes,
+    etag: bytes,
+    last_modified: bytes,
+    vary: bool,
+) -> None:
+    """The headers every file answer carries (200, 206, 304 and 416)."""
+    headers.unsafe_set(b"cache-control", cache_control)
+    headers.unsafe_set(b"content-type", content_type)
+    headers.unsafe_set(b"x-content-type-options", b"nosniff")
+    headers.unsafe_set(b"etag", etag)
+    headers.unsafe_set(b"last-modified", last_modified)
+    headers.unsafe_set(b"accept-ranges", b"bytes")
+    if vary:
+        headers.unsafe_merge_vary(b"accept-encoding")
+
+
+def _emit_cached(writer: Writer, cached: _Cached, encoding: bytes | None) -> None:
+    """A 200 with a held body, or its precompressed `encoding` variant."""
+    headers = writer.headers
+    if encoding is None:
+        body = cached.content
+    else:
+        body = cached.encodings[encoding]
+        headers.unsafe_set(b"content-encoding", encoding)
+    headers.unsafe_set(b"content-length", b"%d" % len(body))
+    writer.write_headers(200).end(body)
+
+
 def _emit_ready(request: RequestHeaders, writer: Writer, ready: _Ready) -> None:
     """`_Mount._serve` for a held `Assets` file and a request without `Range`.
 
-    Same answer and headers in the same order; only the per-request work
-    is left (encoding, then 304 or 200).
+    The ETags and `Last-Modified` were built at load; the headers and the
+    body go out through the same two functions `_serve` uses.
     """
-    cached = ready.cached
     encoding = (
         _negotiate(request.unsafe_get(b"accept-encoding", b""), ready.vary)
         if ready.vary
         else None
     )
     etag = ready.etags[encoding]
-    headers = writer.headers
-    headers.unsafe_set(b"cache-control", ready.cache_control)
-    headers.unsafe_set(b"content-type", ready.content_type)
-    headers.unsafe_set(b"x-content-type-options", b"nosniff")
-    headers.unsafe_set(b"etag", etag)
-    headers.unsafe_set(b"last-modified", ready.last_modified)
-    headers.unsafe_set(b"accept-ranges", b"bytes")
-    if ready.vary:
-        headers.unsafe_merge_vary(b"accept-encoding")
+    _set_file_headers(
+        writer.headers,
+        ready.cache_control,
+        ready.content_type,
+        etag,
+        ready.last_modified,
+        bool(ready.vary),
+    )
     if _fresh(request, etag, ready.modified):
         writer.write_headers(304).end()
         return
-    if encoding is None:
-        body = cached.content
-    else:
-        body = cached.encodings[encoding]
-        headers.unsafe_set(b"content-encoding", encoding)
-    headers.unsafe_set(b"content-length", ready.lengths[encoding])
-    writer.write_headers(200).end(body)
+    _emit_cached(writer, ready.cached, encoding)
 
 
 class _Mount:
@@ -1076,18 +1096,6 @@ class _Mount:
                 retained += len(compressed)
         return _Cached(content_type, content, identity, encodings)
 
-    def _emit_cached(
-        self, writer: Writer, cached: _Cached, *, encoding: bytes | None
-    ) -> None:
-        headers = writer.headers
-        if encoding is None:
-            body = cached.content
-        else:
-            body = cached.encodings[encoding]
-            headers.unsafe_set(b"content-encoding", encoding)
-        headers.unsafe_set(b"content-length", b"%d" % len(body))
-        writer.write_headers(200).end(body)
-
     def _headers(
         self,
         writer: Writer,
@@ -1096,15 +1104,14 @@ class _Mount:
         modified: float,
         encodings: Mapping[bytes, bytes] | None = None,
     ) -> None:
-        headers = writer.headers
-        headers.unsafe_set(b"cache-control", self._cache_control)
-        headers.unsafe_set(b"content-type", content_type)
-        headers.unsafe_set(b"x-content-type-options", b"nosniff")
-        headers.unsafe_set(b"etag", etag)
-        headers.unsafe_set(b"last-modified", _last_modified(modified))
-        headers.unsafe_set(b"accept-ranges", b"bytes")
-        if encodings:
-            headers.unsafe_merge_vary(b"accept-encoding")
+        _set_file_headers(
+            writer.headers,
+            self._cache_control,
+            content_type,
+            etag,
+            _last_modified(modified),
+            bool(encodings),
+        )
 
     async def _emit_file(
         self, context: Context, writer: Writer, fd: int, size: int
@@ -1181,7 +1188,7 @@ class _Mount:
             )
             return
         if cached is not None:
-            self._emit_cached(writer, cached, encoding=encoding)
+            _emit_cached(writer, cached, encoding)
             return
         assert fd is not None
         await self._emit_file(context, writer, fd, size)

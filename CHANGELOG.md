@@ -76,7 +76,7 @@ of four interleaved rounds against 5.8.1 (plain builds, no profile).
 | response headers + `set_cookie` | 19.25 | 7.26 | -62% |
 | multipart form | 55.85 | 31.78 | -43% |
 | urlencoded form | 9.81 | 8.41 | -14% |
-| in-memory asset | 11.32 | 7.04 | -38% |
+| in-memory asset | 11.32 | 7.98 | -29% |
 | 405 / 308 | 3.64 / 2.87 | 3.16 / 2.44 | -13% / -15% |
 | pipelined ×4 | 2.66 | 2.38 | -11% |
 | 50-row HTML page | 43.51 | 42.81 | -2% |
@@ -87,7 +87,8 @@ HTTP/2, SSE and compressed-page cases are within ±3% (noise).
   llhttp and the compression glue skip the PLT.
 - `respond()` with headers set sends head and body in one write.
 - `set_cookie` writes the `SimpleCookie` line without building one.
-- `Assets` answers a held file from headers built at load.
+- `Assets` answers a held file with ETags and `Last-Modified` built at
+  load, through the same header and body functions as every other file.
 - Multipart part headers and form `Content-Type` values are memoized.
 - A 405 under middleware builds its handler once per allowed-method set.
 - Markup: clean text is found eight bytes at a time and copied once;
