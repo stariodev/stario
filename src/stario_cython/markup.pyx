@@ -41,6 +41,7 @@ from libc.string cimport memcpy
 from stario.exceptions import StarioError
 
 cdef extern from "Python.h":
+    ctypedef unsigned short Py_UCS2
     int PyUnicode_KIND(object o)
     void* PyUnicode_DATA(object o)
     Py_ssize_t PyUnicode_GET_LENGTH(object o)
@@ -48,6 +49,7 @@ cdef extern from "Python.h":
     bint PyUnicode_IS_ASCII(object o)
     object PyUnicode_New(Py_ssize_t size, unsigned int maxchar)
     int PyUnicode_1BYTE_KIND
+    int PyUnicode_2BYTE_KIND
     Py_UCS4 PyUnicode_READ(int kind, const void* data, Py_ssize_t index)
     Py_UCS4 PyUnicode_READ_CHAR(object o, Py_ssize_t index)
     void PyUnicode_WRITE(int kind, void* data, Py_ssize_t index, Py_UCS4 value)
@@ -369,16 +371,23 @@ cdef object _escape_wide(object s, int mode):
     cdef Py_ssize_t w = 0
     cdef Py_UCS4 c
     cdef Py_UCS4 quote = 34 if mode == ESC_DQUOTE else (39 if mode == ESC_SQUOTE else 0)
+    cdef const unsigned char* table = stario_escape_extra[mode]
+    cdef const Py_UCS2* src2
+    cdef const Py_UCS4* src4
     cdef void* dst
     cdef object out
-    for i in range(n):
-        c = PyUnicode_READ(kind, src, i)
-        if c == 38:
-            extra += 4
-        elif c == 60 or c == 62:
-            extra += 3
-        elif c == quote and quote != 0:
-            extra += 5 if quote == 34 else 4
+    # One loop per kind, so neither reads through the kind switch; only
+    # characters below 0x80 can need escaping.
+    if kind == PyUnicode_2BYTE_KIND:
+        src2 = <const Py_UCS2*>src
+        for i in range(n):
+            if src2[i] < 128:
+                extra += table[src2[i]]
+    else:
+        src4 = <const Py_UCS4*>src
+        for i in range(n):
+            if src4[i] < 128:
+                extra += table[src4[i]]
     if extra == 0:
         return s
     out = PyUnicode_New(n + extra, PyUnicode_MAX_CHAR_VALUE(s))
