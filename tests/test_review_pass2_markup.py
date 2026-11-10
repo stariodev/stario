@@ -155,8 +155,9 @@ def test_long_class_lists_are_not_cached_forever():
     assert classes(token, "x") == Attrs(f' class="{token} x"')
     assert len(attributes._CLASSES_CACHE) == before
     assert (token, "x") not in attributes._CLASSES_CACHE
-    # Short lists are still cached.
-    assert classes("pass2-short", "x") is classes("pass2-short", "x")
+    # Short lists are still cached (while the cache has room).
+    if len(attributes._CLASSES_CACHE) < attributes._CLASSES_CACHE_MAX:
+        assert classes("pass2-short", "x") is classes("pass2-short", "x")
 
 
 def test_long_attribute_names_are_not_cached_forever():
@@ -206,6 +207,19 @@ def test_render_text_and_attrs_match_reference(text, value):
     _cache_utf8(value)
     assert render(el) == expected
     assert render_bytes(el) == expected.encode()
+
+
+@settings(max_examples=1000)
+@given(st.text(_TEXT_ALPHABET, max_size=40))
+def test_escapers_match_reference(text):
+    from stario.markup.escape import escape_sq_attribute_value, escape_text
+
+    base = _reference_text(text)
+    assert escape_text(text) == base
+    assert escape_attribute_value(text) == base.replace('"', "&quot;")
+    assert escape_sq_attribute_value(text) == base.replace("'", "&#39;")
+    if base == text:
+        assert escape_text(text) is text
 
 
 @pytest.mark.parametrize(
