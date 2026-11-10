@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import http.cookies
+import re
 import tracemalloc
 from pathlib import Path
 from typing import Any, cast
@@ -25,6 +26,8 @@ from stario.http.headers import Headers
 from stario.relay import Relay
 from stario.testing import TestClient
 from tests.helpers import make_request
+
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 # --- relay ---------------------------------------------------------------
 
@@ -347,8 +350,13 @@ def test_set_cookie_writes_what_simplecookie_wrote(
     if got is not None:
         assert got == expected
     elif expected is not None:
+        # Control characters are refused on every Python; http.cookies only
+        # learned to refuse them in later patch releases, so an older 3.12
+        # still writes them.
+        fields = (name, value, path, domain or "", expires or "")
         assert (
-            name.lower().startswith(("__host-", "__secure-"))
+            any(_CONTROL.search(f) for f in fields)
+            or name.lower().startswith(("__host-", "__secure-"))
             or any(c in (path or "") for c in ";,")
             or any(c in (domain or "") for c in ";,")
             or ";" in (expires or "")
@@ -410,3 +418,16 @@ def test_nan_timeout_from_env_is_rejected(monkeypatch: pytest.MonkeyPatch) -> No
 def test_server_config_rejects_nan_shutdown_timeout() -> None:
     with pytest.raises(StarioError, match="graceful_shutdown_timeout"):
         ServerConfig(graceful_shutdown_timeout=float("nan"))
+
+
+def test_set_cookie_refuses_control_characters_in_attributes() -> None:
+    # Python 3.12's http.cookies (before its control-character fix) wrote
+    # these into the header; set_cookie refuses them on every version.
+    cases: list[dict[str, Any]] = [
+        {"path": "/\x1f"},
+        {"domain": "a\x1fb"},
+        {"expires": "x\x7f"},
+    ]
+    for kwargs in cases:
+        with pytest.raises(StarioError):
+            set_cookie(cast(Any, _HeadersOnly()), "sid", "v", **kwargs)
