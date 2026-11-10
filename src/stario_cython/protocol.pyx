@@ -247,6 +247,9 @@ cdef enum:
     # DATA frames up to this size are copied into the outbound scratch with
     # their header; bigger ones go out zero-copy as a memoryview.
     H2_INLINE_DATA_MAX = 4096
+    # ``h2_out`` keeps its capacity between send passes up to this; a burst
+    # that grew it further (many streams answered in one pass) gives it back.
+    H2_OUT_RETAIN_MAX = 64 * 1024
 
 cdef bytes H2_PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 cdef object _settings_lock = Lock()
@@ -2977,6 +2980,8 @@ cdef class CHttpProtocol(HttpConnection):
         self.h2_batch.append(
             PyBytes_FromStringAndSize(PyByteArray_AS_STRING(self.h2_out), used)
         )
+        if PyByteArray_GET_SIZE(self.h2_out) > H2_OUT_RETAIN_MAX:
+            self.h2_out = bytearray()
 
     cdef void _h2_write_batch(self) noexcept:
         """One transport call per send pass: every frame nghttp2 produced,
