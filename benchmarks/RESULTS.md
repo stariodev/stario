@@ -368,8 +368,9 @@ the backend it asked for, and the server logs confirm it every time.
   `PYTHON_GIL=0`, which its author lists as untested. It passed the
   correctness checks and every run, and its launcher confirms the GIL stays
   off. Stario 5.8.2 gives extra threads either a uvloop or a stdlib loop,
-  so `apps/stario_loopy.py` points that factory at loopyloop. Stario itself
-  should create extra-thread loops of the same class as the main loop.
+  so `apps/stario_loopy.py` points that factory at loopyloop for this run.
+  Since then, Stario creates extra-thread loops of the main loop's own
+  class (CHANGELOG, Unreleased).
 
 ## Footprint
 

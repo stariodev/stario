@@ -104,11 +104,33 @@ def loop_implementation(
     return "asyncio"
 
 
-def _stdlib_loop_factory() -> asyncio.AbstractEventLoop:
-    """Stdlib loop, ignoring a process-wide uvloop policy."""
-    if sys.platform == "win32":
-        return asyncio.ProactorEventLoop()
-    return asyncio.SelectorEventLoop()
+def _same_loop_factory(
+    loop: asyncio.AbstractEventLoop,
+) -> Callable[[], asyncio.AbstractEventLoop]:
+    """Factory for extra worker threads: new loops of `loop`'s own class.
+
+    Works for stdlib asyncio, uvloop, and third-party loops (loopyloop,
+    rloop, a `uvloop.Loop` subclass, ...), and ignores any process-wide
+    loop policy. The class must be constructible without arguments, as all
+    of those are.
+    """
+    loop_class = type(loop)
+
+    def new_loop() -> asyncio.AbstractEventLoop:
+        try:
+            return loop_class()
+        except TypeError as exc:
+            name = f"{loop_class.__module__}.{loop_class.__qualname__}"
+            raise StarioError(
+                f"STARIO_THREADS>1 could not create a {name} for a worker thread",
+                help_text=(
+                    "Worker threads run the same loop class as the loop running "
+                    "serve(), built without arguments. Use a loop class that "
+                    "supports that, or set STARIO_THREADS=1."
+                ),
+            ) from exc
+
+    return new_loop
 
 
 def gil_is_enabled() -> bool:
@@ -846,14 +868,7 @@ class Server:
         span = run.span
         # Extra workers create the same loop class as the loop running serve().
         kind = loop_implementation()
-        if kind == "uvloop":
-            import uvloop
-
-            loop_factory: Callable[[], asyncio.AbstractEventLoop] = (
-                uvloop.new_event_loop
-            )
-        else:
-            loop_factory = _stdlib_loop_factory
+        loop_factory = _same_loop_factory(asyncio.get_running_loop())
         extras = [
             _LoopWorker(
                 index=index,

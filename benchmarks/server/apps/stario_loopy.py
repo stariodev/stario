@@ -6,11 +6,11 @@ with an epoll fallback. The app, Stario and its settings are the same as the
 
     LOOPYLOOP_BACKEND=uring|epoll python -m apps.stario_loopy
 
-STARIO_THREADS=N (free-threaded build) runs N loop threads. Stario 5.8.2 gives
-its extra threads a uvloop loop when the main loop is uvloop and a stdlib
-`SelectorEventLoop` otherwise, so for a third-party loop the extra threads
-would silently run on the stdlib loop. This launcher points that factory at
-loopyloop, so every thread runs it. Benchmark use only.
+STARIO_THREADS=N (free-threaded build) runs N loop threads. Stario after 5.8.2
+gives every extra thread the main loop's class. Stario 5.8.2 itself mirrored
+only uvloop and left other loops' extra threads on a stdlib
+`SelectorEventLoop`, so on that version this launcher points the factory at
+loopyloop. Benchmark use only.
 """
 
 import asyncio
@@ -42,7 +42,8 @@ def extra_loop() -> asyncio.AbstractEventLoop:
     return loop
 
 
-stario_server._stdlib_loop_factory = extra_loop
+if not hasattr(stario_server, "_same_loop_factory"):  # Stario 5.8.2
+    stario_server._stdlib_loop_factory = extra_loop
 
 
 async def main() -> None:
