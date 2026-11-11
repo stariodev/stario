@@ -82,8 +82,8 @@ BROWSER_AE = "gzip, deflate, br, zstd"
 PACKAGES = {
     "stario": [os.environ.get("STARIO_SPEC", f"stario @ file://{ROOT}"), "uvloop", "orjson"],
     "fastapi": ["fastapi", "uvicorn[standard]", "ujson", "jinja2"],
-    "blacksheep-uvicorn": ["blacksheep", "uvicorn[standard]", "ujson", "jinja2"],
-    "blacksheep-granian": ["blacksheep", "granian", "uvloop", "ujson", "jinja2"],
+    "blacksheep-uvicorn": ["blacksheep", "uvicorn[standard]", "orjson", "pydantic", "jinja2"],
+    "blacksheep-granian": ["blacksheep", "granian[uvloop]", "orjson", "pydantic", "jinja2"],
     "sanic": ["sanic", "uvloop", "ujson", "jinja2"],
     "falcon": ["falcon", "uvicorn[standard]", "ujson", "jinja2"],
     "robyn": ["robyn", "ujson", "jinja2"],
@@ -171,7 +171,8 @@ def server_cmd(target: str, host: str, port: int, workers: int = 1) -> list[str]
             return [
                 py(target), "-m", "granian", "apps.blacksheep_app:app",
                 "--interface", "asgi", "--host", host, "--port", str(port),
-                "--workers", str(workers), "--runtime-threads", "1", "--loop", "uvloop",
+                "--workers", str(workers), "--runtime-mode", "st", "--runtime-threads", "1",
+                "--loop", "uvloop", "--http", "1",
                 # Granian's defaults (backlog 1024, backpressure = backlog / workers)
                 # cap one worker at 1,024 concurrent connections; Stario and Uvicorn
                 # listen with a 2048 backlog and no cap.
