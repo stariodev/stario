@@ -136,6 +136,19 @@ Targets (one worker each unless the phase says otherwise):
 | `stario-ft` | free-threaded 3.14t build, `STARIO_THREADS=N` (multicore phase only) |
 | `stario-mp` | N GIL Stario processes sharing the port with `SO_REUSEPORT`, via the benchmark launcher `apps/stario_mp.py` (multicore phase only; Stario ships no multi-process mode, and each process has its own `Relay`) |
 
+Opt-in targets, run only when named on the command line: the same Stario app
+on [loopyloop](https://github.com/Bobowski/loopyloop), an asyncio loop on
+io_uring with an epoll fallback, instead of uvloop (launcher
+`apps/stario_loopy.py`). They install `LOOPYLOOP_SPEC`, a checkout next to
+this one by default. Each launcher exits if loopyloop picks another backend
+than the one asked for.
+
+| Target | What runs |
+| --- | --- |
+| `stario-loopy` / `stario-loopy-epoll` | one loop, io_uring / epoll backend |
+| `stario-mp-loopy` | `stario-mp` on loopyloop (multicore phase only) |
+| `stario-ft-loopy` | `stario-ft` on loopyloop with `PYTHON_GIL=0` (multicore phase only; loopyloop doesn't declare free-threading support yet, so this row is experimental) |
+
 The Stario target installs `stario @ file://<checkout>` (a source build:
 needs the native libraries in [`CYTHON.md`](../CYTHON.md)). To benchmark a
 released wheel instead, set `STARIO_SPEC` (and `STARIO_FT_SPEC` for the

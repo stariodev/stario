@@ -300,6 +300,77 @@ Stario appears twice:
   5.6k on one worker). The rest is scaling over the shared module-level row
   dicts.
 
+## Event loop: uvloop vs loopyloop
+
+The same Stario 5.8.2 wheel and the same app, on
+[loopyloop](https://github.com/Bobowski/loopyloop) (commit `b10b23b`, an
+asyncio event loop on io_uring with an epoll fallback, built from source)
+instead of uvloop 0.23.0. A separate run on the same afternoon with the same
+method: 5 interleaved rounds (3 for SSE and connections), every measurement
+gated on a quiet machine, 0 noisy starts, steal median 0.7%
+(`results/20261111T161849Z`). Each launcher checks that loopyloop is running
+the backend it asked for, and the server logs confirm it every time.
+
+**One core** (req/s at 128 connections, median of 5 rounds):
+
+| | plaintext | json | params | validate | page | page `@baked` | mix | mix, compressed |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| uvloop | 75,929 | 71,980 | 67,984 | 50,689 | 5,681 | 8,621 | 12,617 | 10,227 |
+| **loopyloop, io_uring** | **136,392** | 128,274 | **116,079** | **105,579** | **6,531** | 11,346 | 15,159 | 12,362 |
+| **loopyloop, epoll** | **140,754** | **128,447** | 113,623 | 99,767 | 6,356 | **12,568** | **15,328** | **12,766** |
+| io_uring vs uvloop | 1.80x | 1.78x | 1.71x | 2.08x | 1.15x | 1.32x | 1.20x | 1.21x |
+
+| Tail and capacity | uvloop | loopyloop, io_uring | loopyloop, epoll |
+| --- | --- | --- | --- |
+| p99, plaintext / page at 128 connections | 4.1 / 41 ms | 2.0 / 37 ms | 2.3 / 42 ms |
+| `/page` at 256 connections | 5,821 req/s, p99 1,400 ms | 6,720 req/s, p99 64 ms | 5,989 req/s, p99 93 ms |
+| `/page` at 1,024 connections | 5,706 req/s, 158 timeouts | 6,480 req/s, 0 timeouts | 6,380 req/s, 0 timeouts |
+| `/page` zstd / brotli | 4,971 / 2,903 req/s | 5,720 / 3,629 req/s | 5,591 / 3,571 req/s |
+| SSE, 5,000 clients | p50 61 ms, p99 205 ms, 0.20 CPU | p50 69 ms, p99 153 ms, 0.16 CPU | p50 70 ms, p99 148 ms, 0.16 CPU |
+| 10,000 connected clients | p50 140 ms, p99 1.19 s, peak 476 MB | p50 54 ms, p99 653 ms, peak 476 MB | p50 143 ms, p99 450 ms, peak 252 MB |
+| RSS after start | 32 MB | 31 MB | 30 MB |
+
+**Two cores:**
+
+| | plaintext | page | mix | p99 page |
+| --- | ---: | ---: | ---: | ---: |
+| 2 processes, uvloop | 166,623 | 9,703 | 19,253 | 18.7 ms |
+| **2 processes, loopyloop** | **254,346** | **10,081** | **22,814** | 19.9 ms |
+| 2 threads (free-threaded), uvloop | 123,547 | 7,843 | 18,097 | 23.9 ms |
+| **2 threads (free-threaded), loopyloop** (experimental) | **235,906** | **8,920** | **20,234** | 24.7 ms |
+
+- **Small responses run 1.7–2.1x faster on loopyloop**, with half the
+  p99. This holds in every round: loopyloop's slowest round beats uvloop's
+  fastest on plaintext, json, params, validate, and `@baked`.
+  `validate` gains the most (2.1x), probably because a request body that
+  arrives with the headers needs no extra trip through uvloop.
+- **The HTML page gains less: 15% plain, 32–46% with `@baked`.** Most of a
+  plain-tree page's time is building HTML in Python, which the loop doesn't
+  touch. The less time the handler takes, the more the loop matters. The
+  `/page` and mix ranges overlap between rounds, so their gains are solid as
+  medians but not round by round.
+- **loopyloop fixes Stario's worst weakness, the tail at high
+  concurrency.** At 256 connections the `/page` p99 drops from 1.4 s to
+  64 ms, and at 1,024 connections the 158 timeouts drop to 0. The starved
+  connections were uvloop's scheduling, not Stario's.
+- **io_uring and epoll come out about level on this VM.** epoll is slightly
+  ahead on plaintext and the mix, io_uring on validate, page, and the
+  256-connection tail. loopyloop's own repository reports io_uring well
+  ahead of epoll (2.37x vs 1.71x of uvloop on plaintext); this harness
+  doesn't reproduce that gap. Its epoll backend matters, because container
+  runtimes often block io_uring.
+- **On two cores, the gain shrinks on the page** (+4% for processes, within
+  noise; +14% for threads) but holds on the mix (+18%, +12%). Plaintext on
+  two cores is limited by the load generator against loopyloop (wrk at 89%
+  of its two CPUs), so 254k is a lower bound.
+- **The free-threaded loopyloop row is experimental.** loopyloop's
+  extension doesn't declare free-threading support, so it runs with
+  `PYTHON_GIL=0`, which its author lists as untested. It passed the
+  correctness checks and every run, and its launcher confirms the GIL stays
+  off. Stario 5.8.2 gives extra threads either a uvloop or a stdlib loop,
+  so `apps/stario_loopy.py` points that factory at loopyloop. Stario itself
+  should create extra-thread loops of the same class as the main loop.
+
 ## Footprint
 
 | Target | RSS after start |
@@ -346,7 +417,8 @@ the same product list, checked to be the same document.
 
 Ordered by expected impact.
 
-1. **Tail latency at 256+ connections.** On uvloop, a minority of
+1. **Tail latency at 256+ connections.** loopyloop removes it (see "Event
+   loop"): p99 64 ms at 256 connections and no timeouts at 1,024. On uvloop, a minority of
    connections wait seconds while p50 stays low: 147 `wrk` timeouts at 1,024
    connections over 5 rounds, and a 1.6 s p99 at 256. Uvicorn, Sanic, and
    Falcon (all on uvloop) behave the same way, while Granian and Robyn
