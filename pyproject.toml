@@ -60,7 +60,8 @@ build = ["cp312-*", "cp313-*", "cp314-*", "cp314t-*"]
 skip = ["*-musllinux_*"]
 test-groups = ["test"]
 # setup.py: wheel tests load the Brotli version policy from it.
-test-sources = ["tests", "benchmarks/server", "pyproject.toml", "setup.py"]
+# vendor/llhttp/include: a wheel test checks the vendored llhttp version.
+test-sources = ["tests", "benchmarks/server", "pyproject.toml", "setup.py", "vendor/llhttp/include"]
 test-command = "pytest -q -p no:cacheprovider"
 
 [tool.cibuildwheel.linux]
