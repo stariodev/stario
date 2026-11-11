@@ -67,7 +67,7 @@ TARGETS = [
 ]
 # Targets whose framework ships response compression (enabled in `compress`).
 COMPRESSING = {"stario", "fastapi", "blacksheep-uvicorn", "blacksheep-granian"}
-NO_SSE = {"robyn"}
+NO_SSE: set[str] = set()
 
 ENDPOINTS = {
     "plaintext": "/plaintext",
@@ -84,9 +84,10 @@ PACKAGES = {
     "fastapi": ["fastapi", "uvicorn[standard]", "jinja2"],
     "blacksheep-uvicorn": ["blacksheep", "uvicorn[standard]", "orjson", "pydantic", "jinja2"],
     "blacksheep-granian": ["blacksheep", "granian[uvloop]", "orjson", "pydantic", "jinja2"],
-    "sanic": ["sanic", "uvloop", "ujson", "jinja2"],
-    "falcon": ["falcon", "uvicorn[standard]", "ujson", "jinja2"],
-    "robyn": ["robyn", "ujson", "jinja2"],
+    # uvloop + ujson come with sanic; no sanic-ext (installing it auto-loads CORS, OpenAPI, ...)
+    "sanic": ["sanic", "orjson", "jinja2"],
+    "falcon": ["falcon", "uvicorn[standard]", "msgspec", "jinja2"],
+    "robyn": ["robyn[pydantic,templating]"],
     "stario-ft": [os.environ.get("STARIO_FT_SPEC", f"stario @ file://{ROOT}"), "uvloop", "msgspec"],
 }
 # Targets of the multicore phase (each gets MC_WORKERS workers / threads).
@@ -123,15 +124,15 @@ def ensure_env(target: str, python: str, refresh: bool) -> None:
 
 def versions(target: str) -> str:
     names = {
-        "stario": ["stario", "uvloop"],
-        "stario-ft": ["stario", "uvloop"],
-        "stario-mp": ["stario", "uvloop"],
-        "fastapi": ["fastapi", "starlette", "uvicorn", "pydantic"],
-        "blacksheep-uvicorn": ["blacksheep", "uvicorn"],
-        "blacksheep-granian": ["blacksheep", "granian"],
-        "sanic": ["sanic"],
-        "falcon": ["falcon", "uvicorn"],
-        "robyn": ["robyn"],
+        "stario": ["stario", "uvloop", "orjson"],
+        "stario-ft": ["stario", "uvloop", "msgspec"],
+        "stario-mp": ["stario", "uvloop", "orjson"],
+        "fastapi": ["fastapi", "starlette", "uvicorn", "pydantic", "jinja2"],
+        "blacksheep-uvicorn": ["blacksheep", "uvicorn", "orjson", "pydantic", "jinja2"],
+        "blacksheep-granian": ["blacksheep", "granian", "orjson", "pydantic", "jinja2"],
+        "sanic": ["sanic", "orjson", "jinja2"],
+        "falcon": ["falcon", "uvicorn", "msgspec", "jinja2"],
+        "robyn": ["robyn", "pydantic", "jinja2"],
     }[target]
     code = (
         "import importlib.metadata as m, sys;"
@@ -258,6 +259,18 @@ def wait_quiet(cfg, results, label: str, cpus: set[int] | None = None,
             log(f"  WARNING: machine not quiet before {label} (busiest CPU {worst:.0%})")
             results.meta.setdefault("noisy_starts", []).append(f"{label}: {worst:.0%}")
             return
+
+
+def speed_probe(cfg, results, label: str) -> None:
+    """Run probe.py on the server CPU and record the machine's speed right now."""
+    cpu = sorted(parse_cpus(cfg.server_cpus))[0]
+    out = subprocess.run(["taskset", "-c", str(cpu), sys.executable, str(HERE / "probe.py"), "1"],
+                         capture_output=True, text=True)
+    try:
+        value = int(out.stdout.strip())
+    except ValueError:
+        return
+    results.meta.setdefault("probe", []).append([label, value])
 
 
 def raise_nofile() -> None:
@@ -787,7 +800,7 @@ def write_summary(results: Results, run_dir: Path, targets: list[str]) -> str:
     d = results.data
     lines = ["# Server benchmark", ""]
     lines += [f"- {k}: {v}" for k, v in results.meta.items()
-              if k not in ("versions", "order", "noisy_starts", "failures")]
+              if k not in ("versions", "order", "noisy_starts", "failures", "probe")]
     for group, orders in results.meta.get("order", {}).items():
         lines.append(f"- {group} order by round: " + " / ".join(" ".join(o) for o in orders))
     lines += ["", "Versions:", ""]
@@ -911,8 +924,8 @@ def write_summary(results: Results, run_dir: Path, targets: list[str]) -> str:
             if r := d["idle"].get(t):
                 rss = r.get("start", {}).get("rss_mb")
                 size = r.get("page", {}).get("bytes")
-                lines.append(f"| {t} | {rss:.0f} | {size:,} |" if rss is not None and size
-                             else f"| {t} | {rss or '-'} | {size or '-'} |")
+                lines.append(f"| {t} | {f'{rss:.0f}' if rss is not None else '-'} | "
+                             f"{f'{size:,}' if size else '-'} |")
     wrk_runs = [run for phase in ("throughput", "sweep", "mixed", "compress", "multicore")
                 for tgt in results.raw.get(phase, {}).values()
                 for runs in tgt.values() for run in runs if "steal" in run]
@@ -926,6 +939,11 @@ def write_summary(results: Results, run_dir: Path, targets: list[str]) -> str:
                   f"- load-generator CPUs busy: median "
                   f"{statistics.median(r['client_cpu'] for r in wrk_runs):.0%}, max "
                   f"{max(r['client_cpu'] for r in wrk_runs):.0%}",
+                  *([f"- machine speed probe (probe.py on the server CPU before each target): "
+                     f"min {min(v for _, v in probes):,}, median "
+                     f"{statistics.median(v for _, v in probes):,.0f}, max {max(v for _, v in probes):,} "
+                     f"units/s ({(max(v for _, v in probes) - min(v for _, v in probes)) / statistics.median(v for _, v in probes):.0%} range)"]
+                    if (probes := results.meta.get("probe")) else []),
                   f"- runs started on a machine that was not idle: "
                   f"{len(results.meta.get('noisy_starts', []))}",
                   f"- failures: {results.meta.get('failures') or 'none'}"]
@@ -954,6 +972,9 @@ def main() -> None:
     ap.add_argument("--rounds", type=int, default=int(env("ROUNDS", "3")),
                     help="measurements per number; each round restarts every server and "
                          "rotates the target order (the median is reported)")
+    ap.add_argument("--capacity-rounds", type=int,
+                    default=int(env("CAPACITY_ROUNDS")) if env("CAPACITY_ROUNDS") else None,
+                    help="rounds for the sse/conns phases (default: --rounds)")
     ap.add_argument("--threads", type=int, default=int(env("THREADS", "2")))
     ap.add_argument("--connections", type=int, default=int(env("CONNECTIONS", "128")))
     ap.add_argument("--sweep", default=env("SWEEP", "8,64,256,1024"))
@@ -1000,7 +1021,8 @@ def main() -> None:
     run_dir.mkdir(parents=True)
     results = Results()
     results.meta = {
-        "duration_s": cfg.duration, "rounds": cfg.rounds, "connections": cfg.connections,
+        "duration_s": cfg.duration, "rounds": cfg.rounds,
+        "capacity_rounds": cfg.capacity_rounds or cfg.rounds, "connections": cfg.connections,
         "wrk_threads": cfg.threads, "server_cpus": cfg.server_cpus, "client_cpus": cfg.client_cpus,
         "cpu": next((line.split(":", 1)[1].strip()
                      for line in Path("/proc/cpuinfo").read_text().splitlines()
@@ -1035,13 +1057,17 @@ def main() -> None:
         if not phases & group_phases:
             continue
         group_targets = [t for t in targets if applies(t)]
-        for r in range(cfg.rounds):
-            order = round_order(group_targets, r, cfg.rounds)
+        rounds = (cfg.capacity_rounds or cfg.rounds) if group == "capacity" else cfg.rounds
+        for r in range(rounds):
+            order = round_order(group_targets, r, rounds)
             results.meta.setdefault("order", {}).setdefault(group, []).append(order)
-            log(f"\n== {group}, round {r + 1}/{cfg.rounds} "
+            log(f"\n== {group}, round {r + 1}/{rounds} "
                 f"({(time.monotonic() - t_start) / 60:.0f} min in): {' '.join(order)}")
             for target in order:
-                log(f"-- {target}")
+                wait_quiet(cfg, results, f"{group} r{r + 1} {target} probe")
+                speed_probe(cfg, results, f"{group} r{r + 1} {target}")
+                log(f"-- {target}  (machine speed probe: {results.meta['probe'][-1][1]:,}/s)"
+                    if results.meta.get("probe") else f"-- {target}")
                 try:
                     run(target, cfg, run_dir, results, phases)
                 except Exception as exc:  # keep the other targets' numbers
