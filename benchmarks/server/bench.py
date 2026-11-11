@@ -81,7 +81,7 @@ BROWSER_AE = "gzip, deflate, br, zstd"
 
 PACKAGES = {
     "stario": [os.environ.get("STARIO_SPEC", f"stario @ file://{ROOT}"), "uvloop", "orjson"],
-    "fastapi": ["fastapi", "uvicorn[standard]", "ujson", "jinja2"],
+    "fastapi": ["fastapi", "uvicorn[standard]", "jinja2"],
     "blacksheep-uvicorn": ["blacksheep", "uvicorn[standard]", "orjson", "pydantic", "jinja2"],
     "blacksheep-granian": ["blacksheep", "granian[uvloop]", "orjson", "pydantic", "jinja2"],
     "sanic": ["sanic", "uvloop", "ujson", "jinja2"],
