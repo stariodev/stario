@@ -29,13 +29,24 @@ __all__ = [
 _INVALID_KEY_CHARS = re.compile(r"[\x00-\x1f\x7f\s\"'<>/=&`\\]")
 
 
-@lru_cache(maxsize=256)
 def validate_attribute_key(k: str) -> str:
     """Validate an attribute `name` for the wire format (dynamic keys, `data-*` suffixes, …).
 
-    Returns the name unchanged or raises. Cached so tag rendering and helper
-    functions share one memoization path for each distinct key.
+    Returns the name unchanged or raises. Short names are cached, so tag
+    rendering and helper functions share one memoization path for each
+    distinct key; a long one (user data, say) is checked without being kept.
     """
+    if type(k) is str and len(k) <= _CACHED_KEY_MAX_LEN:
+        return _validate_attribute_key_cached(k)
+    return _validate_attribute_key(k)
+
+
+# The cache holds its keys until they are evicted: 256 one-megabyte names
+# would pin 256 MB. Names longer than this are not cached.
+_CACHED_KEY_MAX_LEN = 256
+
+
+def _validate_attribute_key(k: str) -> str:
     if type(k) is not str:
         raise StarioError(
             f"Invalid attribute name type: {type(k).__name__}",
@@ -59,7 +70,7 @@ def validate_attribute_key(k: str) -> str:
         return k
 
     raise StarioError(
-        f"Invalid attribute name: {k!r}",
+        f"Invalid attribute name: {k[:100]!r}",
         context={"attribute": k[:100]},
         help_text=(
             "Attribute names must be non-empty and must not contain whitespace, "
@@ -67,3 +78,6 @@ def validate_attribute_key(k: str) -> str:
         ),
         example='h.Div({"data-user-id": "123"})',
     )
+
+
+_validate_attribute_key_cached = lru_cache(maxsize=256)(_validate_attribute_key)

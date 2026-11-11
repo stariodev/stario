@@ -1,6 +1,7 @@
 # cython: language_level=3, boundscheck=False, wraparound=False, cdivision=True, freethreading_compatible=True
 """Brotli and zstd, using the same C codecs as the HTTP writer."""
 
+cimport cython
 from cpython.bytes cimport PyBytes_AS_STRING, PyBytes_FromStringAndSize, PyBytes_GET_SIZE
 
 from stario.exceptions import StarioError, StarioRuntime
@@ -112,6 +113,12 @@ def zstd_decompress(bytes data) -> bytes:
     return _owned_bytes(out, out_len)
 
 
+# The stream classes hold one C codec state each. On a free-threaded build two
+# threads calling one object at once would race on that state (and a double
+# finish() would put one encoder in the pool twice), so every method runs
+# in a critical section on the object; with the GIL it costs nothing.
+
+
 cdef class BrotliEncoder:
     cdef StarioBrotli* _enc
 
@@ -130,28 +137,30 @@ cdef class BrotliEncoder:
         cdef size_t out_len = 0
         cdef const unsigned char* ptr
         cdef size_t n
-        if self._enc == NULL:
-            raise StarioRuntime("brotli encoder is finished")
-        ptr = _bytes_ptr(data, &n)
-        if stario_brotli_block_borrowed(self._enc, ptr, n, &out, &out_len) != 0:
-            raise StarioError("brotli stream failed")
-        return _owned_bytes(out, out_len)
+        with cython.critical_section(self):
+            if self._enc == NULL:
+                raise StarioRuntime("brotli encoder is finished")
+            ptr = _bytes_ptr(data, &n)
+            if stario_brotli_block_borrowed(self._enc, ptr, n, &out, &out_len) != 0:
+                raise StarioError("brotli stream failed")
+            return _owned_bytes(out, out_len)
 
     def finish(self, bytes data=b"") -> bytes:
         cdef const unsigned char* out = NULL
         cdef size_t out_len = 0
         cdef const unsigned char* ptr
         cdef size_t n
-        if self._enc == NULL:
-            return b""
-        try:
-            ptr = _bytes_ptr(data, &n)
-            if stario_brotli_finish_borrowed(self._enc, ptr, n, &out, &out_len) != 0:
-                raise StarioError("brotli finish failed")
-            return _owned_bytes(out, out_len)
-        finally:
-            stario_brotli_release(self._enc)
-            self._enc = NULL
+        with cython.critical_section(self):
+            if self._enc == NULL:
+                return b""
+            try:
+                ptr = _bytes_ptr(data, &n)
+                if stario_brotli_finish_borrowed(self._enc, ptr, n, &out, &out_len) != 0:
+                    raise StarioError("brotli finish failed")
+                return _owned_bytes(out, out_len)
+            finally:
+                stario_brotli_release(self._enc)
+                self._enc = NULL
 
 
 cdef class ZstdEncoder:
@@ -172,28 +181,30 @@ cdef class ZstdEncoder:
         cdef size_t out_len = 0
         cdef const unsigned char* ptr
         cdef size_t n
-        if self._enc == NULL:
-            raise StarioRuntime("zstd encoder is finished")
-        ptr = _bytes_ptr(data, &n)
-        if stario_zstd_block_borrowed(self._enc, ptr, n, &out, &out_len) != 0:
-            raise StarioError("zstd stream failed")
-        return _owned_bytes(out, out_len)
+        with cython.critical_section(self):
+            if self._enc == NULL:
+                raise StarioRuntime("zstd encoder is finished")
+            ptr = _bytes_ptr(data, &n)
+            if stario_zstd_block_borrowed(self._enc, ptr, n, &out, &out_len) != 0:
+                raise StarioError("zstd stream failed")
+            return _owned_bytes(out, out_len)
 
     def finish(self, bytes data=b"") -> bytes:
         cdef const unsigned char* out = NULL
         cdef size_t out_len = 0
         cdef const unsigned char* ptr
         cdef size_t n
-        if self._enc == NULL:
-            return b""
-        try:
-            ptr = _bytes_ptr(data, &n)
-            if stario_zstd_finish_borrowed(self._enc, ptr, n, &out, &out_len) != 0:
-                raise StarioError("zstd finish failed")
-            return _owned_bytes(out, out_len)
-        finally:
-            stario_zstd_release(self._enc)
-            self._enc = NULL
+        with cython.critical_section(self):
+            if self._enc == NULL:
+                return b""
+            try:
+                ptr = _bytes_ptr(data, &n)
+                if stario_zstd_finish_borrowed(self._enc, ptr, n, &out, &out_len) != 0:
+                    raise StarioError("zstd finish failed")
+                return _owned_bytes(out, out_len)
+            finally:
+                stario_zstd_release(self._enc)
+                self._enc = NULL
 
 
 cdef class BrotliDecoder:
@@ -214,13 +225,15 @@ cdef class BrotliDecoder:
         cdef size_t out_len = 0
         cdef const unsigned char* ptr
         cdef size_t n
-        ptr = _bytes_ptr(data, &n)
-        if stario_brotli_decoder_push_borrowed(self._dec, ptr, n, &out, &out_len) != 0:
-            raise StarioError("brotli decompression failed")
-        return _owned_bytes(out, out_len)
+        with cython.critical_section(self):
+            ptr = _bytes_ptr(data, &n)
+            if stario_brotli_decoder_push_borrowed(self._dec, ptr, n, &out, &out_len) != 0:
+                raise StarioError("brotli decompression failed")
+            return _owned_bytes(out, out_len)
 
     def is_finished(self) -> bool:
-        return stario_brotli_decoder_finished(self._dec) != 0
+        with cython.critical_section(self):
+            return stario_brotli_decoder_finished(self._dec) != 0
 
 
 cdef class ZstdDecoder:
@@ -241,10 +254,12 @@ cdef class ZstdDecoder:
         cdef size_t out_len = 0
         cdef const unsigned char* ptr
         cdef size_t n
-        ptr = _bytes_ptr(data, &n)
-        if stario_zstd_decoder_push_borrowed(self._dec, ptr, n, &out, &out_len) != 0:
-            raise StarioError("zstd decompression failed")
-        return _owned_bytes(out, out_len)
+        with cython.critical_section(self):
+            ptr = _bytes_ptr(data, &n)
+            if stario_zstd_decoder_push_borrowed(self._dec, ptr, n, &out, &out_len) != 0:
+                raise StarioError("zstd decompression failed")
+            return _owned_bytes(out, out_len)
 
     def is_finished(self) -> bool:
-        return stario_zstd_decoder_finished(self._dec) != 0
+        with cython.critical_section(self):
+            return stario_zstd_decoder_finished(self._dec) != 0

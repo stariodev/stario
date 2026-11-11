@@ -758,7 +758,9 @@ static int brotli_decode_into(
         *used = (size_t)(next_out - *buf);
         if (rc == BROTLI_DECODER_RESULT_SUCCESS) {
             *finished = 1;
-            return 0;
+            /* Bytes after the last meta-block are not part of the stream;
+               the reference decoder rejects them too. */
+            return available_in == 0 ? 0 : -1;
         }
         if (rc == BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT) {
             return 0;
@@ -790,6 +792,11 @@ static int zstd_decode_into(
     input.size = in_len;
     input.pos = 0;
     *used = 0;
+    /* A zstd stream is any number of frames (RFC 8878 3): finished means
+       the input ended exactly at the end of a frame. */
+    if (in_len > 0) {
+        *finished = 0;
+    }
     for (;;) {
         if (
             *used == *cap &&
@@ -806,8 +813,12 @@ static int zstd_decode_into(
         }
         *used = output.pos;
         if (remaining == 0) {
-            *finished = 1;
-            return 0;
+            /* Frame complete and flushed; the next byte starts a new frame. */
+            if (input.pos == input.size) {
+                *finished = 1;
+                return 0;
+            }
+            continue;
         }
         if (input.pos == input.size && output.pos < output.size) {
             return 0;

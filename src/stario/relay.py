@@ -26,7 +26,6 @@ from __future__ import annotations
 from asyncio import AbstractEventLoop, Future, get_running_loop
 from collections import deque
 from collections.abc import AsyncIterator
-from functools import lru_cache
 from threading import Lock
 from types import TracebackType
 from typing import Self, cast
@@ -59,20 +58,25 @@ def _valid_subject(value: str) -> bool:
     return ".." not in value
 
 
-@lru_cache(maxsize=1024)
-def _matching_patterns(subject: str) -> tuple[str, ...]:
-    """Lookup keys for an exact subject: exact, each trailing `prefix.*`, then `*`."""
-    # Walk dots from the right so "a.b.c" -> "a.b.c", "a.b.*", "a.*", "*": the only
-    # registry keys that can match this subject. Cached because the same subjects
-    # are typically published over and over (e.g. one room's event stream).
+# Subjects up to this long keep their lookup keys in `Relay._keys`, at most
+# `_KEYS_CACHE_SIZE` of them; a longer one is rare and recomputed each time.
+_KEYS_CACHE_CHARS = 256
+_KEYS_CACHE_SIZE = 1024
+
+
+def _matching_patterns(subject: str, prefixes: tuple[int, ...]) -> tuple[str, ...]:
+    """Registry keys that can match an exact subject: exact, `prefix.*`, then `*`.
+
+    `prefixes` holds the lengths of the registered `prefix.` parts, longest
+    first, so a subject costs one slice per registered prefix length rather
+    than one per dot: a request-derived subject such as `room.a.a.a...`
+    (thousands of dots) used to build every prefix of itself.
+    """
     out = [subject]
-    end = len(subject)
-    while True:
-        dot = subject.rfind(".", 0, end)
-        if dot < 0:
-            break
-        out.append(subject[:dot] + ".*")
-        end = dot
+    size = len(subject)
+    for length in prefixes:
+        if length < size and subject[length - 1] == ".":
+            out.append(subject[:length] + "*")
     out.append("*")
     return tuple(out)
 
@@ -169,9 +173,14 @@ class RelaySubscription[T]:
             self._waiter = None
             self._wake_pending = False
         # Join the registry while still inactive; publish skips until active is set.
-        with self._relay.lock:
+        relay = self._relay
+        with relay.lock:
             for pat in self.patterns:
-                self._relay.subs.setdefault(pat, {})[self] = None
+                bucket = relay.subs.get(pat)
+                if bucket is None:
+                    bucket = relay.subs[pat] = {}
+                    relay._count_prefix(pat, 1)
+                bucket[self] = None
         with self._inbox_lock:
             self.active = True
 
@@ -333,7 +342,7 @@ class Relay[T]:
     report delivery failures.
     """
 
-    __slots__ = ("lock", "subs")
+    __slots__ = ("_keys", "_prefix_counts", "_prefixes", "lock", "subs")
 
     def __init__(self) -> None:
         self.lock = Lock()
@@ -341,6 +350,26 @@ class Relay[T]:
         # keeps insertion order with O(1) add and remove, so N subscribers of
         # one pattern can leave without rebuilding the bucket N times.
         self.subs: dict[str, dict[RelaySubscription[T], None]] = {}
+        # Registered `prefix.*` keys by the length of `prefix.`, and those
+        # lengths longest first (see _matching_patterns). Guarded by `lock`.
+        self._prefix_counts: dict[int, int] = {}
+        self._prefixes: tuple[int, ...] = ()
+        # subject -> its registry lookup keys for the current `_prefixes`.
+        self._keys: dict[str, tuple[str, ...]] = {}
+
+    def _count_prefix(self, pattern: str, delta: int) -> None:
+        # Caller holds `lock`; `pattern` gained or lost its registry bucket.
+        if pattern == "*" or not pattern.endswith(".*"):
+            return
+        length = len(pattern) - 1
+        counts = self._prefix_counts
+        count = counts.get(length, 0) + delta
+        if count:
+            counts[length] = count
+        else:
+            del counts[length]
+        self._prefixes = tuple(sorted(counts, reverse=True))
+        self._keys.clear()
 
     def drop_subscription(self, subscription: RelaySubscription[T]) -> None:
         # Wake/cancel any blocked receive first, then remove from the registry.
@@ -354,6 +383,7 @@ class Relay[T]:
                 if not subs:
                     # Drop empty buckets so the registry doesn't accumulate dead keys.
                     del self.subs[pattern]
+                    self._count_prefix(pattern, -1)
 
     def publish(self, subject: str, data: T) -> None:
         """Deliver `(subject, data)` to every subscriber whose pattern matches.
@@ -391,7 +421,14 @@ class Relay[T]:
         dead: list[RelaySubscription[T]] = []
 
         with self.lock:
-            for pattern in _matching_patterns(subject):
+            keys = self._keys.get(subject)
+            if keys is None:
+                keys = _matching_patterns(subject, self._prefixes)
+                if len(subject) <= _KEYS_CACHE_CHARS:
+                    if len(self._keys) >= _KEYS_CACHE_SIZE:
+                        self._keys.clear()
+                    self._keys[subject] = keys
+            for pattern in keys:
                 subs = self.subs.get(pattern)
                 if not subs:
                     continue
