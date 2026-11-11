@@ -1,24 +1,38 @@
 # pyright: reportMissingImports=false
 
+"""The benchmark app, written the way Stario's README and examples do it.
+
+- JSON: ``w.json()`` with the process-wide codec set to orjson, as the
+  README's "JSON codec" section shows for an app that wants a faster
+  library than the standard one; request bodies go through the same codec.
+  orjson ships no free-threaded wheel, so the 3.14t target uses msgspec,
+  the README's other example.
+- HTML: ``h.*`` builders, ``h.HtmlDocument`` for a full page; ``/page-baked``
+  serves the same bytes through ``@baked``.
+- SSE: Datastar ``SSE(w).patch_elements`` fed by an in-process ``Relay``.
+"""
+
 import asyncio
 
-import ujson
-
+import stario.json as stario_json
 from apps.common import HELLO, NAV, ROWS, sse_fragment, ticker
 from stario import App, Relay, Route, Span, h
 from stario.datastar import SSE
 from stario.markup import baked
 
-JSON_CONTENT_TYPE = b"application/json"
+try:
+    import orjson
+
+    stario_json.set_codec(orjson.dumps, orjson.loads)
+except ImportError:  # free-threaded build: no orjson wheel
+    import msgspec
+
+    stario_json.set_codec(msgspec.json.encode, msgspec.json.decode)
 TICK = "bench.tick"
 
 
-def json_response(w, value, status: int = 200) -> None:
-    w.respond(ujson.dumps(value).encode("utf-8"), JSON_CONTENT_TYPE, status)
-
-
 def page():
-    return h.Html(
+    return h.HtmlDocument(
         {"lang": "en"},
         h.Head(
             h.Meta({"charset": "utf-8"}),
@@ -92,7 +106,7 @@ def _row(rid, cls, sku, name, desc, price, badge, status, href):
 
 @baked
 def _layout(nav, rows):
-    return h.Html(
+    return h.HtmlDocument(
         {"lang": "en"},
         h.Head(
             h.Meta({"charset": "utf-8"}),
@@ -141,27 +155,27 @@ async def plaintext(c, w):
 
 
 async def json_endpoint(c, w):
-    json_response(w, {"message": HELLO})
+    w.json({"message": HELLO})
 
 
 async def get_user(c, w):
     user_id = c.match.params["user_id"]
-    json_response(w, {"id": user_id, "name": f"User {user_id}"})
+    w.json({"id": user_id, "name": f"User {user_id}"})
 
 
 async def validate(c, w):
-    body = ujson.loads(await c.req.body())
+    body = stario_json.loads(await c.req.body())
     name = body.get("name")
     age = body.get("age")
 
     if not isinstance(name, str) or not name:
-        json_response(w, {"error": "name must be a non-empty string"}, 400)
+        w.json({"error": "name must be a non-empty string"}, 400)
         return
     if not isinstance(age, int) or age < 0 or age > 150:
-        json_response(w, {"error": "age must be an integer between 0 and 150"}, 400)
+        w.json({"error": "age must be an integer between 0 and 150"}, 400)
         return
 
-    json_response(w, {"name": name, "age": age, "valid": True})
+    w.json({"name": name, "age": age, "valid": True})
 
 
 async def html_page(c, w):
