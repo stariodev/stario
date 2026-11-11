@@ -370,7 +370,7 @@ the backend it asked for, and the server logs confirm it every time.
   off. Stario 5.8.2 gives extra threads either a uvloop or a stdlib loop,
   so `apps/stario_loopy.py` points that factory at loopyloop for this run.
   Since then, Stario creates extra-thread loops of the main loop's own
-  class (CHANGELOG, Unreleased).
+  class (5.8.3).
 
 ## Footprint
 

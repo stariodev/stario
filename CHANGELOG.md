@@ -4,7 +4,9 @@ All notable changes to Stario are documented in this file.
 
 The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 5.8.3 - 2026-11-11
+
+A fix for multi-threaded serving on event loops other than uvloop.
 
 ### Fixed
 
