@@ -4,7 +4,7 @@ All notable changes to Stario are documented in this file.
 
 The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## 5.8.2 - 2026-11-10
+## 5.8.2 - 2026-11-11
 
 A second security and performance review of the whole tree. Timings are
 `benchmarks/server/inproc.py` and `inproc_paths.py` on one pinned CPU, best
