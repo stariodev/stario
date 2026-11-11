@@ -4,6 +4,19 @@ All notable changes to Stario are documented in this file.
 
 The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 5.8.3 - 2026-11-11
+
+A fix for multi-threaded serving on event loops other than uvloop.
+
+### Fixed
+
+- **`STARIO_THREADS>1` worker threads run the same loop class as the loop
+  running `serve()`, whatever it is.** Before, only uvloop was mirrored: any
+  other loop (loopyloop, rloop, a `uvloop.Loop` subclass) left the extra
+  threads on a stdlib `SelectorEventLoop`, so one thread ran the chosen loop
+  and the rest silently did not. A loop class that can't be built without
+  arguments now fails startup with a `StarioError` naming it.
+
 ## 5.8.2 - 2026-11-11
 
 A second security and performance review of the whole tree. Timings are

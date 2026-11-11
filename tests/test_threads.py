@@ -11,7 +11,7 @@ import tempfile
 import threading
 from collections.abc import Callable, Coroutine
 from io import StringIO
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -20,6 +20,7 @@ from stario.exceptions import StarioError
 from stario.http.config import ServerConfig
 from stario.http.server import (
     Server,
+    _same_loop_factory,
     gil_is_enabled,
     loop_implementation,
     require_thread_workers,
@@ -263,6 +264,88 @@ async def test_threaded_workers_mirror_asyncio_leader(
             apps[0].signal_shutdown()
         thread.join(5.0)
         assert errors == []
+
+
+class _ThirdPartyLoop(asyncio.SelectorEventLoop):
+    """Stands in for a loop that is neither stdlib asyncio nor uvloop (loopyloop, rloop)."""
+
+    threads: ClassVar[list[str]] = []
+
+    def __init__(self) -> None:
+        super().__init__()
+        _ThirdPartyLoop.threads.append(threading.current_thread().name)
+
+
+@pytest.mark.asyncio
+async def test_threaded_workers_mirror_third_party_leader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A third-party leader loop produces worker threads of the same class."""
+    if not reuseport_supported(unix=False):
+        pytest.skip("SO_REUSEPORT is required for STARIO_THREADS>1")
+    monkeypatch.setenv("STARIO_THREADS_ALLOW_GIL", "1")
+    monkeypatch.setattr(_ThirdPartyLoop, "threads", [])
+    loop_classes: list[type] = []
+    apps: list[App] = []
+    port = _free_tcp_port()
+
+    async def serve_bootstrap(app: App, span: Any):
+        apps.append(app)
+
+        async def hello(_c: Any, w: Any) -> None:
+            loop_classes.append(type(asyncio.get_running_loop()))
+            w.text("hello-third-party")
+
+        app.add(Route("GET", "/"), hello)
+        yield
+
+    server = Server(
+        serve_bootstrap,
+        JsonTracer(StringIO()),
+        config=ServerConfig(
+            host="127.0.0.1",
+            port=port,
+            graceful_shutdown_timeout=0.5,
+            threads=3,
+        ),
+    )
+
+    def runner(coro: Coroutine[Any, Any, None]) -> None:
+        asyncio.run(coro, loop_factory=_ThirdPartyLoop)
+
+    thread, errors = _run_server(server, runner=runner)
+    try:
+        reader, writer = await _connect_tcp("127.0.0.1", port)
+        writer.write(b"GET / HTTP/1.1\r\nHost: t\r\n\r\n")
+        await writer.drain()
+        status, body = await _read_http_response(reader)
+        writer.close()
+        assert status == 200
+        assert body == b"hello-third-party"
+        assert loop_classes == [_ThirdPartyLoop]
+    finally:
+        if apps:
+            apps[0].signal_shutdown()
+        thread.join(5.0)
+        assert errors == []
+    # The leader plus both extra workers built one each.
+    assert sorted(_ThirdPartyLoop.threads[1:]) == ["stario-worker-1", "stario-worker-2"]
+
+
+def test_worker_loop_needing_arguments_fails_clearly() -> None:
+    """A loop class that can't be built without arguments names itself."""
+
+    class NeedsArgs(asyncio.SelectorEventLoop):
+        def __init__(self, required: int) -> None:
+            super().__init__()
+
+    loop = NeedsArgs(1)
+    try:
+        factory = _same_loop_factory(loop)
+        with pytest.raises(StarioError, match="NeedsArgs"):
+            factory()
+    finally:
+        loop.close()
 
 
 @pytest.mark.asyncio

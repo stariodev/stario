@@ -1,44 +1,64 @@
 # pyright: reportMissingImports=false
+"""FastAPI target, written the way the FastAPI docs recommend.
+
+- JSON: declare a return type and let FastAPI serialize it with Pydantic
+  (Rust) straight to bytes; no response_class, no ORJSON/UJSONResponse
+  (both deprecated since FastAPI 0.131).
+- HTML: Starlette's Jinja2Templates + TemplateResponse.
+- SSE: FastAPI's built-in EventSourceResponse + ServerSentEvent (0.135+).
+"""
 
 import asyncio
 import contextlib
 import os
+from collections.abc import AsyncIterable
 
-import ujson
-from fastapi import FastAPI
-from fastapi.responses import (
-    HTMLResponse,
-    PlainTextResponse,
-    Response,
-    StreamingResponse,
-)
+import jinja2
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.sse import EventSourceResponse, ServerSentEvent
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from apps.common import (
     COMPRESS,
     HELLO,
+    NAV,
+    PAGE_TEMPLATE,
+    ROWS,
     Hub,
-    datastar_event,
-    jinja_page,
     sse_fragment,
     ticker,
 )
 
-JSON_MEDIA_TYPE = "application/json"
 hub = Hub()
-render_page = jinja_page()
+
+# Starlette's Jinja2Templates accepts a preconfigured Environment via env=.
+# select_autoescape() is what Jinja2Templates(directory=...) uses itself, and
+# it turns escaping on for "page.html". auto_reload=False: the template never
+# changes, so skip Jinja's per-request "is the source up to date?" check.
+templates = Jinja2Templates(
+    env=jinja2.Environment(
+        loader=jinja2.DictLoader({"page.html": PAGE_TEMPLATE}),
+        autoescape=jinja2.select_autoescape(),
+        auto_reload=False,
+    )
+)
 
 
 @contextlib.asynccontextmanager
-async def lifespan(app):
+async def lifespan(app: FastAPI):
     task = asyncio.create_task(ticker(hub.publish))
     yield
     task.cancel()
 
 
-app = FastAPI(lifespan=lifespan)
+# Stario runs with STARIO_TRACER=noop; the counterpart here is FastAPI's
+# documented switch for its built-in OpenTelemetry hooks (advanced/opentelemetry.md),
+# which otherwise look up the tracer/meter/logger providers on every request.
+app = FastAPI(lifespan=lifespan, telemetry={"tracing": False, "metrics": False, "logs": False})
 if COMPRESS:
-    from starlette.middleware.gzip import GZipMiddleware
+    from fastapi.middleware.gzip import GZipMiddleware
 
     # Starlette's default compresslevel is 9; BENCH_GZIP_LEVEL overrides it.
     app.add_middleware(
@@ -46,56 +66,61 @@ if COMPRESS:
     )
 
 
+class Message(BaseModel):
+    message: str
+
+
+class User(BaseModel):
+    id: str
+    name: str
+
+
 class UserInput(BaseModel):
     name: str = Field(min_length=1)
     age: int = Field(ge=0, le=150)
 
 
-def json_response(value: object, status_code: int = 200) -> Response:
-    return Response(
-        ujson.dumps(value).encode("utf-8"),
-        status_code=status_code,
-        media_type=JSON_MEDIA_TYPE,
-    )
+class ValidatedUser(BaseModel):
+    name: str
+    age: int
+    valid: bool
 
 
-@app.get("/plaintext")
+@app.get("/plaintext", response_class=PlainTextResponse)
 async def plaintext() -> PlainTextResponse:
     return PlainTextResponse(HELLO)
 
 
 @app.get("/json")
-async def json_endpoint() -> Response:
-    return json_response({"message": HELLO})
+async def json_endpoint() -> Message:
+    return Message(message=HELLO)
 
 
 @app.get("/user/{user_id}")
-async def get_user(user_id: str) -> Response:
-    return json_response({"id": user_id, "name": f"User {user_id}"})
+async def get_user(user_id: str) -> User:
+    return User(id=user_id, name=f"User {user_id}")
 
 
 @app.post("/validate")
-async def validate(body: UserInput) -> Response:
-    return json_response({"name": body.name, "age": body.age, "valid": True})
+async def validate(body: UserInput) -> ValidatedUser:
+    return ValidatedUser(name=body.name, age=body.age, valid=True)
 
 
-@app.get("/page")
-async def page() -> HTMLResponse:
-    return HTMLResponse(render_page())
+@app.get("/page", response_class=HTMLResponse)
+async def page(request: Request):
+    return templates.TemplateResponse(request, "page.html", {"nav": NAV, "rows": ROWS})
 
 
-@app.get("/sse")
-async def sse() -> StreamingResponse:
+@app.get("/sse", response_class=EventSourceResponse)
+async def sse() -> AsyncIterable[ServerSentEvent]:
     queue = hub.subscribe()
-
-    async def events():
-        try:
-            while True:
-                tick, ts = await queue.get()
-                yield datastar_event(sse_fragment(tick, ts))
-        finally:
-            hub.unsubscribe(queue)
-
-    return StreamingResponse(
-        events(), media_type="text/event-stream", headers={"cache-control": "no-cache"}
-    )
+    try:
+        while True:
+            tick, ts = await queue.get()
+            # raw_data: send the Datastar payload as-is, not JSON-encoded.
+            yield ServerSentEvent(
+                event="datastar-patch-elements",
+                raw_data=f"elements {sse_fragment(tick, ts)}",
+            )
+    finally:
+        hub.unsubscribe(queue)

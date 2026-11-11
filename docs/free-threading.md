@@ -5,7 +5,8 @@ process. Thread 0 bootstraps, installs signals, and is also a server.
 Every thread binds the same TCP `host:port` with `SO_REUSEPORT` and runs
 its own `create_server` — accept, parse, and handlers stay on that loop.
 The kernel load-balances new connections. Every worker thread creates the
-same loop class as the loop running `serve()` (stdlib asyncio or uvloop).
+same loop class as the loop running `serve()`: stdlib asyncio, uvloop, or a
+third-party loop such as loopyloop, built without arguments.
 
 `STARIO_PIN_THREADS=1` pins each worker thread to one allowed CPU on Linux
 (`sched_setaffinity`, cgroup aware). Thread 0 takes CPU slot 0; the allowed
