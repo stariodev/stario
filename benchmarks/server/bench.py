@@ -64,9 +64,17 @@ TARGETS = [
     "robyn",
     "stario-ft",  # free-threaded 3.14t build; used by the multicore phase
     "stario-mp",  # N GIL processes on SO_REUSEPORT (apps/stario_mp.py); multicore only
+    # Stario on loopyloop (github.com/Bobowski/loopyloop), an asyncio loop on io_uring
+    # with an epoll fallback. Opt-in: name them on the command line (LOOPYLOOP_SPEC).
+    "stario-loopy",  # io_uring backend
+    "stario-loopy-epoll",  # epoll backend
+    "stario-mp-loopy",  # stario-mp on loopyloop (io_uring); multicore only
+    "stario-ft-loopy",  # stario-ft on loopyloop (io_uring, PYTHON_GIL=0); multicore only
 ]
+LOOPY = {"stario-loopy", "stario-loopy-epoll", "stario-mp-loopy", "stario-ft-loopy"}
 # Targets whose framework ships response compression (enabled in `compress`).
-COMPRESSING = {"stario", "fastapi", "blacksheep-uvicorn", "blacksheep-granian"}
+COMPRESSING = {"stario", "stario-loopy", "stario-loopy-epoll", "fastapi", "blacksheep-uvicorn",
+               "blacksheep-granian"}
 NO_SSE: set[str] = set()
 
 ENDPOINTS = {
@@ -78,6 +86,7 @@ ENDPOINTS = {
 }
 
 BROWSER_AE = "gzip, deflate, br, zstd"
+LOOPY_SPEC = os.environ.get("LOOPYLOOP_SPEC", f"loopyloop @ file://{ROOT.parent / 'loopyloop'}")
 
 PACKAGES = {
     "stario": [os.environ.get("STARIO_SPEC", f"stario @ file://{ROOT}"), "uvloop", "orjson"],
@@ -89,10 +98,14 @@ PACKAGES = {
     "falcon": ["falcon", "uvicorn[standard]", "msgspec", "jinja2"],
     "robyn": ["robyn[pydantic,templating]"],
     "stario-ft": [os.environ.get("STARIO_FT_SPEC", f"stario @ file://{ROOT}"), "uvloop", "msgspec"],
+    "stario-loopy": [os.environ.get("STARIO_SPEC", f"stario @ file://{ROOT}"), "orjson", LOOPY_SPEC],
+    "stario-ft-loopy": [os.environ.get("STARIO_FT_SPEC", f"stario @ file://{ROOT}"), "msgspec",
+                        LOOPY_SPEC],
 }
 # Targets of the multicore phase (each gets MC_WORKERS workers / threads).
-MULTICORE = ["stario-ft", "stario-mp", "fastapi", "blacksheep-granian", "sanic", "robyn"]
-MULTICORE_ONLY = {"stario-ft", "stario-mp"}
+MULTICORE = ["stario-ft", "stario-mp", "fastapi", "blacksheep-granian", "sanic", "robyn",
+             "stario-ft-loopy", "stario-mp-loopy"]
+MULTICORE_ONLY = {"stario-ft", "stario-mp", "stario-ft-loopy", "stario-mp-loopy"}
 
 
 def log(*args) -> None:
@@ -100,7 +113,9 @@ def log(*args) -> None:
 
 
 def env_name(target: str) -> str:
-    return "stario" if target == "stario-mp" else target  # stario-mp reuses the GIL env
+    # stario-mp reuses the GIL env; the loopyloop variants share one env per build.
+    return {"stario-mp": "stario", "stario-loopy-epoll": "stario-loopy",
+            "stario-mp-loopy": "stario-loopy"}.get(target, target)
 
 
 def py(target: str) -> str:
@@ -113,7 +128,7 @@ def ensure_env(target: str, python: str, refresh: bool) -> None:
     if refresh and env_dir.exists():
         shutil.rmtree(env_dir)
     if not Path(py(target)).exists():
-        if target == "stario-ft":
+        if target in ("stario-ft", "stario-ft-loopy"):
             python += "t"
         subprocess.run(["uv", "venv", "-q", str(env_dir), "--python", python], check=True)
         subprocess.run(
@@ -127,13 +142,15 @@ def versions(target: str) -> str:
         "stario": ["stario", "uvloop", "orjson"],
         "stario-ft": ["stario", "uvloop", "msgspec"],
         "stario-mp": ["stario", "uvloop", "orjson"],
+        "stario-loopy": ["stario", "loopyloop", "orjson"],
+        "stario-ft-loopy": ["stario", "loopyloop", "msgspec"],
         "fastapi": ["fastapi", "starlette", "uvicorn", "pydantic", "jinja2"],
         "blacksheep-uvicorn": ["blacksheep", "uvicorn", "orjson", "pydantic", "jinja2"],
         "blacksheep-granian": ["blacksheep", "granian", "orjson", "pydantic", "jinja2"],
         "sanic": ["sanic", "orjson", "jinja2"],
         "falcon": ["falcon", "uvicorn", "msgspec", "jinja2"],
         "robyn": ["robyn", "pydantic", "jinja2"],
-    }[target]
+    }[env_name(target)]
     code = (
         "import importlib.metadata as m, sys;"
         f"print(' '.join(f'{{n}}=={{m.version(n)}}' for n in {names!r}),"
@@ -160,8 +177,11 @@ def server_cmd(target: str, host: str, port: int, workers: int = 1) -> list[str]
                 "import uvloop; from stario import serve; "
                 "from apps.stario_app import bootstrap; uvloop.run(serve(bootstrap))",
             ]
-        case "stario-mp":
+        case "stario-mp" | "stario-mp-loopy":
+            # stario-mp-loopy: BENCH_LOOP=loopyloop (set in start_server)
             return [py(target), "-m", "apps.stario_mp", str(workers)]
+        case "stario-loopy" | "stario-loopy-epoll" | "stario-ft-loopy":
+            return [py(target), "-m", "apps.stario_loopy"]
         case "fastapi":
             return uvicorn("apps.fastapi_app:app")
         case "blacksheep-uvicorn":
@@ -360,8 +380,16 @@ def start_server(target: str, cfg, run_dir: Path, *, compress: bool, workers: in
         env["BENCH_GZIP_LEVEL"] = str(cfg.gzip_level)
     if target.startswith("stario"):
         env.update(STARIO_HOST=cfg.host, STARIO_PORT=str(port), STARIO_TRACER="noop")
-        if target == "stario-ft":
+        if target in ("stario-ft", "stario-ft-loopy"):
             env["STARIO_THREADS"] = str(workers)
+        if target in LOOPY:
+            # Set explicitly so a silent fallback to epoll fails the launcher.
+            env["LOOPYLOOP_BACKEND"] = "epoll" if target.endswith("-epoll") else "uring"
+            env["BENCH_LOOP"] = "loopyloop"
+        if target == "stario-ft-loopy":
+            # loopyloop's extension doesn't declare free-threading support, so importing
+            # it would turn the GIL back on. Untested upstream: an experimental row.
+            env["PYTHON_GIL"] = "0"
         if not compress:
             for codec in ("ZSTD", "BROTLI", "GZIP"):
                 env[f"STARIO_COMPRESS_{codec}_LEVEL"] = "-1"
@@ -681,7 +709,7 @@ def phase_compress(target: str, cfg, run_dir: Path, results: Results, phases) ->
         base = f"http://{cfg.host}:{server.port}/page"
         warmup(server, cfg, "/page", headers=[f"Accept-Encoding: {BROWSER_AE}"])
         cases = [("browser", BROWSER_AE), ("gzip", "gzip")]
-        if target == "stario":
+        if target.startswith("stario"):
             cases += [("br", "br")]
         for label, ae in cases:
             _, headers, body = fetch(base, headers={"Accept-Encoding": ae})
@@ -1002,9 +1030,9 @@ def main() -> None:
     cfg.conn_clients = [int(x) for x in cfg.conn_clients.split(",") if x]
     phases = set(cfg.phases.split(","))
     targets = []
-    default = [t for t in TARGETS if t not in MULTICORE_ONLY]
+    default = [t for t in TARGETS if t not in MULTICORE_ONLY | LOOPY]
     if "multicore" in phases:
-        default += sorted(MULTICORE_ONLY)
+        default += sorted(MULTICORE_ONLY - LOOPY)
     for t in cfg.targets or default:
         targets += t.split(",")
     for t in targets:

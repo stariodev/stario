@@ -8,6 +8,7 @@ the kernel. Each process has its own Relay, so it fits stateless HTTP only.
 Benchmark use only; Stario does not ship a multi-process mode.
 
     python -m apps.stario_mp 2
+    BENCH_LOOP=loopyloop python -m apps.stario_mp 2   # on loopyloop instead of uvloop
 """
 
 import contextlib
@@ -15,10 +16,17 @@ import os
 import signal
 import sys
 
-import uvloop
+if os.environ.get("BENCH_LOOP") == "loopyloop":  # stario-mp-loopy
+    import loopyloop
+
+    BaseLoop = loopyloop.Loop  # backend from LOOPYLOOP_BACKEND
+else:
+    import uvloop
+
+    BaseLoop = uvloop.Loop
 
 
-class ReusePortLoop(uvloop.Loop):
+class ReusePortLoop(BaseLoop):
     async def create_server(self, *args, **kwargs):
         kwargs["reuse_port"] = True
         return await super().create_server(*args, **kwargs)
@@ -30,7 +38,18 @@ def worker() -> None:
     from apps.stario_app import bootstrap
     from stario import serve
 
-    asyncio.run(serve(bootstrap), loop_factory=ReusePortLoop)
+    async def main() -> None:
+        loop = asyncio.get_running_loop()
+        want = os.environ.get("LOOPYLOOP_BACKEND")
+        if hasattr(loop, "backend"):  # loopyloop: a silent fallback would skew the run
+            if want and loop.backend != want:
+                print(f"stario_mp: asked for {want!r}, got {loop.backend!r}", file=sys.stderr)
+                os._exit(1)
+            print(f"stario_mp: pid {os.getpid()} loopyloop backend={loop.backend}",
+                  file=sys.stderr, flush=True)
+        await serve(bootstrap)
+
+    asyncio.run(main(), loop_factory=ReusePortLoop)
 
 
 def main() -> None:
