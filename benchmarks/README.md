@@ -116,7 +116,7 @@ pinning and `/proc` sampling.
 
 ```bash
 cd projects/stario
-python3 benchmarks/server/bench.py                          # every phase, every target (~1 h)
+python3 benchmarks/server/bench.py                          # every phase, every target, 3 rounds (~2 h)
 python3 benchmarks/server/bench.py stario fastapi           # some targets
 python3 benchmarks/server/bench.py --phases throughput,mixed
 benchmarks/server/run.sh                                    # throughput phase only (~15 min)
@@ -129,8 +129,8 @@ Targets (one worker each unless the phase says otherwise):
 | `stario` | this checkout, `uvloop.run(serve(...))`, `STARIO_TRACER=noop` |
 | `fastapi` | FastAPI + Pydantic on Uvicorn (`httptools`, `uvloop`) |
 | `blacksheep-uvicorn` | BlackSheep on Uvicorn |
-| `blacksheep-granian` | BlackSheep on Granian (`--runtime-threads 1`) |
-| `sanic` | Sanic, single process |
+| `blacksheep-granian` | BlackSheep on Granian (`--runtime-mode st --runtime-threads 1 --http 1`) |
+| `sanic` | Sanic, single process, no sanic-ext |
 | `falcon` | Falcon ASGI on Uvicorn |
 | `robyn` | Robyn, one process, one worker |
 | `stario-ft` | free-threaded 3.14t build, `STARIO_THREADS=N` (multicore phase only) |
@@ -158,16 +158,22 @@ rebuilds the environments.
 - **Handlers run per request.** Robyn's `const=True` caches a route's first
   response in Rust and never calls the handler again; no other target can do
   that, so it is off (`BENCH_ROBYN_CONST=1` turns it on).
-- **JSON** goes through `ujson` explicitly where a framework allows it
-  (Stario, FastAPI, BlackSheep, Falcon); Sanic uses its default (`ujson` when
-  installed); Robyn serializes dicts with its built-in orjson.
-- **Validation:** FastAPI validates `POST /validate` with Pydantic, as its
-  users would; the others check the two fields by hand.
-- **HTML:** Stario builds `/page` with `h.*` per request (the naive tree, what
-  most handlers do). Every other target renders the same page with a compiled
-  Jinja2 template with autoescape, the renderer their docs reach for. Stario
-  also serves `/page-baked`, the same bytes through `@baked`, reported as an
-  extra line.
+- **Each app is written the way its framework's docs write it**, using
+  the fast path those docs recommend, not one pattern copied across apps.
+  Each app's docstring says which documented API it uses:
+
+  | Target | JSON | `POST /validate` | `/page` | `/sse` |
+  | --- | --- | --- | --- | --- |
+  | Stario | `w.json()`, `set_codec(orjson.dumps, orjson.loads)` (msgspec on 3.14t: no orjson wheel) | hand checks (Stario has no validator) | `h.*` tree per request; `/page-baked` via `@baked` | `SSE(w).patch_elements` + `Relay` |
+  | FastAPI | return-type annotations: Pydantic serializes in Rust (`ORJSONResponse` is deprecated) | Pydantic model (422) | `Jinja2Templates.TemplateResponse` | `EventSourceResponse` + `ServerSentEvent` |
+  | BlackSheep | orjson via `json_settings.use`, bytes-direct `Content` helper from its settings docs | `FromJSON[Pydantic model]` (400) | `view()` + `JinjaRenderer` | `TextServerSentEvent` generator |
+  | Sanic | `json()`, `Sanic(dumps=orjson.dumps, loads=orjson.loads)` | hand checks (validation lives in sanic-ext, which turns on CORS, OpenAPI, injection and auto HEAD/OPTIONS for every route once installed) | Jinja2, sync render (core Sanic has no templating) | `request.respond()` + `send()` |
+  | Falcon | `resp.media` with a msgspec `JSONHandler` | the docs' msgspec recipe (422) | Jinja2 into `resp.text` (no templating in Falcon) | `resp.sse` + `SSEvent` |
+  | Robyn | return a dict (orjson in Rust) | Pydantic body (422) | `robyn.templating.JinjaTemplate` | `SSEResponse` + `SSEMessage` |
+
+  Every Jinja2 path autoescapes. Stario runs with `STARIO_TRACER=noop`, and
+  FastAPI with its built-in OpenTelemetry hooks off (`telemetry=`), the
+  counterpart.
 - **Compression** is off in the main phases (`wrk` sends no
   `Accept-Encoding` anyway; Stario's codecs are also disabled with negative
   levels). The `compress` phase restarts each target with its built-in
@@ -176,9 +182,27 @@ rebuilds the environments.
   (level 5). Sanic, Falcon, and Robyn have no built-in response compression
   and are left out of that phase. `--gzip-level N` forces one gzip level in
   every framework for a like-for-like codec comparison.
-- **Median of `--repeat` runs** (default 3) of `--duration` seconds each
-  (default 10), after a warm-up. Each reported metric (req/s, p50,
-  p99, CPU) is its own median across the runs; errors are summed.
+- **Interleaved rounds, not back-to-back repeats.** Every number is the
+  median of `--rounds` rounds (default 3; `--capacity-rounds` for `sse` and
+  `conns`), each a `--duration`-second run (default 10). A round restarts
+  every target's server (and warms each endpoint), and the target order
+  rotates and reverses from round to round, so a slow drift of the machine,
+  or what one target leaves behind, spreads over all targets instead of
+  landing on whoever ran last. Each metric (req/s, p50, p99, CPU) is its own
+  median; wrk errors are summed. The summary reports the spread across
+  rounds.
+- **Quiet machine.** Environments are built before anything is measured.
+  Before every measured run the harness waits until the server and client
+  CPUs are idle; it pins itself to the CPUs neither side uses, and
+  `--isolate` moves every other process on the machine there too for the
+  length of the run. A stopped server's worker processes are killed before
+  the next target starts. Each run records hypervisor steal on the server
+  CPU and how busy the load generator was.
+- **Machine speed probe.** `probe.py` (a fixed CPU and allocation workload)
+  runs on the server CPU before every target in every round. On a shared
+  cloud VM its result can move by ±15% within a minute with no steal time
+  reported; the summary prints its range, so a slow host shows up as such
+  instead of being blamed on a framework.
 
 ### Phases
 
@@ -188,9 +212,9 @@ rebuilds the environments.
 | `sweep` | `/page` at 8, 64, 256, 1024 connections: how latency grows with load |
 | `mixed` | `mixed.lua`: 40% page, 30% path-param JSON, 20% JSON, 10% POST, every request with a real browser's header set and cookies |
 | `compress` | `/page` with a browser's `Accept-Encoding` (and gzip-only, brotli-only for Stario), and the mix: req/s and bytes on the wire |
-| `sse` | `sse_client.py`: 1,000 and 5,000 clients hold a Datastar SSE stream; the server broadcasts an HTML fragment every 0.5 s. Delivery latency (send to receive, same clock), share of events delivered, server CPU, peak RSS |
+| `sse` | `sse_client.py` (every target): 1,000 and 5,000 clients hold a Datastar SSE stream; the server broadcasts an HTML fragment every 0.5 s. Delivery latency (send to receive, same clock), share of events delivered, server CPU, peak RSS |
 | `conns` | `conn_client.py`: 2,000 and 10,000 keep-alive clients each `GET /page` every 2 s (1,000 and 5,000 req/s offered): achieved req/s, latency, errors, reconnects, peak RSS |
-| `multicore` | `MC_WORKERS` (2) workers on `MC_CPUS` (0,1): Stario free-threaded with N loop threads, Stario as N GIL processes, and multi-process FastAPI, Granian, Sanic, Robyn. The Stario targets also run with one worker as a same-run reference. For drift, run it several times with the targets in a different order each time and take medians |
+| `multicore` | `MC_WORKERS` (2) workers on `MC_CPUS` (0,1): Stario free-threaded with N loop threads, Stario as N GIL processes, and multi-process FastAPI, Granian, Sanic, Robyn. The Stario targets also run with one worker as a same-run reference |
 
 The `sse` and `conns` clients are asyncio programs that split connections
 across one process per client CPU. At 5,000 SSE clients they handle 10,000
@@ -202,7 +226,8 @@ does not add one, and Stario (correctly, per RFC 9112) answers a Host-less
 HTTP/1.1 request with 400 where the other servers accept it.
 
 Knobs (flags, or the environment variable in brackets): `--duration`
-(`DURATION`), `--repeat` (`REPEAT`), `--connections` (`CONNECTIONS`),
+(`DURATION`), `--rounds` (`ROUNDS`), `--capacity-rounds` (`CAPACITY_ROUNDS`),
+`--isolate` (`ISOLATE=1`), `--connections` (`CONNECTIONS`),
 `--threads` (`THREADS`), `--sweep` (`SWEEP`), `--sse-clients`,
 `--conn-clients`, `--server-cpus` (`SERVER_CPUS`), `--client-cpus`
 (`CLIENT_CPUS`), `--port` (`PORT`, base port; targets use fixed offsets),
