@@ -150,3 +150,39 @@ def test_removed_verb_helpers() -> None:
 def test_removed_shim_modules(removed_module: str) -> None:
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module(removed_module)
+
+
+def test_root_reexports_handler_names() -> None:
+    """The names a handler file imports most come from `stario` too."""
+    import stario
+    import stario.datastar
+    import stario.markup
+
+    for name in ("at", "data", "SSE", "read_signals"):
+        assert getattr(stario, name) is getattr(stario.datastar, name)
+    for name in ("HtmlElement", "SafeString", "baked", "render", "classes"):
+        assert getattr(stario, name) is getattr(stario.markup, name)
+    assert set(stario.__all__) >= {"at", "data", "SSE", "read_signals", "HtmlElement"}
+
+
+def test_server_config_from_stario_http() -> None:
+    import stario
+    import stario.http
+
+    assert stario.http.ServerConfig is stario.ServerConfig
+
+
+def test_root_import_in_a_fresh_interpreter() -> None:
+    import subprocess
+    import sys
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from stario import SSE, at, data, h, read_signals\n"
+            "from stario.http import ServerConfig\n"
+            "assert 'data-on:click' in data.on('click', at.post('/x')).rendered\n",
+        ],
+        check=True,
+    )
