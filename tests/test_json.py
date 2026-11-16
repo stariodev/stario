@@ -259,3 +259,51 @@ async def test_writer_json_uses_configured_codec_through_testclient() -> None:
             {"response": True}, ensure_ascii=False, separators=(",", ":")
         ).encode()
     )
+
+
+class TestTypedLoads:
+    def test_type_returns_the_value(self) -> None:
+        assert stario_json.loads('["a"]', type=list[str]) == ["a"]
+        assert stario_json.loads(b'{"a": 1}', type=dict[str, int]) == {"a": 1}
+        assert stario_json.loads("1", type=float) == 1
+        assert stario_json.loads("null", type=dict[str, int] | None) is None
+        assert stario_json.loads('"x"', type=str) == "x"
+
+    def test_typed_dict_checks_for_an_object(self) -> None:
+        from typing import TypedDict
+
+        class Point(TypedDict):
+            x: int
+
+        assert stario_json.loads('{"x": 1}', type=Point) == {"x": 1}
+        with pytest.raises(ValueError, match="expected dict"):
+            stario_json.loads("[1]", type=Point)
+
+    @pytest.mark.parametrize(
+        ("text", "tp", "message"),
+        [
+            ("{}", list[str], "JSON value is dict, expected list"),
+            ("[]", dict, "JSON value is list, expected dict"),
+            ("true", int, "JSON value is bool, expected int"),
+            ("1.5", int, "JSON value is float, expected int"),
+            ('"1"', int | None, "expected int | NoneType"),
+        ],
+    )
+    def test_wrong_outer_type_raises_value_error(self, text, tp, message) -> None:
+        with pytest.raises(ValueError, match=message):
+            stario_json.loads(text, type=tp)
+
+    def test_only_the_outer_type_is_checked(self) -> None:
+        assert stario_json.loads("[1, 2]", type=list[str]) == [1, 2]
+
+    def test_non_json_types_are_not_checked(self) -> None:
+        from dataclasses import dataclass
+
+        @dataclass
+        class Row:
+            a: int
+
+        assert stario_json.loads('{"a": 1}', type=Row) == {"a": 1}
+
+    def test_without_type_returns_any_value(self) -> None:
+        assert stario_json.loads("[1]") == [1]
