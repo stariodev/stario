@@ -1005,3 +1005,87 @@ class TestBackslashNeverPrecedesAClosingQuote:
         raw = html.unescape(rendered[len(" data-signals='") : -1])
         assert '\\\\"' not in raw
         assert json.loads(raw) == payload
+
+
+class TestBareIntTimes:
+    """A bare int of 10 or more in debounce/throttle/delay is a missing unit."""
+
+    @pytest.mark.parametrize(
+        "make",
+        [
+            lambda t: data.on("input", "go()", debounce=t),
+            lambda t: data.on("input", "go()", throttle=t),
+            lambda t: data.on("input", "go()", delay=t),
+            lambda t: data.on("input", "go()", debounce=(t, "leading")),
+            lambda t: data.on("input", "go()", throttle=(t, "trailing")),
+            lambda t: data.init("go()", delay=t),
+            lambda t: data.on_intersect("go()", debounce=t),
+            lambda t: data.on_signal_patch("go()", throttle=t),
+            lambda t: data.on_raf("go()", throttle=t),
+            lambda t: data.on_resize("go()", debounce=t),
+        ],
+    )
+    def test_millisecond_count_without_a_unit_raises(self, make):
+        with pytest.raises(StarioError, match="would wait 300 seconds") as info:
+            make(300)
+        help_text = info.value.help_text or ""
+        assert "'300ms'" in help_text
+        assert "0.3" in help_text
+        assert "'300s'" in help_text
+
+    def test_error_names_the_argument(self):
+        with pytest.raises(StarioError, match=r"throttle=10 would wait"):
+            data.on("scroll", "go()", throttle=10)
+
+    @pytest.mark.parametrize(
+        ("value", "rendered"),
+        [
+            (2, "2s"),
+            (9, "9s"),
+            (0, "0s"),
+            (0.3, "300ms"),
+            ("300ms", "300ms"),
+            ("30s", "30s"),
+        ],
+    )
+    def test_small_ints_floats_and_strings_still_work(self, value, rendered):
+        assert data.on("input", "go()", debounce=value) == Attrs(
+            f' data-on:input__debounce.{rendered}="go()"'
+        )
+
+    def test_interval_duration_keeps_whole_seconds(self):
+        # A 30 s poll written as an int is common and meant.
+        assert "duration.30s" in data.on_interval("poll()", duration=30).rendered
+
+
+class TestSignalsTakeMappingsAndSequences:
+    def test_data_signals_takes_tuples_and_mapping_objects(self):
+        from types import MappingProxyType
+
+        tags: list[str] = ["a", "b"]
+        out = data.signals(
+            {"tags": tags, "t": ("x", 1), "m": MappingProxyType({"k": [1]})}
+        )
+        assert out == Attrs(
+            """ data-signals='{"tags":["a","b"],"t":["x",1],"m":{"k":[1]}}'"""
+        )
+
+    def test_dotted_key_with_mapping_object(self):
+        from types import MappingProxyType
+
+        out = data.signals({"ui.panel": MappingProxyType({"open": True})})
+        assert out == Attrs(""" data-signals='{"ui":{"panel":{"open":true}}}'""")
+
+    def test_patch_signals_takes_tuples_and_mapping_objects(self):
+        from types import MappingProxyType
+
+        w, _sink, loop = _make_writer()
+        try:
+            SSE(w).patch_signals({"t": ("a",), "m": MappingProxyType({"k": 1})})
+            assert b'data: signals {"t":["a"],"m":{"k":1}}' in _sse_body(w)
+        finally:
+            loop.close()
+
+    def test_unencodable_value_still_raises(self):
+        with pytest.raises(TypeError):
+            data.signals({"x": object()})  # type: ignore[dict-item]

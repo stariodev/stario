@@ -19,6 +19,12 @@ star = DatastarAttributes("data-star-")
 h.Div(star.text("$title"))
 ```
 
+Times (`delay=`, `debounce=`, `throttle=`, `duration=`) are a string with a
+unit (`"300ms"`, `"2s"`), a float in seconds (`0.3`), or an int in whole
+seconds (`2`). In `delay=`, `debounce=` and `throttle=` an int of 10 or more
+raises: `debounce=300` is a millisecond count without its unit, so write
+`"300ms"` (or `"30s"` when seconds are meant).
+
 Reference: https://data-star.dev/reference/attributes
 """
 
@@ -41,11 +47,13 @@ from .format import (
     TimeValue,
     check_signal_name,
     debounce_to_string,
+    encode_signals,
     expand_signal_paths,
     filter_js,
     js_object,
     key_case,
     require_mapping,
+    short_time_to_string,
     signal_attr_key,
     signal_object,
     throttle_to_string,
@@ -290,7 +298,7 @@ class DatastarAttributes:
                 )
             return Attrs(f' {self.prefix}init="{escape_attr(expression)}"')
 
-        modifiers = "delay." + time_to_string(delay)
+        modifiers = "delay." + short_time_to_string(delay, "delay")
         if view_transition:
             modifiers += "__viewtransition"
         return Attrs(f' {self.prefix}init__{modifiers}="{escape_attr(expression)}"')
@@ -347,7 +355,13 @@ class DatastarAttributes:
 
         data.on("click", "$open = false", target="outside")
         # Attrs(' data-on:click__outside="$open = false"')
+
+        data.on("input", at.get("/search"), debounce="300ms")
+        # Attrs(' data-on:input__debounce.300ms="@get('/search')"')
         ```
+
+        `delay`, `debounce` and `throttle` take `"300ms"`, `0.3` (seconds) or a
+        small int of seconds; `debounce=300` raises (see the module docstring).
         """
         if passive and prevent:
             raise StarioError(
@@ -394,7 +408,7 @@ class DatastarAttributes:
         if stop:
             modifiers.append("stop")
         if delay is not None:
-            modifiers.append("delay." + time_to_string(delay))
+            modifiers.append("delay." + short_time_to_string(delay, "delay"))
         if debounce is not None:
             modifiers.append(debounce_to_string(debounce))
         if throttle is not None:
@@ -467,7 +481,7 @@ class DatastarAttributes:
         if exit:
             modifiers.append("exit")
         if delay is not None:
-            modifiers.append("delay." + time_to_string(delay))
+            modifiers.append("delay." + short_time_to_string(delay, "delay"))
         if debounce is not None:
             modifiers.append(debounce_to_string(debounce))
         if throttle is not None:
@@ -536,7 +550,7 @@ class DatastarAttributes:
         """
         modifiers: list[str] = []
         if delay is not None:
-            modifiers.append("delay." + time_to_string(delay))
+            modifiers.append("delay." + short_time_to_string(delay, "delay"))
         if debounce is not None:
             modifiers.append(debounce_to_string(debounce))
         if throttle is not None:
@@ -622,7 +636,9 @@ class DatastarAttributes:
 
         Keys are sent as JSON object keys, so any signal name works. A
         dotted key is a nested path — `{"ui.open": True}` sets the same
-        signal as `data.signal("ui.open", ...)`.
+        signal as `data.signal("ui.open", ...)`. Values may be any Mapping
+        or Sequence (a `list[str]` variable, a tuple), sent as JSON objects
+        and arrays.
 
         ```python
         data.signals({"count": 0, "open": False})
@@ -633,8 +649,9 @@ class DatastarAttributes:
         # ends in `\\"`, which Datastar's statement splitter takes for an
         # escaped quote (it does not count the backslashes before it).
         value = escape_sq_attribute_value(
-            json_dumps(
-                expand_signal_paths(require_mapping("signals", payload))
+            encode_signals(
+                json_dumps,
+                expand_signal_paths(require_mapping("signals", payload)),
             ).replace("\\\\", "\\u005c")
         )
         if if_missing:

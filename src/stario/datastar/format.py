@@ -5,7 +5,7 @@ Used by attribute and action builders; you rarely import this module directly.
 
 import math
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, Literal, NoReturn, cast
 
 from stario.exceptions import StarioError
@@ -18,12 +18,49 @@ _SIGNAL_KEY_BAD_RE = re.compile(r"__|\s|[\"'>/=]")
 # Filter types for include/exclude parameters
 FilterValue = str | Iterable[str]
 
+# Signal values going out (data.signals, SSE.patch_signals). Mapping and
+# Sequence, not dict and list: those are invariant, so a `list[str]` variable
+# would not pass as `list[SignalValue]`.
 type SignalValue = (
-    str | int | float | bool | dict[str, SignalValue] | list[SignalValue] | None
+    str | int | float | bool | Mapping[str, SignalValue] | Sequence[SignalValue] | None
 )
 
 # TimeValue: int -> Ns suffix, float -> seconds scaled to ms, str -> explicit `ms`/`s`.
 type TimeValue = int | float | str
+
+# A bare int of this many or more in `debounce=`, `throttle=` or `delay=` is
+# refused: as seconds it is almost always a millisecond count written without
+# a unit (`debounce=300` would wait five minutes).
+BARE_SECONDS_LIMIT = 10
+
+
+def _plain_json(value: Any) -> Any:
+    """`value` with every non-dict Mapping as a dict and every other Sequence
+    (not str or bytes) as a list, recursively, for the JSON encoder."""
+    t = type(value)
+    if t is str or t is int or t is float or t is bool or value is None:
+        return value
+    if isinstance(value, Mapping):
+        return {k: _plain_json(v) for k, v in cast(Mapping[Any, Any], value).items()}
+    if isinstance(value, (str, bytes, bytearray)):
+        return value
+    if isinstance(value, Sequence):
+        return [_plain_json(v) for v in cast(Sequence[Any], value)]
+    return value
+
+
+def encode_signals[R](encode: Callable[[Any], R], payload: Mapping[str, Any]) -> R:
+    """Encode a signals payload; a Mapping or Sequence the codec refuses is
+    copied to dict / list and encoded again.
+
+    The copy only runs when the first try raises `TypeError`, so dict and
+    list payloads cost nothing extra.
+    """
+    try:
+        return encode(payload)
+    except TypeError:
+        # A value the codec cannot encode at all fails again here.
+        return encode(_plain_json(payload))
 
 
 def require_mapping(name: str, payload: object) -> Mapping[str, Any]:
@@ -97,10 +134,32 @@ type Throttle = (
 )
 
 
+def short_time_to_string(time: TimeValue, name: str) -> str:
+    """`time_to_string` for `debounce=`, `throttle=` and `delay=`.
+
+    These waits are a fraction of a second to a few seconds, so a bare int of
+    `BARE_SECONDS_LIMIT` or more is a millisecond count without its unit. It
+    raises with the fix instead of waiting that many seconds. Write
+    `"300ms"`, `0.3`, or `"30s"` when 30 seconds is meant.
+    """
+    if type(time) is int and time >= BARE_SECONDS_LIMIT:
+        raise StarioError(
+            f"{name}={time} would wait {time} seconds",
+            context={"argument": name, "time_value": repr(time)},
+            help_text=(
+                f"A bare int is whole seconds. For {time} milliseconds write "
+                f"{name}='{time}ms' or {name}={time / 1000:g}; for {time} "
+                f"seconds write {name}='{time}s'."
+            ),
+            example=f"data.on('input', at.get('/search'), {name}='{time}ms')",
+        )
+    return time_to_string(time)
+
+
 def debounce_to_string(debounce: Debounce) -> str:
     """Convert a debounce configuration to a Datastar modifier string."""
     if isinstance(debounce, (int, float, str)):
-        return "debounce." + time_to_string(debounce)
+        return "debounce." + short_time_to_string(debounce, "debounce")
 
     if len(debounce) not in (2, 3):
         raise StarioError(
@@ -121,13 +180,18 @@ def debounce_to_string(debounce: Debounce) -> str:
                 help_text="Debounce modifiers are 'leading' and 'notrailing'.",
             )
 
-    return "debounce." + time_to_string(debounce[0]) + "." + ".".join(modifiers)
+    return (
+        "debounce."
+        + short_time_to_string(debounce[0], "debounce")
+        + "."
+        + ".".join(modifiers)
+    )
 
 
 def throttle_to_string(throttle: Throttle) -> str:
     """Convert a throttle configuration to a Datastar modifier string."""
     if isinstance(throttle, (int, float, str)):
-        return "throttle." + time_to_string(throttle)
+        return "throttle." + short_time_to_string(throttle, "throttle")
 
     if len(throttle) not in (2, 3):
         raise StarioError(
@@ -148,7 +212,12 @@ def throttle_to_string(throttle: Throttle) -> str:
                 help_text="Throttle modifiers are 'noleading' and 'trailing'.",
             )
 
-    return "throttle." + time_to_string(throttle[0]) + "." + ".".join(modifiers)
+    return (
+        "throttle."
+        + short_time_to_string(throttle[0], "throttle")
+        + "."
+        + ".".join(modifiers)
+    )
 
 
 def string_literal(value: str) -> str:

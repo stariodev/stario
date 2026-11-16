@@ -15,7 +15,7 @@ from stario.json import dumps as json_dumps
 from stario.json import dumps_bytes as json_dumps_bytes
 from stario.markup.render import render_bytes
 
-from .format import expand_signal_paths, require_mapping
+from .format import SignalValue, encode_signals, expand_signal_paths, require_mapping
 
 type JsonObject = Mapping[str, JsonValue]
 type PatchMode = Literal[
@@ -206,7 +206,7 @@ class SSE:
 
     def patch_signals(
         self,
-        payload: JsonObject,
+        payload: Mapping[str, SignalValue],
         *,
         only_if_missing: bool = False,
         event_id: str | None = None,
@@ -215,10 +215,11 @@ class SSE:
         """Patch Datastar signals from a JSON-shaped mapping.
 
         Dotted keys expand to nested objects, so `{"ui.open": True}`
-        patches `$ui.open`.
+        patches `$ui.open`. Values may be any Mapping or Sequence (a
+        `list[str]` variable, a tuple), sent as JSON objects and arrays.
         """
         data = expand_signal_paths(require_mapping("patch_signals", payload))
-        json_bytes = json_dumps_bytes(data)
+        json_bytes = encode_signals(json_dumps_bytes, data)
         if (
             not only_if_missing
             and event_id is None
