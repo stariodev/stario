@@ -135,9 +135,6 @@ expression compiler for the Datastar ones).
 - **Datastar 1.0.5:** `ModuleScript()` loads `@v1.0.5` (bug fixes: `retry:
   'never'` stops, `data-bind` on number and date inputs).
 
-- **`aria()` writes `True` / `False` as `"true"` / `"false"`.** A bare
-  `aria-expanded` means `""` (undefined) to ARIA, and dropping the
-  attribute is not false. `None` still omits it.
 - **`styles()` accepts `"`, `&`, `<` and `>` in a value:**
   `styles({"font-family": '"Inter", sans-serif'})` used to raise, because
   the `;` check ran on the escaped text (`&quot;`). `; { } \` still raise.

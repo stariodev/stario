@@ -508,9 +508,10 @@ class TestAttributeTypes:
     def test_prefixed_helper(self):
         attrs = prefixed("aria", {"expanded": True, "hidden": False})
         result = render(h.Div(attrs))
-        # ARIA states are the strings "true" / "false".
-        assert 'aria-expanded="true"' in result
-        assert 'aria-hidden="false"' in result
+        # One rule for every attribute: True is present, False is absent.
+        assert "aria-expanded" in result
+        assert 'aria-expanded="' not in result
+        assert "aria-hidden" not in result
 
     def test_attribute_key_rejects_safestring(self):
         with pytest.raises(StarioError, match="Invalid attribute name type"):

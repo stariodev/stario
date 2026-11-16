@@ -2119,10 +2119,6 @@ cdef object _prefixed_fragment(object prefix, object key, object value):
         )
     if value_type is int or value_type is float:
         return _pair_string(wire_key, str(value))
-    if value_type is bool and prefix == "aria":
-        # ARIA states are the strings "true" / "false": a bare
-        # aria-expanded means "" (undefined), and dropping it is not false.
-        return _pair_string(wire_key, "true" if value else "false")
     return _attr_fragment(wire_key, value)
 
 

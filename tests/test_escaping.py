@@ -89,10 +89,14 @@ class TestUrlSchemes:
         assert 'title="javascript:x"' in render(h.A({"title": "javascript:x"}))
 
 
-class TestAriaBooleans:
-    def test_true_and_false_are_strings(self) -> None:
+class TestBooleansArePresence:
+    def test_aria_follows_the_one_rule(self) -> None:
+        # True writes the bare name, False and None leave it out. An
+        # attribute that takes words gets the word as a string.
         out = render(h.Button(aria({"expanded": True, "pressed": False, "x": None})))
-        assert out == '<button aria-expanded="true" aria-pressed="false"></button>'
+        assert out == "<button aria-expanded></button>"
+        out = render(h.Button(aria({"expanded": "false"})))
+        assert out == '<button aria-expanded="false"></button>'
 
 
 class TestStylesCheckTheRawValue:
