@@ -21,7 +21,6 @@ from stario.datastar.format import (
     check_signal_name,
     debounce_to_string,
     expand_signal_paths,
-    js_object,
     signal_attr_key,
     signal_object,
     string_literal,
@@ -32,7 +31,7 @@ from stario.exceptions import StarioError, StarioRuntime
 from stario.markup import html as h
 from stario.markup import render
 from stario.markup.escape import escape_attribute_value, escape_sq_attribute_value
-from stario.markup.types import Attrs
+from stario.markup.types import Attrs, SafeString
 from tests.helpers import TestWriter
 
 
@@ -257,7 +256,7 @@ class TestSseWireFormat:
     def test_multiline_html_splits_into_repeated_data_lines(self):
         w, _sink, loop = _make_writer()
         try:
-            SSE(w).patch_elements("<div>\n  <p>a</p>\n</div>", trusted=True)
+            SSE(w).patch_elements(SafeString("<div>\n  <p>a</p>\n</div>"))
             result = _sse_body(w)
 
             assert (
@@ -271,7 +270,7 @@ class TestSseWireFormat:
     def test_crlf_in_patch_elements_splits_once(self):
         w, _sink, loop = _make_writer()
         try:
-            SSE(w).patch_elements("<div>\r\n<p>a</p>\r\n</div>", trusted=True)
+            SSE(w).patch_elements(SafeString("<div>\r\n<p>a</p>\r\n</div>"))
             result = _sse_body(w)
 
             assert (
@@ -286,7 +285,7 @@ class TestSseWireFormat:
     def test_bare_cr_in_patch_elements_becomes_data_line(self):
         w, _sink, loop = _make_writer()
         try:
-            SSE(w).patch_elements("<div>\revil", trusted=True)
+            SSE(w).patch_elements(SafeString("<div>\revil"))
             result = _sse_body(w)
             assert b"event: datastar-patch-elements\n" in result
             assert b"\revil" not in result
@@ -936,22 +935,31 @@ class TestDatastarActions:
         assert action == "@get('/search?tag=a&tag=b')"
 
     def test_post_with_options(self):
-        payload = {"extra": 123}
-
-        action = at.post(
-            "/api/submit",
-            include="form.*",
-            retry="error",
-            payload=payload,
+        action = at.post("/api/submit", retry="error", payload={"extra": 123})
+        assert (
+            action == "@post('/api/submit', {payload: {'extra':123}, retry: 'error'})"
         )
 
-        assert "@post" in action
-        assert "/api/submit" in action
+    def test_payload_dict_is_data(self):
+        # The same as headers= and data.signals: "Milk" is text, "$t" too.
+        action = at.post("/todo", payload={"title": "Milk", "t": "$t", "n": [1, None]})
+        assert (
+            action
+            == "@post('/todo', {payload: {'title':'Milk','t':'$t','n':[1,null]}})"
+        )
 
-        expected_payload_str = f"payload: {js_object(payload)}"
-        assert expected_payload_str in action
+    def test_payload_str_is_one_expression(self):
+        action = at.post("/todo", payload="{id: $id, title: el.value}")
+        assert action == "@post('/todo', {payload: {id: $id, title: el.value}})"
 
-        assert "retry: 'error'" in action
+    @pytest.mark.parametrize("option", ["include", "exclude"])
+    def test_payload_refuses_signal_filters(self, option: str):
+        with pytest.raises(StarioError, match="no effect with payload"):
+            at.post("/x", payload={"a": 1}, **{option: ["a"]})  # type: ignore[arg-type]
+
+    def test_payload_refuses_other_types(self):
+        with pytest.raises(StarioError, match="dict or a str"):
+            at.post("/x", payload=[1, 2])  # type: ignore[arg-type]
 
     def test_selector_requires_form_content_type(self):
         action = at.post("/checkout", content_type="form", selector="#checkout-form")

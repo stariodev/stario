@@ -13,7 +13,6 @@ from stario.exceptions import StarioError
 from stario.json import dumps, dumps_script
 from stario.markup import aria, styles
 from stario.testing import TestClient
-from tests.helpers import TestWriter
 
 
 class TestSafeStringAttributeValue:
@@ -42,24 +41,35 @@ class TestUrlSchemes:
             "\x01javascript:alert(1)",
             "java\tscript:alert(1)",
             "java\nscript:alert(1)",
-            "vbscript:msgbox(1)",
-            "data:text/html,<script>alert(1)</script>",
         ],
     )
-    @pytest.mark.parametrize("key", ["href", "action", "formaction", "HREF"])
-    def test_script_urls_raise(self, key: str, url: str) -> None:
-        with pytest.raises(StarioError, match="is a script URL"):
+    @pytest.mark.parametrize(
+        "key", ["href", "src", "action", "formaction", "xlink:href", "HREF"]
+    )
+    def test_javascript_urls_raise(self, key: str, url: str) -> None:
+        with pytest.raises(StarioError, match="is a javascript: URL"):
             h.A({key: url}, "x")
 
-    def test_src_allows_data_but_not_javascript(self) -> None:
+    def test_data_urls_pass(self) -> None:
+        # Browsers block data: pages at the top level; a data: download
+        # link and an inline image are real uses.
         img = render(h.Img({"src": "data:image/png;base64,AAAA", "alt": ""}))
         assert 'src="data:image/png;base64,AAAA"' in img
-        with pytest.raises(StarioError, match="script URL"):
-            h.Img({"src": "javascript:alert(1)"})
+        link = render(h.A({"href": "data:text/csv,a,b", "download": "x.csv"}, "CSV"))
+        assert link == '<a href="data:text/csv,a,b" download="x.csv">CSV</a>'
 
     @pytest.mark.parametrize(
         "url",
-        ["/a?b=c:d", "https://example.com", "mailto:a@b.c", "tel:+48", "#top", "page2"],
+        [
+            "/a?b=c:d",
+            "https://example.com",
+            "mailto:a@b.c",
+            "tel:+48",
+            "#top",
+            "page2",
+            "vbscript:msgbox(1)",
+            "javascriptx:1",
+        ],
     )
     def test_normal_urls_pass(self, url: str) -> None:
         assert render(h.A({"href": url}, "x")).startswith("<a href=")
@@ -117,6 +127,41 @@ class TestStylesCheckTheRawValue:
     def test_breakouts_still_raise(self, value: str) -> None:
         with pytest.raises(StarioError, match="Invalid CSS value"):
             styles({"color": value})
+
+    @pytest.mark.parametrize(
+        ("value", "problem"),
+        [
+            ("url(https://x/a", "unclosed '\\('"),
+            ('"Inter', "unclosed quote"),
+            ("'Inter", "unclosed quote"),
+            ("calc(1px + 2px))", "'\\)' with no"),
+            ("[full-start 1fr", "unclosed '\\['"),
+            ("1fr]", "'\\]' with no"),
+            ("red /*", "comment"),
+        ],
+    )
+    def test_a_value_cannot_swallow_the_next_declaration(
+        self, value: str, problem: str
+    ) -> None:
+        # Unclosed, the browser would read ";display:none;" as part of
+        # this value (inside the url, the string or the comment).
+        with pytest.raises(StarioError, match=problem):
+            styles({"background": value, "display": "none"})
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            'url("/a.png")',
+            "url(/a.png)",
+            "calc(100% - var(--gap, 1rem))",
+            "[full-start] minmax(0, 1fr) [full-end]",
+            '"a)b" serif',
+            "'/* not a comment */'",
+            "rgb(0 0 0 / 50%)",
+        ],
+    )
+    def test_closed_values_pass(self, value: str) -> None:
+        assert styles({"background": value}).rendered.startswith(' style="background:')
 
 
 class TestLeadingNewline:
@@ -196,44 +241,30 @@ class TestDatastarKeyModifiers:
             make()
 
 
-class TestTrustedHtmlStrings:
-    def _writer(self) -> TestWriter:
-        from tests.helpers import make_writer_raw
-
-        w, _sink, loop = make_writer_raw()
-        loop.close()
-        return cast(TestWriter, w)
-
-    def test_patch_elements_str_warns_unless_trusted(self) -> None:
+class TestFinishedHtmlStrings:
+    def test_patch_elements_str_raises(self) -> None:
         from tests.test_datastar import _make_writer, _sse_body
 
         w, _sink, loop = _make_writer()
         try:
-            with pytest.warns(DeprecationWarning, match="trusted=True"):
+            with pytest.raises(StarioError, match="SafeString"):
                 SSE(w).patch_elements("<p id='a'>x</p>")
-            SSE(w).patch_elements("<p id='b'>y</p>", trusted=True)
             SSE(w).patch_elements(SafeString("<p id='c'>z</p>"))
             body = _sse_body(w)
-            assert body.count(b"datastar-patch-elements") == 3
+            assert body.count(b"datastar-patch-elements") == 1
         finally:
             loop.close()
 
-    async def test_w_html_str_warns_unless_trusted(self) -> None:
-        async def warn(_c: Context, w: Writer) -> None:
+    async def test_w_html_str_raises(self) -> None:
+        async def plain(_c: Context, w: Writer) -> None:
             w.html("<p>a</p>")
-
-        async def trusted(_c: Context, w: Writer) -> None:
-            w.html("<p>b</p>", trusted=True)
 
         async def safe(_c: Context, w: Writer) -> None:
             w.html(SafeString("<p>c</p>"))
 
         app = App()
-        app.add(Route("GET /warn"), warn)
-        app.add(Route("GET /trusted"), trusted)
+        app.add(Route("GET /plain"), plain)
         app.add(Route("GET /safe"), safe)
         async with TestClient(app) as client:
-            with pytest.warns(DeprecationWarning, match="trusted=True"):
-                assert (await client.get("/warn")).text == "<p>a</p>"
-            assert (await client.get("/trusted")).text == "<p>b</p>"
+            assert (await client.get("/plain")).status_code == 500
             assert (await client.get("/safe")).text == "<p>c</p>"

@@ -11,6 +11,7 @@ from stario_cython.markup import CLASSES_CACHE_MAX as _CLASSES_CACHE_MAX_C
 from stario_cython.markup import aria as aria
 from stario_cython.markup import classes as classes
 from stario_cython.markup import classes_cache as _classes_cache
+from stario_cython.markup import css_value_problem
 from stario_cython.markup import data as data
 from stario_cython.markup import prefixed as prefixed
 from stario_cython.markup import styles as styles
@@ -85,20 +86,18 @@ def _styles_checked(declarations: StyleDeclarations) -> Attrs:
             raw_value = cast(str, value)
             rendered_value = escape_attribute_value(raw_value)
             # The raw value: every entity in the escaped one has a `;`.
-            if (
-                ";" in raw_value
-                or "{" in raw_value
-                or "}" in raw_value
-                or "\\" in raw_value
-            ):
+            problem = css_value_problem(raw_value)
+            if problem is not None:
                 raise StarioError(
-                    f"Invalid CSS value for property '{rendered_key}'",
+                    f"Invalid CSS value for property '{rendered_key}': it {problem}",
                     context={"property": rendered_key, "value": rendered_value[:100]},
                     help_text=(
-                        "CSS values in styles() must not contain ';', '{', '}', "
-                        "or '\\' so they cannot inject extra declarations."
+                        "A styles() value must stay inside its own declaration. "
+                        "Quotes, '(' and '[' must close, and ';', '{', '}', '\\' "
+                        "and '/*' are refused: the browser would read the "
+                        "declarations after it as part of this value."
                     ),
-                    example='h.Div(styles({"color": "red"}))',
+                    example='h.Div(styles({"background": \'url("/a.png")\'}))',
                 )
         elif value_type is int or value_type is float:
             rendered_value = str(value)

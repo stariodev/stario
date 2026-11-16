@@ -170,7 +170,7 @@ class DummyWriter:
     def json(self, value: Any, status: int = 200) -> None:
         _w_json(self, value, status)
 
-    def html(self, content: Any, status: int = 200, *, trusted: bool = False) -> None:
+    def html(self, content: Any, status: int = 200) -> None:
         _w_html(self, content, status)
 
     def redirect(self, url: str, status: int = 307) -> None:
@@ -414,7 +414,7 @@ class TestWriter:
     def json(self, value: Any, status: int = 200) -> None:
         _w_json(self, value, status)
 
-    def html(self, content: Any, status: int = 200, *, trusted: bool = False) -> None:
+    def html(self, content: Any, status: int = 200) -> None:
         _w_html(self, content, status)
 
     def redirect(self, url: str, status: int = 307) -> None:

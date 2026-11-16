@@ -355,13 +355,16 @@ def js_object(__obj: dict[str, Any] | None = None, /, **kwargs: Any) -> str:
     with `string_literal()` or send it as a signal instead.
 
     ```python
-    from stario.datastar import at, format
+    from stario.datastar import format
 
-    at.get("/api", headers={"X-Client": format.string_literal("stario")})
-    # headers value becomes {'X-Client':'stario'} inside the @get options object
-    at.post("/save", include=["draft"], payload={"title": "el.value"})
+    format.js_object({"title": "el.value", "count": "$count + 1"})
+    # {'title':el.value,'count':$count + 1}
     format.js_object({"label": format.string_literal("Save")})
+    # {'label':'Save'}
     ```
+
+    `at.*` does not need this: `headers=` values and a `payload=` dict are
+    already data, and a `payload=` str is already an expression.
     """
     obj = __obj if __obj is not None else kwargs
     pairs = (f"{string_literal(str(k))}:{_js_expr(v)}" for k, v in obj.items())

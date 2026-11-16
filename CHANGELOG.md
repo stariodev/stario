@@ -20,13 +20,19 @@ expression compiler for the Datastar ones).
   the value and add `onfocus=...`. `&` stays, so entities you wrote
   (`&nbsp;`) keep their meaning. `Attrs` stays the way to write raw
   attribute bytes.
-- **A script URL in `href`, `src`, `action`, `formaction` or `xlink:href`
-  raises.** `javascript:` and `vbscript:` everywhere, and `data:` outside
-  `src` (an inline `<img src="data:...">` still works). The check reads the
+- **A `javascript:` URL in `href`, `src`, `action`, `formaction` or
+  `xlink:href` raises.** Only `javascript:` runs code as your site; other
+  schemes pass (`mailto:`, `tel:`, app links, `<a download
+  href="data:...">`, since browsers block `data:` pages). The check reads the
   scheme as a browser does (case, leading spaces and controls, tabs and
   newlines inside it). `SafeString("javascript:void(0)")` opts out. Cost:
   about 7 ns for a relative URL and 23 ns for an absolute one, on these
   attributes only.
+- **A `styles()` value cannot swallow the next declaration.** An
+  unclosed quote, `(`, `[` or `/*` now raises, as `; { } \` did:
+  `styles({"background": "url(https://x/a", "display": "none"})` wrote
+  `background:url(https://x/a;display:none;`, and the browser read
+  `display:none` as part of the URL.
 - **`sse.execute_script(code)` raises on `</script` and `<!--`,** as
   `h.Script` does. Before, such code ended the script element and the rest
   became page markup.
@@ -100,8 +106,6 @@ expression compiler for the Datastar ones).
   `<script>`, with `<`, `>`, `&`, U+2028 and U+2029 escaped. Still valid
   JSON and JavaScript. `h.Script(dumps(data))` raises when the data holds
   `</script`; its error now names `dumps_script`.
-- **`w.html(s, trusted=True)` and `sse.patch_elements(s, trusted=True)`**
-  send a `str` of finished HTML (a template engine's output) as it is.
 - **`TestClient` raises `DatastarReplyError`** when a request that sends
   `datastar-request` gets a reply other than 200 or 204. Datastar ignores
   such a reply, so the user would see nothing (a `w.text("not found",
@@ -112,6 +116,18 @@ expression compiler for the Datastar ones).
 
 ### Changed
 
+- **`w.html(str)` and `sse.patch_elements(str)` raise.** A `str` is text
+  everywhere else in Stario (`h.Div(s)`), so here it cannot mean HTML.
+  Send `h.*` markup, or wrap finished HTML (a template engine's output)
+  in `SafeString`: `w.html(SafeString(template.render(...)))`. `bytes`
+  still go out as they are.
+- **`at.*(payload=)`: a dict is data, a `str` is one expression.**
+  `payload={"title": "Milk"}` sends the text Milk, as `headers=` and
+  `data.signals` already did; before, `Milk` was read as a JavaScript
+  variable. For values from the browser, pass one expression:
+  `payload="{id: $id, title: el.value}"` (a `str` used to fail with
+  `AttributeError`). `include=` or `exclude=` with `payload=` raises: the
+  payload replaces the signals, so the filter did nothing.
 - **A duration is a string with a unit, everywhere, and a number raises.**
   `delay=`, `debounce=`, `throttle=`, `on_interval(duration=)`, the fetch
   retry times and SSE `retry=` take `"300ms"` or `"2s"`. A bare number is
@@ -154,10 +170,6 @@ expression compiler for the Datastar ones).
 
 Each warns with its replacement and goes in 6.0.
 
-- `w.html(str)` and `sse.patch_elements(str)` without `trusted=True`. A
-  `str` is text everywhere else in Stario (`h.Div(s)`), and in 6.0 it is
-  text here too. Send `h.*` markup, a `SafeString`, `bytes`, or pass
-  `trusted=True`.
 - `at.get(url, queries)`: build the URL with `ROUTE.href(query={...})`. A
   `$signal` in `queries` was sent as the literal text.
 - `retry_interval_ms=` / `retry_max_wait_ms=`: `retry_interval="1s"`.

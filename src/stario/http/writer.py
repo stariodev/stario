@@ -88,16 +88,13 @@ class Writer(Protocol):
 
     def html(
         self,
-        content: bytes | str | HtmlElement,
+        content: bytes | HtmlElement,
         status: int = 200,
-        *,
-        trusted: bool = False,
     ) -> None:
         """Send markup nodes, a ``SafeString``, or ``bytes`` as ``text/html``.
 
-        A plain ``str`` warns (``DeprecationWarning``): it is text everywhere
-        else, and in 6.0 it is text here. ``trusted=True`` sends a ``str``
-        of finished HTML as it is, without the warning.
+        A plain ``str`` raises: it is text everywhere else, so finished HTML
+        says so with ``SafeString(page)``.
         """
         ...
 

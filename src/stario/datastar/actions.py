@@ -34,9 +34,11 @@ from stario_cython.markup import fragment_cache, remember_str
 from .format import (
     Duration,
     FilterValue,
+    SignalValue,
     duration_ms,
     filter_js,
     js_object,
+    literal,
     string_literal,
 )
 
@@ -64,7 +66,7 @@ class FetchOptions(TypedDict, total=False):
     selector: str | None
     headers: dict[str, str] | None
     open_when_hidden: bool | None
-    payload: dict[str, Any] | None
+    payload: Mapping[str, SignalValue] | str | None
     retry: Retry | str | None
     retry_interval: Duration | None
     retry_scaler: float | None
@@ -190,13 +192,7 @@ class DatastarActions:
         queries: Mapping[str, Any] | None = None,
         **options: Unpack[FetchOptions],
     ) -> str:
-        """Build a Datastar backend fetch action.
-
-        Values in `payload` are JavaScript expressions evaluated in the
-        browser. Never pass user-supplied text as a `payload` value — wrap
-        literal text with `literal()` or send it as a signal. Values in
-        `headers` are already string literals and are safe for literal text.
-        """
+        """Build a Datastar backend fetch action (see `get` for the options)."""
         if not options and queries is None:
             cache_key: tuple[object, ...] = (method, url)
             hit = _FETCH.get(cache_key)
@@ -290,7 +286,30 @@ class DatastarActions:
             parts.append(f"openWhenHidden: {'true' if open_when_hidden else 'false'}")
 
         if payload is not None:
-            parts.append(f"payload: {js_object(payload)}")
+            if include is not None or exclude is not None:
+                raise StarioError(
+                    "include= and exclude= have no effect with payload=",
+                    context={"include": repr(include), "exclude": repr(exclude)},
+                    help_text=(
+                        "payload replaces the signals in the request body, and "
+                        "include/exclude only filter the signals. Drop one."
+                    ),
+                )
+            if type(payload) is str:
+                # One JavaScript expression, like any str argument in at.*.
+                parts.append(f"payload: {payload}")
+            elif isinstance(payload, Mapping):
+                # Data, like data.signals: {"title": "Milk"} is the text Milk.
+                parts.append(f"payload: {literal(cast(SignalValue, payload))}")
+            else:
+                raise StarioError(
+                    f"payload must be a dict or a str, not {type(payload).__name__}",
+                    context={"payload": repr(payload)[:100]},
+                    help_text=(
+                        "A dict is data (sent as JSON values). A str is one "
+                        "JavaScript expression, e.g. '{id: $id, title: el.value}'."
+                    ),
+                )
 
         if retry is not None:
             parts.append(f"retry: {string_literal(str(retry))}")
@@ -335,9 +354,11 @@ class DatastarActions:
     ) -> str:
         """Build `@get(...)`. Datastar sends the signals in the `datastar` query parameter.
 
-        Warning: `payload` string values are JavaScript expressions evaluated
-        in the browser — never pass user-supplied text there; wrap it with
-        `literal()` or send it as a signal.
+        Data and code: `headers=` values and a `payload=` dict are data
+        (`{"title": title}` sends the text). A `payload=` str is one
+        JavaScript expression (`"{id: $id, title: el.value}"`). A payload
+        replaces the signals, so it does not go with `include=` / `exclude=`.
+
 
         ```python
         SEARCH = Route("GET /items")
@@ -356,12 +377,7 @@ class DatastarActions:
         queries: Mapping[str, Any] | None = None,
         **options: Unpack[FetchOptions],
     ) -> str:
-        """Build `@post(...)` with the same option surface as `get`.
-
-        Warning: `payload` string values are JavaScript expressions evaluated
-        in the browser — never pass user-supplied text there; wrap it with
-        `literal()` or send it as a signal.
-        """
+        """Build `@post(...)` with the same option surface as `get`."""
         return self._fetch("post", url, queries, **options)
 
     def put(
@@ -370,12 +386,7 @@ class DatastarActions:
         queries: Mapping[str, Any] | None = None,
         **options: Unpack[FetchOptions],
     ) -> str:
-        """Build `@put(...)` with the same option surface as `get`.
-
-        Warning: `payload` string values are JavaScript expressions evaluated
-        in the browser — never pass user-supplied text there; wrap it with
-        `literal()` or send it as a signal.
-        """
+        """Build `@put(...)` with the same option surface as `get`."""
         return self._fetch("put", url, queries, **options)
 
     def patch(
@@ -384,12 +395,7 @@ class DatastarActions:
         queries: Mapping[str, Any] | None = None,
         **options: Unpack[FetchOptions],
     ) -> str:
-        """Build `@patch(...)` with the same option surface as `get`.
-
-        Warning: `payload` string values are JavaScript expressions evaluated
-        in the browser — never pass user-supplied text there; wrap it with
-        `literal()` or send it as a signal.
-        """
+        """Build `@patch(...)` with the same option surface as `get`."""
         return self._fetch("patch", url, queries, **options)
 
     def delete(
@@ -398,12 +404,7 @@ class DatastarActions:
         queries: Mapping[str, Any] | None = None,
         **options: Unpack[FetchOptions],
     ) -> str:
-        """Build `@delete(...)` with the same option surface as `get`.
-
-        Warning: `payload` string values are JavaScript expressions evaluated
-        in the browser — never pass user-supplied text there; wrap it with
-        `literal()` or send it as a signal.
-        """
+        """Build `@delete(...)` with the same option surface as `get`."""
         return self._fetch("delete", url, queries, **options)
 
     def query(
@@ -415,9 +416,6 @@ class DatastarActions:
         """Build `@query(...)` with the same option surface as `get`.
 
         Sends a `QUERY` request with signals in the body, like `post`.
-        Warning: `payload` string values are JavaScript expressions evaluated
-        in the browser — never pass user-supplied text there; wrap it with
-        `literal()` or send it as a signal.
         """
         return self._fetch("query", url, queries, **options)
 

@@ -36,7 +36,7 @@ from cpython.mem cimport PyMem_Free, PyMem_Malloc, PyMem_Realloc
 from cpython.object cimport PyObject
 from cpython.ref cimport Py_DECREF, Py_INCREF, Py_XDECREF
 from cpython.tuple cimport PyTuple_GET_ITEM, PyTuple_GET_SIZE
-from libc.string cimport memcmp, memcpy
+from libc.string cimport memcmp, memcpy, memset
 
 from stario.exceptions import StarioError
 
@@ -926,7 +926,8 @@ cdef object _safe_attr_text(object s):
 
 
 cdef inline int _check_url_attr(object key, object value) except -1:
-    """Raise for a script URL in ``href`` / ``src`` / ``action`` / ``formaction``.
+    """Raise for a ``javascript:`` URL in ``href`` / ``src`` / ``action`` /
+    ``formaction`` / ``xlink:href``.
 
     Cheap for the common case: a key of another length or first letter
     returns at once, and so does a value without ``:``.
@@ -944,23 +945,20 @@ cdef inline int _check_url_attr(object key, object value) except -1:
 
 
 cdef int _check_url_scheme(object key, object value) except -1:
-    cdef bint is_src
     cdef int kind
     cdef const void* text
     cdef Py_ssize_t i = 0, n, m = 0
     cdef unsigned int c
     cdef char scheme[11]
-    if key == "href" or key == "action" or key == "formaction" or key == "xlink:href":
-        is_src = False
-    elif key == "src":
-        is_src = True
-    else:
+    if not (
+        key == "href" or key == "src" or key == "action"
+        or key == "formaction" or key == "xlink:href"
+    ):
         name = key.lower()
-        if name == "src":
-            is_src = True
-        elif name == "href" or name == "action" or name == "formaction" or name == "xlink:href":
-            is_src = False
-        else:
+        if not (
+            name == "href" or name == "src" or name == "action"
+            or name == "formaction" or name == "xlink:href"
+        ):
             return 0
     # Read the scheme as the URL parser does: controls and spaces in front
     # are dropped, and tabs and newlines anywhere ("java\tscript:").
@@ -984,19 +982,19 @@ cdef int _check_url_scheme(object key, object value) except -1:
         m += 1
     else:
         return 0
-    if (
-        (m == 10 and memcmp(scheme, b"javascript", 10) == 0)
-        or (m == 8 and memcmp(scheme, b"vbscript", 8) == 0)
-        or (not is_src and m == 4 and memcmp(scheme, b"data", 4) == 0)
-    ):
+    # Only javascript: runs code as this site, and only when the browser
+    # navigates to it. Browsers block data: pages at the top level, and no
+    # browser runs vbscript: any more, so other schemes pass (mailto:,
+    # tel:, app links, a data: download link).
+    if m == 10 and memcmp(scheme, b"javascript", 10) == 0:
         raise StarioError(
-            f"{key}={value[:40]!r} is a script URL",
+            f"{key}={value[:40]!r} is a javascript: URL",
             context={"attribute": key, "value": value[:100]},
             help_text=(
-                "A javascript:, vbscript: or (outside src) data: URL runs code "
-                "or a page when the user clicks it. Link to a route "
-                "(ROUTE.href()), check user URLs for http(s), or pass "
-                "SafeString(url) when you wrote the URL yourself."
+                "A javascript: URL runs code as your site when the user "
+                "clicks it. Link to a route (ROUTE.href()), check user URLs "
+                "for http(s), or pass SafeString(url) when you wrote the URL "
+                "yourself."
             ),
             example='h.A({"href": PROFILE.href(user_id=user.id)}, "Profile")',
         )
@@ -2179,6 +2177,81 @@ cdef bint _css_breakout(object s, bint colon):
     return False
 
 
+# ``" ' ( ) / ; [ \\ ] { }``: the only characters _css_value_problem acts on.
+cdef unsigned char _CSS_SPECIAL[128]
+memset(_CSS_SPECIAL, 0, 128)
+for _c in (34, 39, 40, 41, 47, 59, 91, 92, 93, 123, 125):
+    _CSS_SPECIAL[_c] = 1
+
+
+cdef int _css_value_problem(object s):
+    """0 when ``s`` stays inside its declaration, else a code for
+    ``css_value_problem``.
+
+    ``; { } \\`` could end the declaration or open a block. An unclosed
+    quote, ``(``, ``[`` or ``/*`` is worse: the browser reads the
+    declarations that Stario writes after it as part of this value
+    (``url(https://x/a`` would take ``;display:none`` into the URL).
+    """
+    cdef int kind = PyUnicode_KIND(s)
+    cdef const void* data = PyUnicode_DATA(s)
+    cdef Py_ssize_t i, n = PyUnicode_GET_LENGTH(s)
+    cdef Py_UCS4 c, quote = 0
+    cdef Py_ssize_t parens = 0, brackets = 0
+    for i in range(n):
+        c = PyUnicode_READ(kind, data, i)
+        if c >= 128 or not _CSS_SPECIAL[c]:
+            continue  # most of every value: one table read per character
+        if c == 59 or c == 123 or c == 125 or c == 92:  # ; { } \
+            return 1
+        if quote:
+            if c == quote:
+                quote = 0
+        elif c == 34 or c == 39:  # " '
+            quote = c
+        elif c == 40:  # (
+            parens += 1
+        elif c == 41:  # )
+            parens -= 1
+            if parens < 0:
+                return 4
+        elif c == 91:  # [
+            brackets += 1
+        elif c == 93:  # ]
+            brackets -= 1
+            if brackets < 0:
+                return 6
+        elif c == 47 and i + 1 < n and PyUnicode_READ(kind, data, i + 1) == 42:  # /*
+            return 7
+    if quote:
+        return 2
+    if parens:
+        return 3
+    if brackets:
+        return 5
+    return 0
+
+
+def css_value_problem(value):
+    """Why a ``styles()`` value could leave its declaration, or None.
+
+    Internal: the error messages in ``stario.markup.attributes``.
+    """
+    cdef int code = _css_value_problem(value)
+    if code == 0:
+        return None
+    return (
+        None,
+        "has ';', '{', '}' or '\\', which could start another declaration",
+        "has an unclosed quote",
+        "has an unclosed '('",
+        "has a ')' with no '('",
+        "has an unclosed '['",
+        "has a ']' with no '['",
+        "has '/*', which starts a comment",
+    )[code]
+
+
 def styles(declarations):
     """Return a pre-rendered `style` attribute fragment."""
     cdef list parts = []
@@ -2202,7 +2275,7 @@ def styles(declarations):
         if value_type is str:
             # Check the value itself: its escaped form has `;` in every
             # entity (`&quot;`), which is not a breakout.
-            if _css_breakout(value, False):
+            if _css_value_problem(value):
                 return _styles_checked(declarations)
             rendered_value = c_escape_attr(value)
         elif value_type is int or value_type is float:
