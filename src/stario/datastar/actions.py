@@ -29,7 +29,7 @@ from typing import Any, Literal, TypedDict, Unpack, cast
 from urllib.parse import urlencode
 
 from stario.exceptions import StarioError
-from stario_cython.markup import fragment_cache, remember_str
+from stario_cython.markup import FRAGMENT_CACHE_MAX, fragment_cache, remember_str
 
 from .format import (
     Duration,
@@ -119,25 +119,38 @@ def _deprecated(old: str, new: str, stacklevel: int) -> None:
 
 
 def _frozen(value: object) -> object:
-    """`value` as a cache key part: a dict or list becomes a tuple.
+    """`value` as a cache key part: a dict, list or tuple becomes a tuple,
+    and each item carries its type.
 
-    One level deep: a nested list or dict stays unhashable, so that call is
-    built every time instead of cached.
+    The types matter: `True == 1` and `0 == False` hash alike, so without
+    them `payload={"done": 1}` would get the cached text of
+    `payload={"done": True}`. A value of any other type (a set, a
+    generator) raises TypeError: the caller builds that call without the
+    cache.
     """
     kind = type(value)
     if kind is dict:
-        return (dict, *cast(dict[object, object], value).items())
-    if kind is list:
-        return (list, *cast(list[object], value))
-    return value
+        return (
+            dict,
+            *[
+                (k, type(v), _frozen(v))
+                for k, v in cast(dict[object, object], value).items()
+            ],
+        )
+    if kind is list or kind is tuple:
+        return (kind, *[(type(v), _frozen(v)) for v in cast(list[object], value)])
+    if kind is str or kind is int or kind is float or kind is bool or value is None:
+        return value
+    raise TypeError(kind.__name__)
 
 
 def _retry_ms(
-    options: FetchOptions, name: Literal["retry_interval", "retry_max_wait"]
+    options: FetchOptions,
+    name: Literal["retry_interval", "retry_max_wait"],
+    old_name: Literal["retry_interval_ms", "retry_max_wait_ms"],
 ) -> int | None:
     """`retry_interval` / `retry_max_wait` in milliseconds, from either spelling."""
     value = options.get(name)
-    old_name = name + "_ms"
     old = options.get(old_name)
     if old is not None:
         if value is not None:
@@ -193,33 +206,24 @@ class DatastarActions:
         **options: Unpack[FetchOptions],
     ) -> str:
         """Build a Datastar backend fetch action (see `get` for the options)."""
+        if len(_FETCH) >= FRAGMENT_CACHE_MAX:
+            # Full: it takes no new keys, so skip the lookup (see attributes.py).
+            return self._build(method, url, queries, options)
         if not options and queries is None:
             cache_key: tuple[object, ...] = (method, url)
             hit = _FETCH.get(cache_key)
             if hit is not None:
                 return hit
         else:
-            # A list or dict value (include=[...], headers={...}) is copied
-            # into a tuple; scalar options (retry="always") hash as they are.
-            plain = queries is None
-            if plain:
-                for value in options.values():
-                    kind = type(value)
-                    if kind is list or kind is dict:
-                        plain = False
-                        break
-            if plain:
-                cache_key = (method, url, *options.items())
-            else:
-                cache_key = (
-                    method,
-                    url,
-                    _frozen(queries),
-                    *[(name, _frozen(value)) for name, value in options.items()],
-                )
+            # Each option carries its type (see _frozen). A value that cannot
+            # be a key (a set, a generator) builds without the cache.
             try:
+                parts: list[object] = [method, url, _frozen(queries)]
+                for name, value in options.items():
+                    parts += (name, type(value), _frozen(value))
+                cache_key = tuple(parts)
                 hit = _FETCH.get(cache_key)
-            except TypeError:  # a value that cannot be a key: build, do not cache
+            except TypeError:
                 hit = None
                 cache_key = ()
             if hit is not None:
@@ -236,6 +240,8 @@ class DatastarActions:
         queries: Mapping[str, Any] | None,
         options: FetchOptions,
     ) -> str:
+        if not options and queries is None:
+            return f"@{method}({string_literal(url)})"
         if queries is not None:
             _deprecated(  # user -> at.get -> _fetch -> _build
                 "at.get(url, queries)",
@@ -251,9 +257,17 @@ class DatastarActions:
         open_when_hidden = options.get("open_when_hidden")
         payload = options.get("payload")
         retry = options.get("retry")
-        retry_interval_ms = _retry_ms(options, "retry_interval")
+        retry_interval_ms = (
+            _retry_ms(options, "retry_interval", "retry_interval_ms")
+            if "retry_interval" in options or "retry_interval_ms" in options
+            else None
+        )
         retry_scaler = options.get("retry_scaler")
-        retry_max_wait_ms = _retry_ms(options, "retry_max_wait")
+        retry_max_wait_ms = (
+            _retry_ms(options, "retry_max_wait", "retry_max_wait_ms")
+            if "retry_max_wait" in options or "retry_max_wait_ms" in options
+            else None
+        )
         retry_max_count = options.get("retry_max_count")
         request_cancellation = options.get("request_cancellation")
         if selector is not None and content_type != "form":

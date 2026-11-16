@@ -47,7 +47,7 @@ from stario.json import dumps as json_dumps
 from stario.markup.escape import escape_attribute_value as escape_attr
 from stario.markup.escape import escape_sq_attribute_value, validate_attribute_key
 from stario.markup.types import Attrs
-from stario_cython.markup import fragment_cache, remember_attrs
+from stario_cython.markup import FRAGMENT_CACHE_MAX, fragment_cache, remember_attrs
 
 from ._jsevents import JSEvent
 from .format import (
@@ -73,10 +73,12 @@ from .format import (
 )
 
 # Fragment caches, one per helper (see stario_cython.markup.remember_attrs).
+# A full cache takes no new keys, so the helpers stop looking in it: a call
+# then costs what it cost before there was a cache.
 _ON = fragment_cache()
-_INIT = fragment_cache()
 _BIND = fragment_cache()
 _ATTR = fragment_cache()
+_CAP = FRAGMENT_CACHE_MAX
 
 _duration = duration  # on_interval has a parameter named `duration`
 
@@ -190,15 +192,17 @@ class DatastarAttributes:
         # Attrs(' data-attr:title="$item.label"')
         ```
         """
-        cache_key = (self.prefix, key, expression)
-        hit = _ATTR.get(cache_key)
-        if hit is not None:
-            return hit
+        if len(_ATTR) < _CAP:
+            cache_key = (self.prefix, key, expression)
+            hit = _ATTR.get(cache_key)
+            if hit is not None:
+                return hit
+        else:
+            cache_key = ()
         validate_attribute_key(key)
         _reject_uppercase_key("attr", key, "data.attrs({key: expression})")
-        return remember_attrs(
-            _ATTR, cache_key, f' {self.prefix}attr:{key}="{escape_attr(expression)}"'
-        )
+        text = f' {self.prefix}attr:{key}="{escape_attr(expression)}"'
+        return remember_attrs(_ATTR, cache_key, text) if cache_key else Attrs(text)
 
     def attrs(self, mapping: dict[str, str]) -> Attrs:
         """Set several HTML attributes from a mapping of expressions.
@@ -230,10 +234,13 @@ class DatastarAttributes:
         # Attrs(' data-bind__prop.checked__event.change="isChecked"')
         ```
         """
-        cache_key = (self.prefix, signal_name, prop, event)
-        hit = _BIND.get(cache_key)
-        if hit is not None:
-            return hit
+        if len(_BIND) < _CAP:
+            cache_key = (self.prefix, signal_name, prop, event)
+            hit = _BIND.get(cache_key)
+            if hit is not None:
+                return hit
+        else:
+            cache_key = ()
         check_signal_name(signal_name)
         if prop is not None:
             validate_attribute_key(prop)
@@ -246,11 +253,8 @@ class DatastarAttributes:
             modifiers += f"__prop.{prop}"
         if event is not None:
             modifiers += f"__event.{event}"
-        return remember_attrs(
-            _BIND,
-            cache_key,
-            f' {self.prefix}bind{modifiers}="{escape_attr(signal_name)}"',
-        )
+        text = f' {self.prefix}bind{modifiers}="{escape_attr(signal_name)}"'
+        return remember_attrs(_BIND, cache_key, text) if cache_key else Attrs(text)
 
     def class_(self, name: str, expression: str) -> Attrs:
         """Toggle one CSS class from a reactive expression.
@@ -385,16 +389,15 @@ class DatastarAttributes:
         expression = (
             statements[0] if len(statements) == 1 else _code("init", statements)
         )
-        cache_key = (self.prefix, expression, delay, view_transition)
-        hit = _INIT.get(cache_key)
-        if hit is not None:
-            return hit
+        # No cache: building this costs no more than a lookup would.
+        if delay is None and not view_transition:
+            return Attrs(f' {self.prefix}init="{escape_attr(expression)}"')
         key = self.prefix + "init"
         if delay is not None:
             key += "__delay." + duration(delay, "delay")
         if view_transition:
             key += "__viewtransition"
-        return remember_attrs(_INIT, cache_key, f' {key}="{escape_attr(expression)}"')
+        return Attrs(f' {key}="{escape_attr(expression)}"')
 
     def json_signals(
         self,
@@ -478,10 +481,14 @@ class DatastarAttributes:
             and case == "kebab"
             and target is None
         ):
-            cache_key: tuple[object, ...] = (self.prefix, event, expression)
-            hit = _ON.get(cache_key)
-            if hit is not None:
-                return hit
+            # No modifiers: no cache. Building this costs about what a lookup
+            # costs, and per-row expressions (a URL with an id) would fill it.
+            if type(event) is str and event.islower() and "_" not in event:
+                validate_attribute_key(event)
+                return Attrs(f' {self.prefix}on:{event}="{escape_attr(expression)}"')
+            cache_key: tuple[object, ...] = ()
+        elif len(_ON) >= _CAP:
+            cache_key = ()
         else:
             cache_key = (
                 self.prefix,

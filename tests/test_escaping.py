@@ -268,3 +268,76 @@ class TestFinishedHtmlStrings:
         async with TestClient(app) as client:
             assert (await client.get("/plain")).status_code == 500
             assert (await client.get("/safe")).text == "<p>c</p>"
+
+
+class TestAuditFixes:
+    """Cases from the audit of the unreleased changes (2026-11-16)."""
+
+    @pytest.mark.parametrize("brk", ["\n", "\r", "\f"])
+    def test_a_line_break_inside_a_css_quote_raises(self, brk: str) -> None:
+        # CSS ends a string at a line break, so the next declarations would
+        # become part of this one.
+        with pytest.raises(StarioError, match="line break inside a quote"):
+            styles({"font-family": f"'a{brk}'", "display": "none"})
+
+    def test_a_line_break_outside_a_quote_is_whitespace(self) -> None:
+        assert styles({"margin": "0\n1px"}).rendered == ' style="margin:0\n1px;"'
+
+    @pytest.mark.parametrize(
+        ("value", "wire"),
+        [
+            ("a&nbsp;b", "a&nbsp;b"),
+            ('a "b" <c>', "a &quot;b&quot; &lt;c&gt;"),
+            ('café "x" & <y>', "café &quot;x&quot; & &lt;y&gt;"),
+            ('日本 "x"', "日本 &quot;x&quot;"),
+            ('🎉 "x" <y>', "🎉 &quot;x&quot; &lt;y&gt;"),
+            ("clean", "clean"),
+        ],
+    )
+    def test_safestring_attribute_values_keep_ampersands(
+        self, value: str, wire: str
+    ) -> None:
+        assert (
+            render(h.Div({"title": SafeString(value)})) == f'<div title="{wire}"></div>'
+        )
+
+    @pytest.mark.parametrize(
+        "key",
+        ["alt", "aria-label", "hidden", "height", "accept", "size", "step", "hrefx"],
+    )
+    def test_other_keys_with_a_colon_pass(self, key: str) -> None:
+        assert "javascript:x" in render(h.Div({key: "javascript:x"}))
+
+    @pytest.mark.parametrize(
+        "key", ["Href", "SRC", "Action", "FormAction", "XLINK:HREF"]
+    )
+    def test_url_keys_match_in_any_case(self, key: str) -> None:
+        with pytest.raises(StarioError, match="javascript: URL"):
+            h.A({key: "javascript:alert(1)"})
+
+    def test_raw_text_without_a_tag_start_passes(self) -> None:
+        assert render(h.Script("if (a < b) go()")) == "<script>if (a < b) go()</script>"
+        with pytest.raises(StarioError):
+            h.Script("x = '</SCRIPT>'")
+        with pytest.raises(StarioError):
+            h.Script("x = '<!--'")
+
+    def test_classes_as_a_value_still_checks_the_name(self) -> None:
+        from stario.markup import classes
+
+        assert render(h.Div({"class": classes("a", "b")})) == '<div class="a b"></div>'
+        with pytest.raises(StarioError, match="other attributes"):
+            h.Div({"id": classes("a")})
+
+    def test_literal_writes_enum_members_as_their_values(self) -> None:
+        import enum
+
+        class Color(enum.StrEnum):
+            RED = "red"
+
+        class N(enum.IntEnum):
+            ONE = 1
+
+        assert literal(Color.RED) == "'red'"
+        assert literal({"k": Color.RED, Color.RED: N.ONE}) == "{'k':'red','red':1}"
+        assert literal(N.ONE) == "1"

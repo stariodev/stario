@@ -113,12 +113,13 @@ cdef extern from *:
     };
 
     /* Bytes each character adds when escaped, per mode (ESC_TEXT,
-       ESC_DQUOTE, ESC_SQUOTE): a table sum, so the scan of clean text has
-       no branches and the compiler can vectorise it. */
-    static const unsigned char stario_escape_extra[3][256] = {
+       ESC_DQUOTE, ESC_SQUOTE, ESC_SAFE): a table sum, so the scan of clean
+       text has no branches and the compiler can vectorise it. */
+    static const unsigned char stario_escape_extra[4][256] = {
         {[38] = 4, [60] = 3, [62] = 3},             /* & < > */
         {[38] = 4, [60] = 3, [62] = 3, [34] = 5},   /* and " */
         {[38] = 4, [60] = 3, [62] = 3, [39] = 4},   /* and ' */
+        {[60] = 3, [62] = 3, [34] = 5},             /* " < > (& stays) */
     };
 
     /* A clean prefix of p[0:n] (bytes: Latin-1 or UTF-8): n when nothing
@@ -127,14 +128,14 @@ cdef extern from *:
        rescan from there). Eight bytes a step (SWAR), two exact zero-byte
        tests per step: < and > differ in bit 1 only, so (x | 0x02) ^ 0x3e
        is zero for both; & is x ^ 0x26, and its partner in the quote modes
-       differs in one bit too (" is 0x22, ' is 0x27). The tail goes byte
-       by byte. */
+       differs in one bit too (" is 0x22, ' is 0x27). ESC_SAFE tests " alone
+       (x ^ 0x22). The tail goes byte by byte. */
     static inline Py_ssize_t stario_clean_run_mode(const unsigned char* p,
                                                    Py_ssize_t n, int mode) {
         const uint64_t ones = 0x0101010101010101ULL;
         const uint64_t highs = 0x8080808080808080ULL;
         const uint64_t amp_or = ones * (mode == 1 ? 0x04 : mode == 2 ? 0x01 : 0x00);
-        const uint64_t amp_eq = ones * (mode == 2 ? 0x27 : 0x26);
+        const uint64_t amp_eq = ones * (mode == 2 ? 0x27 : mode == 3 ? 0x22 : 0x26);
         const unsigned char* table = stario_escape_extra[mode];
         Py_ssize_t i = 0;
         uint64_t x, a, g;
@@ -348,7 +349,7 @@ cdef extern from *:
     int stario_disallow_instantiation(object t) except -1
     int stario_dict_get_ref(object d, object key, PyObject** out) except -1
     const unsigned char stario_text_escape[256]
-    const unsigned char stario_escape_extra[3][256]
+    const unsigned char stario_escape_extra[4][256]
     Py_ssize_t stario_clean_run(const unsigned char* p, Py_ssize_t n) nogil
     Py_ssize_t stario_clean_run_mode(const unsigned char* p, Py_ssize_t n, int mode) nogil
     Py_ssize_t stario_utf8_into(char* d, int kind, const void* p, Py_ssize_t n, int esc) nogil
@@ -434,6 +435,7 @@ cdef enum:
     ESC_TEXT = 0      # & < >
     ESC_DQUOTE = 1    # & < > "
     ESC_SQUOTE = 2    # & < > '
+    ESC_SAFE = 3      # " < > (a SafeString attribute value: & stays)
 
 
 cdef object _escape_1byte(object s, int mode):
@@ -444,7 +446,7 @@ cdef object _escape_1byte(object s, int mode):
     cdef Py_ssize_t extra = 0
     cdef Py_ssize_t w = 0
     cdef unsigned char c
-    cdef unsigned char quote = 34 if mode == ESC_DQUOTE else (39 if mode == ESC_SQUOTE else 0)
+    cdef unsigned char quote = 34 if (mode == ESC_DQUOTE or mode == ESC_SAFE) else (39 if mode == ESC_SQUOTE else 0)
     cdef const unsigned char* table = stario_escape_extra[mode]
     cdef unsigned char* dst
     cdef object out
@@ -460,7 +462,7 @@ cdef object _escape_1byte(object s, int mode):
     w = k
     for i in range(k, n):
         c = src[i]
-        if c == 38:
+        if c == 38 and mode != ESC_SAFE:
             dst[w] = 38; dst[w + 1] = 97; dst[w + 2] = 109; dst[w + 3] = 112; dst[w + 4] = 59
             w += 5
         elif c == 60:
@@ -491,7 +493,7 @@ cdef object _escape_wide(object s, int mode):
     cdef Py_ssize_t extra = 0
     cdef Py_ssize_t w = 0
     cdef Py_UCS4 c
-    cdef Py_UCS4 quote = 34 if mode == ESC_DQUOTE else (39 if mode == ESC_SQUOTE else 0)
+    cdef Py_UCS4 quote = 34 if (mode == ESC_DQUOTE or mode == ESC_SAFE) else (39 if mode == ESC_SQUOTE else 0)
     cdef const unsigned char* table = stario_escape_extra[mode]
     cdef const Py_UCS2* src2
     cdef const Py_UCS4* src4
@@ -515,7 +517,7 @@ cdef object _escape_wide(object s, int mode):
     dst = PyUnicode_DATA(out)
     for i in range(n):
         c = PyUnicode_READ(kind, src, i)
-        if c == 38:
+        if c == 38 and mode != ESC_SAFE:
             PyUnicode_WRITE(kind, dst, w, 38); PyUnicode_WRITE(kind, dst, w + 1, 97)
             PyUnicode_WRITE(kind, dst, w + 2, 109); PyUnicode_WRITE(kind, dst, w + 3, 112)
             PyUnicode_WRITE(kind, dst, w + 4, 59)
@@ -596,6 +598,9 @@ def check_raw_text(str text not None, str tag not None):
 
 
 cdef int _check_raw_text(object text, object tag) except -1:
+    # Most code has no "</" and no "<!--": two C scans, no copy.
+    if "</" not in text and "<!--" not in text:
+        return 0
     cdef object lowered = text.lower()
     cdef object name = tag.lower()  # Tag("SCRIPT", raw_text=True) ends at "</script" too
     cdef bint script = name == "script"
@@ -895,8 +900,22 @@ cdef object _attrs_value_fragment(object key, Attrs value):
     """
     cdef str rendered = value.rendered
     cdef list parsed
-    if not PyUnicode_GET_LENGTH(rendered):
+    cdef Py_ssize_t n = PyUnicode_GET_LENGTH(rendered)
+    cdef Py_ssize_t k = PyUnicode_GET_LENGTH(key)
+    if not n:
         return None
+    # The shape classes() and styles() write: ' key="..."' with no other
+    # quote. A few C checks; anything else goes through the full parse.
+    if (
+        n >= k + 4
+        and PyUnicode_READ_CHAR(rendered, 0) == 32
+        and PyUnicode_READ_CHAR(rendered, k + 1) == 61  # =
+        and PyUnicode_READ_CHAR(rendered, k + 2) == 34  # "
+        and PyUnicode_READ_CHAR(rendered, n - 1) == 34
+        and rendered.startswith(key, 1)
+        and rendered.find('"', k + 3) == n - 1
+    ):
+        return rendered
     parsed = _parse_attrs(rendered)
     if len(parsed) == 1 and parsed[0][0] == key:
         return rendered
@@ -920,24 +939,56 @@ cdef object _safe_attr_text(object s):
     attribute: ``@baked`` output (a ``SafeString``) holds quotes as text.
     ``Attrs`` stays the way to write raw attribute bytes.
     """
-    if '"' in s or "<" in s or ">" in s:
-        return s.replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
-    return s
+    if PyUnicode_KIND(s) == PyUnicode_1BYTE_KIND:
+        return _escape_1byte(s, ESC_SAFE)
+    return _escape_wide(s, ESC_SAFE)
+
+
+cdef bint _is_url_key(object key):
+    """``key`` is ``href``, ``src``, ``action``, ``formaction`` or
+    ``xlink:href``, in any ASCII case. C compares only: this runs for every
+    ``str`` attribute value."""
+    cdef Py_ssize_t n = PyUnicode_GET_LENGTH(key)
+    cdef int kind
+    cdef const void* text
+    cdef const char* want
+    cdef Py_ssize_t i
+    cdef unsigned int c
+    if n == 4:
+        want = b"href"
+    elif n == 3:
+        want = b"src"
+    elif n == 6:
+        want = b"action"
+    elif n == 10:
+        c = <unsigned int>PyUnicode_READ_CHAR(key, 0) | 0x20
+        if c == 102:  # f
+            want = b"formaction"
+        elif c == 120:  # x
+            want = b"xlink:href"
+        else:
+            return False
+    else:
+        return False
+    kind = PyUnicode_KIND(key)
+    text = PyUnicode_DATA(key)
+    for i in range(n):
+        c = <unsigned int>PyUnicode_READ(kind, text, i)
+        if 65 <= c <= 90:
+            c += 32
+        if c != <unsigned char>want[i]:
+            return False
+    return True
 
 
 cdef inline int _check_url_attr(object key, object value) except -1:
     """Raise for a ``javascript:`` URL in ``href`` / ``src`` / ``action`` /
     ``formaction`` / ``xlink:href``.
 
-    Cheap for the common case: a key of another length or first letter
-    returns at once, and so does a value without ``:``.
+    Cheap for the common case: another key returns after a few C compares,
+    and a URL without ``:`` returns at once.
     """
-    cdef Py_ssize_t n = PyUnicode_GET_LENGTH(key)
-    cdef unsigned int c
-    if n != 4 and n != 3 and n != 6 and n != 10:
-        return 0
-    c = <unsigned int>PyUnicode_READ_CHAR(key, 0) | 0x20
-    if c != 104 and c != 115 and c != 97 and c != 102 and c != 120:  # h s a f x
+    if not _is_url_key(key):
         return 0
     if ":" not in value:
         return 0
@@ -945,21 +996,12 @@ cdef inline int _check_url_attr(object key, object value) except -1:
 
 
 cdef int _check_url_scheme(object key, object value) except -1:
+    """``value`` is the value of a URL key (see ``_is_url_key``)."""
     cdef int kind
     cdef const void* text
     cdef Py_ssize_t i = 0, n, m = 0
     cdef unsigned int c
     cdef char scheme[11]
-    if not (
-        key == "href" or key == "src" or key == "action"
-        or key == "formaction" or key == "xlink:href"
-    ):
-        name = key.lower()
-        if not (
-            name == "href" or name == "src" or name == "action"
-            or name == "formaction" or name == "xlink:href"
-        ):
-            return 0
     # Read the scheme as the URL parser does: controls and spaces in front
     # are dropped, and tabs and newlines anywhere ("java\tscript:").
     kind = PyUnicode_KIND(value)
@@ -2177,10 +2219,11 @@ cdef bint _css_breakout(object s, bint colon):
     return False
 
 
-# ``" ' ( ) / ; [ \\ ] { }``: the only characters _css_value_problem acts on.
+# ``" ' ( ) / ; [ \\ ] { }`` and LF, FF, CR: the only characters
+# _css_value_problem acts on.
 cdef unsigned char _CSS_SPECIAL[128]
 memset(_CSS_SPECIAL, 0, 128)
-for _c in (34, 39, 40, 41, 47, 59, 91, 92, 93, 123, 125):
+for _c in (10, 12, 13, 34, 39, 40, 41, 47, 59, 91, 92, 93, 123, 125):
     _CSS_SPECIAL[_c] = 1
 
 
@@ -2207,6 +2250,8 @@ cdef int _css_value_problem(object s):
         if quote:
             if c == quote:
                 quote = 0
+            elif c == 10 or c == 12 or c == 13:
+                return 8  # CSS ends the string at a line break
         elif c == 34 or c == 39:  # " '
             quote = c
         elif c == 40:  # (
@@ -2249,6 +2294,7 @@ def css_value_problem(value):
         "has an unclosed '['",
         "has a ']' with no '['",
         "has '/*', which starts a comment",
+        "has a line break inside a quote, which ends the string there",
     )[code]
 
 

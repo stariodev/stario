@@ -26,10 +26,11 @@ expression compiler for the Datastar ones).
   href="data:...">`, since browsers block `data:` pages). The check reads the
   scheme as a browser does (case, leading spaces and controls, tabs and
   newlines inside it). `SafeString("javascript:void(0)")` opts out. Cost:
-  about 7 ns for a relative URL and 23 ns for an absolute one, on these
-  attributes only.
+  about 13 ns for a relative URL and 21 ns for an absolute one, on these
+  attributes only; other keys are matched in C and pay nothing.
 - **A `styles()` value cannot swallow the next declaration.** An
-  unclosed quote, `(`, `[` or `/*` now raises, as `; { } \` did:
+  unclosed quote, `(`, `[` or `/*`, or a line break inside a quote, now
+  raises, as `; { } \` did:
   `styles({"background": "url(https://x/a", "display": "none"})` wrote
   `background:url(https://x/a;display:none;`, and the browser read
   `display:none` as part of the URL.
@@ -81,7 +82,8 @@ expression compiler for the Datastar ones).
   `on_signal_patch` take several statements too.
 - **`literal(value)`** writes a Python value as a JavaScript literal:
   `f"$tags = $tags.filter(t => t !== {literal(tag)})"`. Text, numbers,
-  booleans, `None`, and mappings and lists of them. It is `string_literal`
+  booleans, `None`, and mappings and lists of them (`StrEnum` and
+  `IntEnum` members as their values). It is `string_literal`
   for any JSON-shaped value; `string_literal` stays. From `stario` and
   `stario.datastar`.
 - **`is_datastar(req)`**: true when Datastar sent the request (the
@@ -95,13 +97,19 @@ expression compiler for the Datastar ones).
   own modifier names. One at most; two raise.
 - **`at.get(..., retry_interval="2s", retry_max_wait="30s")`**: durations,
   sent to Datastar in milliseconds.
-- **The same helper call returns the same fragment.** `data.on`,
-  `data.init`, `data.bind`, `data.attr` and the `at.*` fetch actions keep
-  what they built in a bounded cache, like `classes()`; on free-threaded
-  builds the cached fragments are immortal. A 100-row table with three
-  Datastar attributes per row renders in 175 µs instead of 396 µs (5.8.3),
-  best of five interleaved runs; `data.on("input", at.get(url),
-  debounce="300ms")` takes 0.55 µs instead of 1.85 µs.
+- **The same helper call returns the same fragment.** `data.on` with
+  modifiers, `data.bind`, `data.attr` and the `at.*` fetch actions keep
+  what they built in a bounded cache (4096 entries each), like
+  `classes()`; on free-threaded builds the cached fragments are immortal.
+  A full cache is no longer read, so a call then costs what it costs to
+  build. `data.on` without modifiers and `data.init` are not cached:
+  building them costs no more than a lookup. A 100-row table with three
+  Datastar attributes per row: 240 µs instead of 335 µs (5.8.3) while the
+  caches have room, 332 µs instead of 344 µs once they are full (best of
+  seven interleaved runs). `data.on("input", at.get(url),
+  debounce="300ms")` takes 0.56 µs instead of 1.82 µs. `data.on` and
+  `data.init` without modifiers cost about 40–80 ns more than in 5.8.3:
+  a function that takes `*statements` is slower to call.
 - **`stario.json.dumps_script(value)`**: JSON that is safe inside a
   `<script>`, with `<`, `>`, `&`, U+2028 and U+2029 escaped. Still valid
   JSON and JavaScript. `h.Script(dumps(data))` raises when the data holds
@@ -147,7 +155,8 @@ expression compiler for the Datastar ones).
 - **`exclude=` on a backend action keeps local signals out.** Datastar
   applies its `(^|\.)_` default only when `exclude` is absent, so any
   `exclude=` used to send `_` signals to the server. Stario now adds the
-  default to your pattern.
+  default to your pattern. A slash-delimited pattern (`"/^secret/"`) keeps
+  working: Stario strips the slashes, as Datastar does.
 - **Datastar 1.0.5:** `ModuleScript()` loads `@v1.0.5` (bug fixes: `retry:
   'never'` stops, `data-bind` on number and date inputs).
 

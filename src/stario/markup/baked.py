@@ -309,6 +309,14 @@ def _splice_raw(tag: str, parts: tuple[Any, ...]) -> str:
     together the way `"</script>"` alone does. A `SafeString` value goes
     out unchecked and an element raises, as in a direct call.
     """
+    for part in parts:
+        if type(part) is not str:
+            break
+    else:
+        # The common call: every part is text, so it is one run.
+        text = "".join(parts)
+        check_raw_text(text, tag)
+        return text
     pieces: list[str] = []
     run: list[str] = []
     for part in parts:

@@ -380,7 +380,14 @@ def parse_filter_value(value: FilterValue) -> str:
     """
     if isinstance(value, str):
         return value
-    return "^(?:" + "|".join(re.escape(str(item)) for item in value) + ")(?:\\.|$)"
+    return "^(?:" + "|".join(_path_regex(str(item)) for item in value) + ")(?:\\.|$)"
+
+
+def _path_regex(path: str) -> str:
+    """A signal path as a regex that matches only itself."""
+    if path.replace(".", "_").isidentifier():
+        return path.replace(".", "\\.")  # the only regex character in it
+    return re.escape(path)
 
 
 def filter_js(
@@ -407,7 +414,14 @@ def filter_js(
     if exclude is not None:
         pattern = parse_filter_value(exclude)
         if keep_local:
-            pattern = LOCAL_SIGNALS + "|" + pattern
+            # Datastar strips one leading and one trailing "/" from a filter
+            # ("/^secret/" works), but only at the ends of the whole string:
+            # strip them here, before the default goes in front.
+            if pattern.startswith("/"):
+                pattern = pattern[1:]
+            if pattern.endswith("/"):
+                pattern = pattern[:-1]
+            pattern = LOCAL_SIGNALS + "|(?:" + pattern + ")"
         exclude_js = "'exclude':" + string_literal(pattern)
     if include is None:
         return "{" + exclude_js + "}"
@@ -450,9 +464,15 @@ def literal(value: SignalValue) -> str:
                 help_text="Pass a finite number, or None for null.",
             )
         return repr(value)
+    if isinstance(value, str):  # a subclass: StrEnum
+        return string_literal(str.__str__(value))
+    if isinstance(value, int) and not isinstance(value, bool):  # IntEnum
+        return str(int(value))
     if isinstance(value, Mapping):
         parts: list[str] = []
         for key, item in cast(Mapping[object, SignalValue], value).items():
+            if isinstance(key, str) and type(key) is not str:
+                key = str.__str__(key)
             if type(key) is not str:
                 raise StarioError(
                     f"literal() object keys must be str, not {type(key).__name__}",
@@ -677,7 +697,7 @@ def key_case(name: str) -> tuple[str, Case | None]:
     # → ("d-o-m-content-loaded", "pascal")
     ```
     """
-    if not any(c.isupper() for c in name):
+    if name == name.lower() or not any(c.isupper() for c in name):
         return name, None
     kebabed = re.sub(r"[A-Z]", lambda m: "-" + m[0].lower(), name)
     if name[0].isupper():

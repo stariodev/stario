@@ -1273,7 +1273,43 @@ class TestSignalFilters:
 
     def test_exclude_regex_string_keeps_local_signals_out(self):
         action = at.post("/x", exclude="tmp")
-        assert "'exclude':'(^|\\x5c.)_|tmp'" in action
+        assert "'exclude':'(^|\\x5c.)_|(?:tmp)'" in action
+
+    def test_exclude_slash_delimited_regex_still_excludes(self):
+        # Datastar strips one "/" at each end of the whole string, so the
+        # slashes of "/^secret/" have to go before the default goes in front.
+        import re
+
+        action = at.post("/x", exclude="/^secret/")
+        assert "'exclude':'(^|\\x5c.)_|(?:^secret)'" in action
+        pattern = re.compile(self._regex(action, "exclude"))
+        assert pattern.search("secret")
+        assert pattern.search("_draft")
+        assert not pattern.search("title")
+
+
+class TestFetchCacheKeys:
+    def test_true_and_1_do_not_share_an_entry(self):
+        assert at.post("/ck", payload={"done": True}).endswith("{'done':true}})")
+        assert at.post("/ck", payload={"done": 1}).endswith("{'done':1}})")
+        assert at.post("/ck", payload={"n": 0}).endswith("{'n':0}})")
+        assert at.post("/ck", payload={"n": False}).endswith("{'n':false}})")
+        assert at.post("/ck", payload={"t": (1,)}) != at.post(
+            "/ck", payload={"t": (True,)}
+        )
+
+    def test_a_cached_int_does_not_let_a_bool_through(self):
+        at.get("/ck2", retry_max_count=1)
+        with pytest.raises(StarioError, match="must be an int"):
+            at.get("/ck2", retry_max_count=True)
+
+    def test_a_generator_is_built_not_cached(self):
+        from stario.datastar.actions import _FETCH
+
+        before = len(_FETCH)
+        for _ in range(5):
+            assert "include" in at.post("/gen", include=(n for n in ["a"]))
+        assert len(_FETCH) == before
 
     def test_include_only_leaves_datastars_default_exclude(self):
         assert "exclude" not in at.post("/x", include=["title"])
@@ -1328,12 +1364,27 @@ class TestDeprecations:
 
 class TestHelperCache:
     def test_same_arguments_return_the_same_fragment(self):
-        assert data.on("click", "cached()") is data.on("click", "cached()")
+        # A data.on with no modifiers is built, not cached (no cheaper).
+        assert data.on("click", "cached()") == data.on("click", "cached()")
         assert data.on("input", "cached()", debounce="300ms") is data.on(
             "input", "cached()", debounce="300ms"
         )
         assert at.post("/cached") is at.post("/cached")
         assert at.post("/cached", include=["a"]) is at.post("/cached", include=["a"])
+
+    def test_a_full_cache_builds_without_looking(self):
+        from stario.datastar import actions
+
+        full = dict.fromkeys(range(actions.FRAGMENT_CACHE_MAX))
+        saved = actions._FETCH
+        actions._FETCH = full
+        try:
+            assert (
+                at.post("/full", retry="always") == "@post('/full', {retry: 'always'})"
+            )
+            assert len(full) == actions.FRAGMENT_CACHE_MAX
+        finally:
+            actions._FETCH = saved
 
     def test_prefix_is_part_of_the_key(self):
         star = DatastarAttributes("data-star-")
