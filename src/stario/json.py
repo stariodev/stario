@@ -9,11 +9,8 @@ a library's own functions plug in directly, for example
 functions must be safe to call from any thread.
 """
 
-import builtins
 import json as json_module
 import sysconfig
-import types
-import typing
 import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, cast, overload
@@ -255,79 +252,9 @@ def dumps_bytes(value: object, /, *, default: JsonDefault | None = None) -> byte
     return _stdlib_default_encode(value, default).encode()
 
 
-# JSON's own value types: the outer type `loads(..., type=)` checks.
-_JSON_TYPES: frozenset[builtins.type] = frozenset(
-    {dict, list, str, int, float, bool, type(None)}
-)
-
-
-def _outer_types(tp: Any) -> tuple[builtins.type, ...] | None:
-    """The JSON value types `tp` allows at the top, or None when not checkable.
-
-    `list[str]` gives `(list,)`, `dict[str, int] | None` gives
-    `(dict, NoneType)`, `float` gives `(float, int)` (JSON has one number
-    type). A TypedDict gives `(dict,)`. `Any`, a type variable or a class
-    that is not a JSON type gives None: the value is returned unchecked.
-    """
-    origin = typing.get_origin(tp)
-    if origin is typing.Union or origin is types.UnionType:
-        found: list[builtins.type] = []
-        for arg in typing.get_args(tp):
-            outer = _outer_types(arg)
-            if outer is None:
-                return None
-            found += outer
-        return tuple(found)
-    if origin is typing.Literal:
-        return tuple({builtins.type(v) for v in typing.get_args(tp)})
-    if origin is not None:
-        tp = origin
-    if tp is None:
-        return (builtins.type(None),)
-    if typing.is_typeddict(tp):
-        return (dict,)
-    if not isinstance(tp, builtins.type) or tp not in _JSON_TYPES:
-        return None
-    if tp is float:
-        return (float, int)
-    return (tp,)
-
-
-@overload
-def loads(data: str | bytes | bytearray, /) -> object: ...
-
-
-@overload
-def loads[T](data: str | bytes | bytearray, /, *, type: builtins.type[T]) -> T: ...
-
-
-def loads(data: str | bytes | bytearray, /, *, type: Any = None) -> Any:
-    """Parse JSON text, bytes, or a byte array into Python values.
-
-    Without `type=` the result is `object`; narrow it before use. With
-    `type=` the result is typed for the checker, and the outer JSON type is
-    checked at run time:
-
-    ```python
-    tags = loads(row.tags_json, type=list[str])     # list[str]
-    user = loads(body, type=dict[str, JsonValue])   # dict[str, JsonValue]
-    ```
-
-    A value whose outer type does not match raises `ValueError`, the same
-    error as invalid JSON. Only the outer type is checked: `list[str]`
-    accepts `[1, 2]`. Validate untrusted nested data in application code.
-    A `type=` that is not a JSON type (a dataclass, `Any`) is not checked.
-    """
-    value = _decode(data)
-    if type is None:
-        return value
-    outer = _outer_types(type)
-    if outer is not None and builtins.type(value) not in outer:
-        expected = " | ".join(t.__name__ for t in outer)
-        raise ValueError(
-            f"JSON value is {builtins.type(value).__name__}, expected {expected}"
-        )
-    return value
+def loads(data: str | bytes | bytearray, /) -> object:
+    """Parse JSON text, bytes, or a byte array into Python values."""
+    return _decode(data)
 
 
 __all__ = [
