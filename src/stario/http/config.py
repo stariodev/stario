@@ -235,7 +235,7 @@ class ServerConfig:
         if unix_socket is None and not host.strip():
             raise StarioError(
                 "host must be non-empty for TCP listen",
-                help_text="Set STARIO_HOST or pass a non-empty host to ServerConfig.",
+                help_text="Set STARIO_HOST (or HOST) or pass a non-empty host to ServerConfig.",
             )
         if threads < 1:
             raise StarioError(
@@ -296,9 +296,11 @@ class ServerConfig:
     def from_env(cls) -> "ServerConfig":
         """Read `STARIO_*` listen, limit, compression, and shutdown settings.
 
-        The port is `STARIO_PORT`, else `PORT` (the variable most hosting
-        platforms set), else 8000. The host stays `STARIO_HOST` (default
-        `127.0.0.1`) whichever port variable is used.
+        The port is `STARIO_PORT`, else `PORT`, else 8000. The host is
+        `STARIO_HOST`, else `HOST`, else `127.0.0.1`. Each is read on its own:
+        setting a port never changes the host, so a platform that sets only
+        `PORT` also needs `HOST=0.0.0.0` (or `STARIO_HOST`). A blank value
+        counts as unset.
         """
         return server_config_from_env()
 
@@ -310,15 +312,20 @@ def _port_from_env() -> int:
     return env_int("PORT", DEFAULT_PORT)
 
 
+def _host_from_env() -> str:
+    """`STARIO_HOST`, then `HOST`, then `DEFAULT_HOST`. Never derived from the port."""
+    return env_str("STARIO_HOST", env_str("HOST", DEFAULT_HOST))
+
+
 def server_config_from_env() -> ServerConfig:
     """Read `STARIO_*` listen, limit, compression, and shutdown settings.
 
-    The port falls back to `PORT` when `STARIO_PORT` is unset; see
+    The port falls back to `PORT` and the host to `HOST`; see
     `ServerConfig.from_env`.
     """
     return _config_from_env(
         lambda: ServerConfig(
-            host=env_str("STARIO_HOST", DEFAULT_HOST),
+            host=_host_from_env(),
             port=_port_from_env(),
             unix_socket=env_optional_str("STARIO_UNIX_SOCKET"),
             unix_socket_mode=env_octal_mode(

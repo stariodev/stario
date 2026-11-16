@@ -16,8 +16,11 @@ surface; the behaviour under Changed says what an existing app sees.
   `SafeString`, `baked`, `render` from the root too. They are the same
   objects as in `stario.datastar` and `stario.markup`, which still work.
   `from stario.http import ServerConfig` works as well.
-- **`serve()` falls back to `$PORT`.** The port is `STARIO_PORT`, else
-  `PORT`, else 8000. The host stays `STARIO_HOST` (default `127.0.0.1`).
+- **`serve()` falls back to `PORT` and `HOST`.** The port is `STARIO_PORT`,
+  else `PORT`, else 8000. The host is `STARIO_HOST`, else `HOST`, else
+  `127.0.0.1`. The two are read on their own: setting a port never changes
+  the host, so a platform that sets only `PORT` still gets `127.0.0.1`.
+  `HOSTNAME` is not read (Docker sets it to the container ID).
 - **Attributes may come after children:** `h.I("🗑", {"class": "icon"},
   data.on("click", ...))` renders `<i class="icon" data-on:click=...>🗑</i>`.
   Before, it raised `StarioError` when the call ran, often inside a live

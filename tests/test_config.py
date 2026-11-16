@@ -82,6 +82,8 @@ def test_port_comes_from_stario_port(monkeypatch) -> None:
 
 def test_port_falls_back_to_port(monkeypatch) -> None:
     monkeypatch.delenv("STARIO_PORT", raising=False)
+    monkeypatch.delenv("STARIO_HOST", raising=False)
+    monkeypatch.delenv("HOST", raising=False)
     monkeypatch.setenv("PORT", "9555")
     config = ServerConfig.from_env()
     assert config.port == 9555
@@ -105,3 +107,44 @@ def test_bad_port_names_the_variable(monkeypatch) -> None:
     monkeypatch.setenv("PORT", "web")
     with pytest.raises(StarioError, match="PORT must be an integer"):
         ServerConfig.from_env()
+
+
+def test_host_comes_from_stario_host(monkeypatch) -> None:
+    monkeypatch.setenv("STARIO_HOST", "10.0.0.5")
+    monkeypatch.setenv("HOST", "0.0.0.0")
+    assert ServerConfig.from_env().host == "10.0.0.5"
+
+
+def test_host_falls_back_to_host(monkeypatch) -> None:
+    monkeypatch.delenv("STARIO_HOST", raising=False)
+    monkeypatch.setenv("HOST", "0.0.0.0")
+    assert ServerConfig.from_env().host == "0.0.0.0"
+
+
+def test_blank_stario_host_falls_back_to_host(monkeypatch) -> None:
+    monkeypatch.setenv("STARIO_HOST", " ")
+    monkeypatch.setenv("HOST", "0.0.0.0")
+    assert ServerConfig.from_env().host == "0.0.0.0"
+
+
+def test_host_defaults_to_loopback(monkeypatch) -> None:
+    monkeypatch.delenv("STARIO_HOST", raising=False)
+    monkeypatch.delenv("HOST", raising=False)
+    assert ServerConfig.from_env().host == "127.0.0.1"
+
+
+def test_port_alone_never_changes_the_host(monkeypatch) -> None:
+    # A platform sets only PORT: the host stays loopback; nothing is implied.
+    for name in ("STARIO_HOST", "HOST", "STARIO_PORT"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("PORT", "10000")
+    config = ServerConfig.from_env()
+    assert (config.host, config.port) == ("127.0.0.1", 10000)
+
+
+def test_hostname_is_not_read(monkeypatch) -> None:
+    # Docker sets HOSTNAME to the container ID; it is not a bind address.
+    monkeypatch.delenv("STARIO_HOST", raising=False)
+    monkeypatch.delenv("HOST", raising=False)
+    monkeypatch.setenv("HOSTNAME", "3f2a9c1b7d4e")
+    assert ServerConfig.from_env().host == "127.0.0.1"

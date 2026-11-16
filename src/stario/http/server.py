@@ -640,7 +640,7 @@ class Server:
         if not infos:
             raise StarioError(
                 f"could not resolve listen address {self.config.host!r}",
-                help_text="Set STARIO_HOST to a bindable address.",
+                help_text="Set STARIO_HOST (or HOST) to a bindable address.",
             )
         family, socktype, proto, _canon, sockaddr = infos[0]
         sock = socket.socket(family, socktype, proto)
