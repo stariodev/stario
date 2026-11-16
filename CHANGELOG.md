@@ -8,7 +8,7 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 Changes that remove rules an app guide had to state, because coding agents
 read the rule and still got it wrong. Everything under Added is new
-surface; the two behaviours under Changed say what an existing app sees.
+surface; the behaviour under Changed says what an existing app sees.
 
 ### Added
 
@@ -26,9 +26,6 @@ surface; the two behaviours under Changed say what an existing app sees.
 - **`classes()` and `styles()` as a mapping value:** `{"id": "c", "class":
   classes("card", {"on": active})}`. An `Attrs` value must render the one
   attribute it is the value of; anything else raises with the fix.
-- **`stario.json.loads(s, type=list[str])`** returns `list[str]` to the type
-  checker and checks the outer JSON type at run time (`ValueError`, like
-  invalid JSON). Without `type=` it still returns `object`.
 - **`data.signals` and `SSE.patch_signals` take any Mapping or Sequence
   value.** `{"tags": tags}` with a `list[str]` variable passes the type
   checker; a tuple or a mapping object is sent as a JSON array or object.
@@ -49,11 +46,6 @@ surface; the two behaviours under Changed say what an existing app sees.
   raises** with the fix (`"300ms"` or `0.3`; `"300s"` when seconds are
   meant). An int is whole seconds, so `debounce=300` waited five minutes.
   Ints below 10 and `on_interval(duration=)` are unchanged.
-- **`w.redirect()` and `RedirectException` answer a Datastar request with
-  an SSE `navigate`** (status 200) instead of a 3xx. Datastar's fetch
-  followed the 3xx itself and patched the page with the answer, so the
-  address bar never changed. A plain request still gets the 3xx; to send a
-  3xx to a Datastar request, set `location` and call `w.empty(303)`.
 
 ## 5.8.3 - 2026-11-11
 
