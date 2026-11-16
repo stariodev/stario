@@ -1,7 +1,13 @@
 """Datastar Server-Sent Events bound to one response writer.
 
-Create one `SSE` per response: `sse = SSE(w)`. The stream opens when you call
-`sse.open()` or when the first event is written.
+`SSE(w)` holds nothing but `w`, so build it wherever you need it:
+`SSE(w).patch_signals(...)` in one branch and `sse = SSE(w)` in another both
+work. The stream opens when the first event is written. A long-lived stream
+calls `sse.open()` first, so the headers go out before the first wait.
+
+A Datastar request is answered with SSE events (or `w.empty()`, a 204).
+Datastar ignores every other status, so a 404 or a redirect never reaches
+the user: send `patch_elements`, `patch_signals` or `navigate` instead.
 """
 
 from collections.abc import Mapping
@@ -15,7 +21,14 @@ from stario.json import dumps as json_dumps
 from stario.json import dumps_bytes as json_dumps_bytes
 from stario.markup.render import render_bytes
 
-from .format import SignalValue, encode_signals, expand_signal_paths, require_mapping
+from .format import (
+    Duration,
+    SignalValue,
+    duration_ms,
+    encode_signals,
+    expand_signal_paths,
+    require_mapping,
+)
 
 type JsonObject = Mapping[str, JsonValue]
 type PatchMode = Literal[
@@ -37,7 +50,7 @@ _PATCH_MODE_HELP = "Use one of: " + ", ".join(_PATCH_MODE_NAMES) + "."
 _NAMESPACES = ("svg", "mathml")
 _EVENT_PATCH_ELEMENTS = b"event: datastar-patch-elements"
 _EVENT_PATCH_SIGNALS = b"event: datastar-patch-signals"
-# Datastar SDK default; `retry=1000` means "do not emit the field".
+# Datastar SDK default; `retry="1s"` means "do not emit the field".
 _SSE_RETRY_DEFAULT = 1000
 
 
@@ -77,7 +90,7 @@ def _html_bytes(content: Any) -> bytes:
     return render_bytes(content)
 
 
-def _sse_event_meta(event_id: str | None, retry: int | None) -> list[bytes]:
+def _sse_event_meta(event_id: str | None, retry: Duration | None) -> list[bytes]:
     """`id:`/`retry:` fields placed right after the `event:` line."""
     lines: list[bytes] = []
     if event_id is not None:
@@ -88,14 +101,15 @@ def _sse_event_meta(event_id: str | None, retry: int | None) -> list[bytes]:
             )
         lines.append(b"id: " + _sse_field_value("event_id", event_id))
     if retry is not None:
-        if type(retry) is not int or retry <= 0:
+        ms = duration_ms(retry, "retry")
+        if ms <= 0:
             raise StarioError(
-                "Datastar SSE retry must be a positive int",
+                "Datastar SSE retry must be longer than 0",
                 context={"retry": repr(retry)},
-                help_text="Milliseconds for the client to wait before reconnecting.",
+                help_text="The time the client waits before it reconnects, e.g. '3s'.",
             )
-        if retry != _SSE_RETRY_DEFAULT:
-            lines.append(f"retry: {retry}".encode("ascii"))
+        if ms != _SSE_RETRY_DEFAULT:
+            lines.append(f"retry: {ms}".encode("ascii"))
     return lines
 
 
@@ -103,8 +117,9 @@ class SSE:
     """Datastar SSE response bound to one `Writer`.
 
     `open()` sends headers immediately. If you skip it, the first event opens the
-    stream. Event bytes still go through `Writer.write()`, so normal streaming
-    compression policy applies. `patch_signals()` keys pass through to Datastar
+    stream. `retry=` on an event is a duration (`"3s"`): how long the client
+    waits before it reconnects. Event bytes still go through `Writer.write()`,
+    so normal streaming compression policy applies. `patch_signals()` keys pass through to Datastar
     unchanged; names starting with `_` are local signals the browser does not
     send. A dot in a key is a nested path — `{"ui.open": True}` patches
     `$ui.open`.
@@ -131,7 +146,7 @@ class SSE:
         view_transition: bool = False,
         view_transition_selector: str | None = None,
         event_id: str | None = None,
-        retry: int | None = None,
+        retry: Duration | None = None,
     ) -> None:
         """Patch DOM elements with Stario markup, or trusted `bytes` / `str` HTML.
 
@@ -210,7 +225,7 @@ class SSE:
         *,
         only_if_missing: bool = False,
         event_id: str | None = None,
-        retry: int | None = None,
+        retry: Duration | None = None,
     ) -> None:
         """Patch Datastar signals from a JSON-shaped mapping.
 
@@ -246,12 +261,38 @@ class SSE:
         url: str,
         *,
         event_id: str | None = None,
-        retry: int | None = None,
+        retry: Duration | None = None,
     ) -> None:
         """Navigate the browser from an SSE response; not an HTTP redirect."""
         safe_url = json_dumps(normalized_location(url))
         self.execute_script(
             f"setTimeout(() => window.location = {safe_url});",
+            event_id=event_id,
+            retry=retry,
+        )
+
+    def replace_url(
+        self,
+        url: str,
+        *,
+        event_id: str | None = None,
+        retry: Duration | None = None,
+    ) -> None:
+        """Set the address bar to `url` without a reload or a history entry.
+
+        Keep the URL in step with the view a command just sent, for
+        example a filter or a search:
+
+        ```python
+        sse.patch_elements(results(view))
+        sse.replace_url(HOME.href(query=view.query()))
+        ```
+
+        `url` is escaped like `navigate`. The page does not reload.
+        """
+        safe_url = json_dumps(normalized_location(url))
+        self.execute_script(
+            f"history.replaceState(history.state, '', {safe_url});",
             event_id=event_id,
             retry=retry,
         )
@@ -262,7 +303,7 @@ class SSE:
         *,
         auto_remove: bool = True,
         event_id: str | None = None,
-        retry: int | None = None,
+        retry: Duration | None = None,
     ) -> None:
         """Run trusted developer-authored JavaScript by appending a script element.
 
@@ -286,7 +327,7 @@ class SSE:
         selector: str,
         *,
         event_id: str | None = None,
-        retry: int | None = None,
+        retry: Duration | None = None,
     ) -> None:
         """Remove nodes matching `selector`."""
         lines = [

@@ -9,8 +9,8 @@ from stario import App, Context, Route, Span, Writer, h
 
 - **Per-handler:** `App`, `Context`, `Writer`, `Route`, `h`, `classes`
 - **Markup:** `HtmlElement` (annotations), `SafeString`, `baked`, `render`
-- **Datastar:** `at`, `data`, `SSE`, `read_signals` (the same objects as in
-  `stario.datastar`)
+- **Datastar:** `at`, `data`, `SSE`, `read_signals`, `is_datastar`, `literal`
+  (the same objects as in `stario.datastar`)
 - **Control flow:** `RedirectException`, `catch_errors` middleware (`stario.http.middleware`)
 - **Bootstrap / filesystem:** `Assets`, `Files`, `Span`
 - **Process:** `serve` — async HTTP server; wrap with `asyncio.run` or `uvloop.run`; `ServerConfig`
@@ -18,7 +18,7 @@ from stario import App, Context, Route, Span, Writer, h
 - **Types:** `JsonValue`
 
 Other feature areas stay in their modules: `stario.datastar` (`ModuleScript`,
-`format`), `stario.markup` (`svg`, `Attrs`), `stario.cookies`, `stario.forms`,
+`Debounce`, `Throttle`), `stario.markup` (`svg`, `Attrs`), `stario.cookies`, `stario.forms`,
 and `stario.http` (`Router`, `Headers`, `run_app`). Deep imports are always
 allowed: `from stario.datastar import at` and `from stario import at` give the
 same object.
@@ -31,7 +31,7 @@ from importlib.metadata import version as _package_version
 
 __version__ = _package_version("stario")
 
-from stario.datastar import SSE, at, data, read_signals
+from stario.datastar import SSE, at, data, is_datastar, literal, read_signals
 from stario.exceptions import RedirectException
 from stario.filesystem import Assets, Files
 from stario.http.app import App
@@ -70,6 +70,8 @@ __all__ = [
     "classes",
     "data",
     "h",
+    "is_datastar",
+    "literal",
     "read_signals",
     "render",
     "serve",

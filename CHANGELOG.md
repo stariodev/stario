@@ -43,12 +43,87 @@ surface; the behaviour under Changed says what an existing app sees.
   that fails because an outside service is down is skipped
   (`skip_errors=`).
 
+- **`sse.replace_url(url)`** sets the address bar without a reload or a
+  history entry, escaped like `navigate`. Before, apps wrote
+  `execute_script("history.replaceState(...)")` with their own escaping
+  (30 of 77 agent-built apps did).
+- **`data.on`, `data.init` and `data.effect` take several statements:**
+  `data.on("submit", at.post(SAVE.href()), "$_edit = false", prevent=True)`
+  renders `@post('/save'); $_edit = false`. Before, the statements were
+  joined with an f-string or `+ "; "`. `on_interval`, `on_intersect` and
+  `on_signal_patch` take several statements too.
+- **`literal(value)`** writes a Python value as a JavaScript literal:
+  `f"$tags = $tags.filter(t => t !== {literal(tag)})"`. Text, numbers,
+  booleans, `None`, and mappings and lists of them. It is `string_literal`
+  for any JSON-shaped value; `string_literal` stays. From `stario` and
+  `stario.datastar`.
+- **`is_datastar(req)`**: true when Datastar sent the request (the
+  `Datastar-Request` header). Branch on it where page loads and Datastar
+  requests reach one handler. From `stario` and `stario.datastar`.
+- **`Debounce("300ms", leading=True)` and `Throttle("1s", trailing=True)`**
+  set the edge flags with booleans. The defaults are Datastar's own
+  (debounce: trailing edge only; throttle: leading edge only), and both
+  edges off raises. They replace the `("300ms", "leading")` tuples.
+- **`data.on(..., window=True | document=True | outside=True)`**, Datastar's
+  own modifier names. One at most; two raise.
+- **`data.pro` and `at.pro`** hold the Datastar Pro helpers (`persist`,
+  `query_string`, `replace_url`, `clipboard`, …). They do nothing with the
+  free bundle, so they are now apart from the free ones.
+- **`at.get(..., retry_interval="2s", retry_max_wait="30s")`**: durations,
+  sent to Datastar in milliseconds.
+- **The same helper call returns the same fragment.** `data.on`,
+  `data.init`, `data.bind`, `data.attr` and the `at.*` fetch actions keep
+  what they built in a bounded cache, like `classes()`; on free-threaded
+  builds the cached fragments are immortal. A 100-row table with three
+  Datastar attributes per row renders in 175 µs instead of 396 µs (5.8.3),
+  best of five interleaved runs; `data.on("input", at.get(url),
+  debounce="300ms")` takes 0.55 µs instead of 1.85 µs.
+- **`TestClient` raises `DatastarReplyError`** when a request that sends
+  `datastar-request` gets a reply other than 200 or 204. Datastar ignores
+  such a reply, so the user would see nothing (a `w.text("not found",
+  404)` in a Datastar handler). The error names the fix: send the outcome
+  as events, `navigate` instead of a redirect, `w.empty()` when nothing
+  changes. To test the plain HTTP answer, send the request without the
+  header. `check_pages` reports such a stream as before.
+
 ### Changed
 
-- **A bare int of 10 or more in `debounce=`, `throttle=` or `delay=`
-  raises** with the fix (`"300ms"` or `0.3`; `"300s"` when seconds are
-  meant). An int is whole seconds, so `debounce=300` waited five minutes.
-  Ints below 10 and `on_interval(duration=)` are unchanged.
+- **A duration is a string with a unit, everywhere, and a number raises.**
+  `delay=`, `debounce=`, `throttle=`, `on_interval(duration=)`, the fetch
+  retry times and SSE `retry=` take `"300ms"` or `"2s"`. A bare number is
+  milliseconds to Datastar and seconds to Python, so `debounce=300` waited
+  five minutes and `on_interval(duration=500)` more than eight. The error
+  names both spellings (`'300ms'`, `'300s'`); `"1.5s"` raises with
+  `'1500ms'` (a dot splits Datastar modifiers). SSE `retry=3000` (ms) is
+  now `retry="3s"`.
+- **`w.redirect()` and `RedirectException` raise on a Datastar request.**
+  Datastar's fetch follows the 3xx itself, so the address bar never
+  changed and the next page was morphed into this one. The `StarioError`
+  names `SSE(w).navigate(url)` and `is_datastar(c.req)`. Stario never
+  turns one into the other.
+- **`include=` / `exclude=` names are exact signal paths.** `["id"]`
+  matches `id` and `id.x`, not `video` or `form.idx`. A `str` is still a
+  regex.
+- **`exclude=` on a backend action keeps local signals out.** Datastar
+  applies its `(^|\.)_` default only when `exclude` is absent, so any
+  `exclude=` used to send `_` signals to the server. Stario now adds the
+  default to your pattern.
+- **Datastar 1.0.5:** `ModuleScript()` loads `@v1.0.5` (bug fixes: `retry:
+  'never'` stops, `data-bind` on number and date inputs).
+
+### Deprecated
+
+Each warns with its replacement and goes in 6.0.
+
+- `at.get(url, queries)`: build the URL with `ROUTE.href(query={...})`. A
+  `$signal` in `queries` was sent as the literal text.
+- `retry_interval_ms=` / `retry_max_wait_ms=`: `retry_interval="1s"`.
+- `data.signal(name, expression)`: its value is JavaScript, unlike
+  `data.signals`, so `data.signal("name", "Bob")` read a variable `Bob`.
+  Write `data.signals({...})`, or `data.computed` for an expression.
+- `debounce=` / `throttle=` tuples: `Debounce(...)` / `Throttle(...)`.
+- `data.on(target=...)`: `window=True`, `document=True`, `outside=True`.
+- The Pro helpers on `data` and `at`: `data.pro.*`, `at.pro.*`.
 
 ## 5.8.3 - 2026-11-11
 

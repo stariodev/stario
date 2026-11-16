@@ -48,9 +48,9 @@ INJECT = "x onfocus=alert(1) autofocus"
         lambda: data.on("click", "go()", target=INJECT),  # type: ignore[arg-type]
         lambda: data.on("click", "go()", case=INJECT),  # type: ignore[arg-type]
         lambda: data.on_intersect("go()", threshold=INJECT),
-        lambda: data.scroll_into_view(behavior=INJECT),  # type: ignore[arg-type]
-        lambda: data.scroll_into_view(horizontal=INJECT),  # type: ignore[arg-type]
-        lambda: data.scroll_into_view(vertical=INJECT),  # type: ignore[arg-type]
+        lambda: data.pro.scroll_into_view(behavior=INJECT),  # type: ignore[arg-type]
+        lambda: data.pro.scroll_into_view(horizontal=INJECT),  # type: ignore[arg-type]
+        lambda: data.pro.scroll_into_view(vertical=INJECT),  # type: ignore[arg-type]
         lambda: DatastarAttributes("data- onfocus=alert(1) x-").text("$x"),
     ],
 )
@@ -60,7 +60,7 @@ def test_datastar_attribute_name_parts_cannot_inject_attributes(build):
 
 
 def test_datastar_attribute_name_parts_still_accept_documented_values():
-    assert _attr_names(data.on("click", "go()", target="window")) == [
+    assert _attr_names(data.on("click", "go()", window=True)) == [
         "data-on:click__window"
     ]
     assert _attr_names(data.on("myEvent", "go()", case="snake")) == [
@@ -73,7 +73,7 @@ def test_datastar_attribute_name_parts_still_accept_documented_values():
         "data-on-intersect__threshold.25"
     ]
     assert _attr_names(
-        data.scroll_into_view(behavior="smooth", horizontal="start", vertical="end")
+        data.pro.scroll_into_view(behavior="smooth", horizontal="start", vertical="end")
     ) == ["data-scroll-into-view__smooth__hstart__vend"]
     assert _attr_names(DatastarAttributes("data-star").text("$x")) == ["data-star-text"]
 
@@ -85,7 +85,7 @@ def test_datastar_attribute_name_parts_still_accept_documented_values():
 
 @pytest.mark.parametrize(
     "option",
-    ["retry_interval_ms", "retry_max_wait_ms", "retry_max_count", "retry_scaler"],
+    ["retry_interval", "retry_max_wait", "retry_max_count", "retry_scaler"],
 )
 def test_fetch_numeric_options_reject_non_numbers(option):
     with pytest.raises(StarioError):
@@ -104,9 +104,9 @@ def test_fetch_numeric_options_reject_non_finite_scaler():
 def test_fetch_numeric_options_keep_their_output():
     action = at.get(
         "/x",
-        retry_interval_ms=100,
+        retry_interval="100ms",
         retry_scaler=1.5,
-        retry_max_wait_ms=2000,
+        retry_max_wait="2s",
         retry_max_count=3,
         open_when_hidden=True,
     )
@@ -123,8 +123,8 @@ def test_fetch_open_when_hidden_is_a_boolean_literal():
 
 def test_fit_rejects_non_number_bounds():
     with pytest.raises(StarioError):
-        at.fit("$x", "0); alert(1); (0", 1, 0, 1)  # type: ignore[arg-type]
-    assert at.fit("$x", 0, 1.5, 0, 100) == "@fit($x, 0, 1.5, 0, 100, false, false)"
+        at.pro.fit("$x", "0); alert(1); (0", 1, 0, 1)  # type: ignore[arg-type]
+    assert at.pro.fit("$x", 0, 1.5, 0, 100) == "@fit($x, 0, 1.5, 0, 100, false, false)"
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +133,7 @@ def test_fit_rejects_non_number_bounds():
 
 
 def test_intl_nested_option_strings_are_literals():
-    action = at.intl("number", "$x", {"a": {"b": "alert(1)"}, "c": ["alert(2)"]})
+    action = at.pro.intl("number", "$x", {"a": {"b": "alert(1)"}, "c": ["alert(2)"]})
     assert action == "@intl('number', $x, {'a':{'b':'alert(1)'},'c':['alert(2)']})"
 
 

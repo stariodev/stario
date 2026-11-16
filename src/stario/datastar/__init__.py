@@ -4,12 +4,13 @@ Import the default singletons and the classes that build them:
 
 ```python
 from stario.datastar import (
-    DatastarActions,
-    DatastarAttributes,
-    ModuleScript,
     SSE,
+    Debounce,
+    Throttle,
     at,
     data,
+    is_datastar,
+    literal,
     read_signals,
 )
 ```
@@ -19,9 +20,10 @@ instances. Import the classes when you need a separate namespace (tests or
 multiple configured builders).
 """
 
-from .actions import DatastarActions, at
-from .attributes import DatastarAttributes, data
-from .signals import FileSignal, read_signals
+from .actions import DatastarActions, DatastarProActions, at
+from .attributes import DatastarAttributes, DatastarProAttributes, data
+from .format import Debounce, Duration, Throttle, literal
+from .signals import FileSignal, is_datastar, read_signals
 from .sse import SSE
 from .tags import DATASTAR_CDN_URL, ModuleScript
 
@@ -30,9 +32,16 @@ __all__ = [
     "SSE",
     "DatastarActions",
     "DatastarAttributes",
+    "DatastarProActions",
+    "DatastarProAttributes",
+    "Debounce",
+    "Duration",
     "FileSignal",
     "ModuleScript",
+    "Throttle",
     "at",
     "data",
+    "is_datastar",
+    "literal",
     "read_signals",
 ]

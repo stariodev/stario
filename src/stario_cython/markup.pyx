@@ -1902,6 +1902,45 @@ def classes(*tokens):
     return _classes_cache.setdefault(stario_shared_tuple(tokens), result)
 
 
+# Caches for the Datastar helpers (``stario.datastar``): the same call with
+# the same arguments returns the same fragment, as ``classes()`` does. Same
+# bound rule as the other caches: a cap on the entries, short texts only,
+# never cleared, first insert wins.
+FRAGMENT_CACHE_MAX = 4096
+cdef Py_ssize_t _FRAGMENT_CACHE_MAX = 4096
+
+
+def fragment_cache():
+    """A new cache dict that every thread reads (immortal on free-threaded builds)."""
+    return stario_shared_dict()
+
+
+def remember_attrs(dict cache not None, tuple key not None, str text not None):
+    """``Attrs(text)``, stored in ``cache`` under ``key`` while it has room.
+
+    The stored fragment is immortal on free-threaded builds, so threads
+    returning it write no refcount.
+    """
+    if (
+        len(cache) >= _FRAGMENT_CACHE_MAX
+        or PyUnicode_GET_LENGTH(text) > _CLASSES_CACHE_MAX_LEN
+    ):
+        return Attrs.__new__(Attrs, text)
+    result = Attrs.__new__(Attrs, stario_shared_str(text))
+    stario_immortalize(result)
+    return cache.setdefault(stario_shared_tuple(key), result)
+
+
+def remember_str(dict cache not None, tuple key not None, str text not None):
+    """``text``, stored in ``cache`` under ``key`` while it has room."""
+    if (
+        len(cache) >= _FRAGMENT_CACHE_MAX
+        or PyUnicode_GET_LENGTH(text) > _CLASSES_CACHE_MAX_LEN
+    ):
+        return text
+    return cache.setdefault(stario_shared_tuple(key), stario_shared_str(text))
+
+
 # ``prefix`` -> {key: "prefix-key"}: validated wire names for data() / aria().
 # Same rules as the other caches: refuse new entries past a cap and never
 # clear; insert with setdefault (the first value wins and is never replaced)

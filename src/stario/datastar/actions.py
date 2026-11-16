@@ -11,18 +11,37 @@ h.Button(data.on("click", at.get(REFRESH.href())), "Refresh")
 ```
 
 The methods return strings such as `@get('/items')` for use inside Datastar
-attributes like `data.on(...)`. Build the URL with `route.href()`, then
-pick `at.get` / `at.post` / … at the call site.
+attributes like `data.on(...)`. Build the URL with `route.href()` (with
+`query=` for query parameters), then pick `at.get` / `at.post` / … at the
+call site. The same call with the same arguments returns the same string
+from a cache.
+
+`include=` / `exclude=` take a list of signal paths (each matches itself and
+its children) or a `str` regex. An `exclude=` never lets a local `_` signal
+leave the browser. Retry times are durations with a unit: `"2s"`.
+Datastar Pro actions live under `at.pro`.
 """
 
 import math
+import warnings
 from collections.abc import Mapping
 from typing import Any, Literal, TypedDict, Unpack, cast
 from urllib.parse import urlencode
 
 from stario.exceptions import StarioError
+from stario_cython.markup import fragment_cache, remember_str
 
-from .format import FilterValue, filter_js, js_object, string_literal
+from .format import (
+    Duration,
+    FilterValue,
+    duration_ms,
+    filter_js,
+    js_object,
+    string_literal,
+)
+
+# Action strings by (method, url, queries, options); see remember_str.
+_FETCH = fragment_cache()
 
 ContentType = Literal["json", "form"]
 RequestCancellation = Literal["auto", "cleanup", "disabled"]
@@ -47,11 +66,15 @@ class FetchOptions(TypedDict, total=False):
     open_when_hidden: bool | None
     payload: dict[str, Any] | None
     retry: Retry | str | None
-    retry_interval_ms: int | None
+    retry_interval: Duration | None
     retry_scaler: float | None
-    retry_max_wait_ms: int | None
+    retry_max_wait: Duration | None
     retry_max_count: int | None
     request_cancellation: RequestCancellation | str | None
+    retry_interval_ms: int | None
+    """Deprecated: write `retry_interval="1s"`. Removed in 6.0."""
+    retry_max_wait_ms: int | None
+    """Deprecated: write `retry_max_wait="30s"`. Removed in 6.0."""
 
 
 def _js_number(option: str, value: object, *, integer: bool = False) -> str:
@@ -84,10 +107,58 @@ def _quote_strings(value: Any) -> Any:
     return value
 
 
+def _deprecated(old: str, new: str, stacklevel: int) -> None:
+    """`stacklevel` counts from the caller of `_deprecated` (1 = that caller)."""
+    warnings.warn(
+        f"{old} is deprecated: {new}. Removed in 6.0.",
+        DeprecationWarning,
+        stacklevel=stacklevel + 1,
+    )
+
+
+def _frozen(value: object) -> object:
+    """`value` as a cache key part: a dict or list becomes a tuple.
+
+    One level deep: a nested list or dict stays unhashable, so that call is
+    built every time instead of cached.
+    """
+    kind = type(value)
+    if kind is dict:
+        return (dict, *cast(dict[object, object], value).items())
+    if kind is list:
+        return (list, *cast(list[object], value))
+    return value
+
+
+def _retry_ms(
+    options: FetchOptions, name: Literal["retry_interval", "retry_max_wait"]
+) -> int | None:
+    """`retry_interval` / `retry_max_wait` in milliseconds, from either spelling."""
+    value = options.get(name)
+    old_name = name + "_ms"
+    old = options.get(old_name)
+    if old is not None:
+        if value is not None:
+            raise StarioError(
+                f"Pass {name}= or {old_name}=, not both",
+                help_text=f"Write {name}='2s' and drop {old_name}.",
+            )
+        # user -> at.get -> _fetch -> _build -> _retry_ms
+        _deprecated(f"{old_name}={old!r}", f"write {name}='{old}ms'", 5)
+        return int(_js_number(old_name, old, integer=True))
+    if value is None:
+        return None
+    return duration_ms(value, name)
+
+
 class DatastarActions:
     """Namespace for Datastar `@...` action strings."""
 
-    __slots__ = ()
+    __slots__ = ("pro",)
+
+    def __init__(self) -> None:
+        # Datastar Pro actions (`at.pro.clipboard(...)`).
+        self.pro = DatastarProActions()
 
     def peek(self, callable_expr: str) -> str:
         """Build `@peek(expr)` to read a value without subscribing."""
@@ -127,9 +198,59 @@ class DatastarActions:
 
         Values in `payload` are JavaScript expressions evaluated in the
         browser. Never pass user-supplied text as a `payload` value — wrap
-        literal text with `string_literal()` or send it as a signal. Values in
+        literal text with `literal()` or send it as a signal. Values in
         `headers` are already string literals and are safe for literal text.
         """
+        if not options and queries is None:
+            cache_key: tuple[object, ...] = (method, url)
+            hit = _FETCH.get(cache_key)
+            if hit is not None:
+                return hit
+        else:
+            # A list or dict value (include=[...], headers={...}) is copied
+            # into a tuple; scalar options (retry="always") hash as they are.
+            plain = queries is None
+            if plain:
+                for value in options.values():
+                    kind = type(value)
+                    if kind is list or kind is dict:
+                        plain = False
+                        break
+            if plain:
+                cache_key = (method, url, *options.items())
+            else:
+                cache_key = (
+                    method,
+                    url,
+                    _frozen(queries),
+                    *[(name, _frozen(value)) for name, value in options.items()],
+                )
+            try:
+                hit = _FETCH.get(cache_key)
+            except TypeError:  # a value that cannot be a key: build, do not cache
+                hit = None
+                cache_key = ()
+            if hit is not None:
+                return hit
+        text = self._build(method, url, queries, options)
+        if not cache_key:
+            return text
+        return remember_str(_FETCH, cache_key, text)
+
+    def _build(
+        self,
+        method: str,
+        url: str,
+        queries: Mapping[str, Any] | None,
+        options: FetchOptions,
+    ) -> str:
+        if queries is not None:
+            _deprecated(  # user -> at.get -> _fetch -> _build
+                "at.get(url, queries)",
+                "build the URL with ROUTE.href(query={...}); a $signal in "
+                "queries was sent as literal text",
+                4,
+            )
         content_type = options.get("content_type")
         include = options.get("include")
         exclude = options.get("exclude")
@@ -138,9 +259,9 @@ class DatastarActions:
         open_when_hidden = options.get("open_when_hidden")
         payload = options.get("payload")
         retry = options.get("retry")
-        retry_interval_ms = options.get("retry_interval_ms")
+        retry_interval_ms = _retry_ms(options, "retry_interval")
         retry_scaler = options.get("retry_scaler")
-        retry_max_wait_ms = options.get("retry_max_wait_ms")
+        retry_max_wait_ms = _retry_ms(options, "retry_max_wait")
         retry_max_count = options.get("retry_max_count")
         request_cancellation = options.get("request_cancellation")
         if selector is not None and content_type != "form":
@@ -158,7 +279,7 @@ class DatastarActions:
         if content_type is not None:
             parts.append(f"contentType: {string_literal(str(content_type))}")
 
-        filters = filter_js(include, exclude)
+        filters = filter_js(include, exclude, keep_local=True)
         if filters is not None:
             parts.append(f"filterSignals: {filters}")
 
@@ -179,19 +300,13 @@ class DatastarActions:
             parts.append(f"retry: {string_literal(str(retry))}")
 
         if retry_interval_ms is not None:
-            parts.append(
-                "retryInterval: "
-                + _js_number("retry_interval_ms", retry_interval_ms, integer=True)
-            )
+            parts.append(f"retryInterval: {retry_interval_ms}")
 
         if retry_scaler is not None:
             parts.append("retryScaler: " + _js_number("retry_scaler", retry_scaler))
 
         if retry_max_wait_ms is not None:
-            parts.append(
-                "retryMaxWait: "
-                + _js_number("retry_max_wait_ms", retry_max_wait_ms, integer=True)
-            )
+            parts.append(f"retryMaxWait: {retry_max_wait_ms}")
 
         if retry_max_count is not None:
             parts.append(
@@ -222,15 +337,20 @@ class DatastarActions:
         queries: Mapping[str, Any] | None = None,
         **options: Unpack[FetchOptions],
     ) -> str:
-        """Build `@get(...)`.
+        """Build `@get(...)`. Datastar sends the signals in the `datastar` query parameter.
 
         Warning: `payload` string values are JavaScript expressions evaluated
         in the browser — never pass user-supplied text there; wrap it with
-        `string_literal()` or send it as a signal.
+        `literal()` or send it as a signal.
 
         ```python
-        h.Button(data.on("click", at.get("/items", {"q": "$query"})), "Search")
+        SEARCH = Route("GET /items")
+        h.Button(data.on("click", at.get(SEARCH.href())), "Search")
+        h.Div(data.init(at.get(LIVE.href(), retry="always", retry_interval="2s")))
         ```
+
+        `queries=` is deprecated: build the URL with `ROUTE.href(query={...})`.
+        A signal travels in the signals, not in the URL.
         """
         return self._fetch("get", url, queries, **options)
 
@@ -244,7 +364,7 @@ class DatastarActions:
 
         Warning: `payload` string values are JavaScript expressions evaluated
         in the browser — never pass user-supplied text there; wrap it with
-        `string_literal()` or send it as a signal.
+        `literal()` or send it as a signal.
         """
         return self._fetch("post", url, queries, **options)
 
@@ -258,7 +378,7 @@ class DatastarActions:
 
         Warning: `payload` string values are JavaScript expressions evaluated
         in the browser — never pass user-supplied text there; wrap it with
-        `string_literal()` or send it as a signal.
+        `literal()` or send it as a signal.
         """
         return self._fetch("put", url, queries, **options)
 
@@ -272,7 +392,7 @@ class DatastarActions:
 
         Warning: `payload` string values are JavaScript expressions evaluated
         in the browser — never pass user-supplied text there; wrap it with
-        `string_literal()` or send it as a signal.
+        `literal()` or send it as a signal.
         """
         return self._fetch("patch", url, queries, **options)
 
@@ -286,7 +406,7 @@ class DatastarActions:
 
         Warning: `payload` string values are JavaScript expressions evaluated
         in the browser — never pass user-supplied text there; wrap it with
-        `string_literal()` or send it as a signal.
+        `literal()` or send it as a signal.
         """
         return self._fetch("delete", url, queries, **options)
 
@@ -301,12 +421,55 @@ class DatastarActions:
         Sends a `QUERY` request with signals in the body, like `post`.
         Warning: `payload` string values are JavaScript expressions evaluated
         in the browser — never pass user-supplied text there; wrap it with
-        `string_literal()` or send it as a signal.
+        `literal()` or send it as a signal.
         """
         return self._fetch("query", url, queries, **options)
 
+    # --- Datastar Pro, deprecated here: use at.pro.* -------------------------
+
     def clipboard(self, text: str, is_base64: bool = False) -> str:
-        """Build `@clipboard(...)`. **Datastar Pro only.**"""
+        """Deprecated: `at.pro.clipboard`. Removed in 6.0."""
+        _deprecated("at.clipboard", "write at.pro.clipboard (Datastar Pro)", 2)
+        return self.pro.clipboard(text, is_base64)
+
+    def intl(
+        self,
+        type: IntlType | str,
+        value: str,
+        options: dict[str, Any] | None = None,
+        locale: str | list[str] | None = None,
+    ) -> str:
+        """Deprecated: `at.pro.intl`. Removed in 6.0."""
+        _deprecated("at.intl", "write at.pro.intl (Datastar Pro)", 2)
+        return self.pro.intl(type, value, options, locale)
+
+    def fit(
+        self,
+        v: str,
+        old_min: float,
+        old_max: float,
+        new_min: float,
+        new_max: float,
+        should_clamp: bool = False,
+        should_round: bool = False,
+    ) -> str:
+        """Deprecated: `at.pro.fit`. Removed in 6.0."""
+        _deprecated("at.fit", "write at.pro.fit (Datastar Pro)", 2)
+        return self.pro.fit(
+            v, old_min, old_max, new_min, new_max, should_clamp, should_round
+        )
+
+
+class DatastarProActions:
+    """Datastar Pro actions: `at.pro.clipboard(...)`.
+
+    They do nothing with the free Datastar bundle.
+    """
+
+    __slots__ = ()
+
+    def clipboard(self, text: str, is_base64: bool = False) -> str:
+        """Build `@clipboard(...)`."""
         if is_base64:
             return f"@clipboard({string_literal(text)}, true)"
         return f"@clipboard({string_literal(text)})"
@@ -318,7 +481,7 @@ class DatastarActions:
         options: dict[str, Any] | None = None,
         locale: str | list[str] | None = None,
     ) -> str:
-        """Build `@intl(...)`. **Datastar Pro only.**
+        """Build `@intl(...)`.
 
         `value` is a JavaScript expression. String values inside `options` are
         emitted as JavaScript string literals; numbers and booleans pass through.
@@ -348,7 +511,7 @@ class DatastarActions:
         should_clamp: bool = False,
         should_round: bool = False,
     ) -> str:
-        """Build `@fit(...)` to remap a numeric expression. **Datastar Pro only.**"""
+        """Build `@fit(...)` to remap a numeric expression."""
         bounds = ", ".join(
             _js_number(name, value)
             for name, value in (

@@ -11,10 +11,12 @@ Public surface: `TestClient`, `TestResponse`, `TestStreamResponse`,
 `check_pages` / `check_page` (every HTML page checked for duplicate ids,
 actions without a route, undefined signals and broken streams:
 `assert not await check_pages(client)`).
+A request that sends `datastar-request` and gets a reply other than 200 or
+204 raises `DatastarReplyError`: Datastar ignores that reply in a browser.
 Tests need an async runner (for example pytest-asyncio).
 """
 
-from stario.testing.client import TestClient
+from stario.testing.client import DatastarReplyError, TestClient
 from stario.testing.load import aload_app
 from stario.testing.pages import (
     OUTSIDE_SERVICE_ERRORS,
@@ -28,6 +30,7 @@ from stario.testing.vtime import VirtualTimeLoop
 
 __all__ = [
     "OUTSIDE_SERVICE_ERRORS",
+    "DatastarReplyError",
     "PageProblems",
     "TestClient",
     "TestResponse",

@@ -9,8 +9,10 @@ h.Button(data.on("click", at.post("/cart")), "Add")
 ```
 
 Each method returns a pre-rendered `Attrs` fragment (opening-tag attribute bytes).
-The default instance emits normal `data-*` attributes. Create another instance when serving a
-custom Datastar bundle with an aliased prefix:
+The same call with the same arguments returns the same fragment from a cache,
+so a helper inside a render loop costs a lookup. The default instance emits
+normal `data-*` attributes. Create another instance when serving a custom
+Datastar bundle with an aliased prefix:
 
 ```python
 from stario.datastar import DatastarAttributes
@@ -19,47 +21,84 @@ star = DatastarAttributes("data-star-")
 h.Div(star.text("$title"))
 ```
 
-Times (`delay=`, `debounce=`, `throttle=`, `duration=`) are a string with a
-unit (`"300ms"`, `"2s"`), a float in seconds (`0.3`), or an int in whole
-seconds (`2`). In `delay=`, `debounce=` and `throttle=` an int of 10 or more
-raises: `debounce=300` is a millisecond count without its unit, so write
-`"300ms"` (or `"30s"` when seconds are meant).
+Rules:
+
+- A `str` argument is JavaScript (`"$open = !$open"`). Signal names, event
+  names and modifier values are names. Put a Python value into code with
+  `literal(value)`.
+- `on`, `init` and `effect` take several statements: `data.on("submit",
+  at.post(SAVE.href()), "$_edit.close()")` runs them in order.
+- A duration (`delay=`, `debounce=`, `throttle=`, `duration=`) is a string
+  with a unit: `"300ms"` or `"2s"`. A number raises with the fix.
+  `Debounce("300ms", leading=True)` and `Throttle("1s", trailing=True)` set
+  the edge flags.
+- Datastar Pro attributes live under `data.pro`.
 
 Reference: https://data-star.dev/reference/attributes
 """
 
+import warnings
 from collections.abc import Mapping
-from typing import Literal, cast
+from typing import Literal
 
 from stario.exceptions import StarioError
 from stario.json import dumps as json_dumps
 from stario.markup.escape import escape_attribute_value as escape_attr
 from stario.markup.escape import escape_sq_attribute_value, validate_attribute_key
 from stario.markup.types import Attrs
+from stario_cython.markup import fragment_cache, remember_attrs
 
 from ._jsevents import JSEvent
 from .format import (
     Case,
     Debounce,
+    Duration,
     FilterValue,
     SignalValue,
     Throttle,
-    TimeValue,
     check_signal_name,
     debounce_to_string,
+    duration,
     encode_signals,
     expand_signal_paths,
     filter_js,
     js_object,
     key_case,
     require_mapping,
-    short_time_to_string,
     signal_attr_key,
     signal_object,
     throttle_to_string,
-    time_to_string,
     to_kebab_key,
 )
+
+# Fragment caches, one per helper (see stario_cython.markup.remember_attrs).
+_ON = fragment_cache()
+_INIT = fragment_cache()
+_BIND = fragment_cache()
+_ATTR = fragment_cache()
+
+_duration = duration  # on_interval has a parameter named `duration`
+
+
+def _code(helper: str, statements: tuple[str, ...]) -> str:
+    """Statements joined into one Datastar expression."""
+    if not statements:
+        raise StarioError(
+            f"data.{helper}() needs at least one statement",
+            help_text="Pass the JavaScript to run, for example an at.post(...) action.",
+            example=f'data.{helper}("click", at.post(SAVE.href()))'
+            if helper == "on"
+            else f'data.{helper}("$ready = true")',
+        )
+    return "; ".join(statements)
+
+
+def _deprecated(old: str, new: str) -> None:
+    warnings.warn(
+        f"{old} is deprecated: {new}. Removed in 6.0.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
 
 
 def _reject_uppercase_key(helper: str, key: str, alternative: str) -> None:
@@ -88,6 +127,21 @@ def _reject_uppercase_modifier(helper: str, modifier: str, value: str) -> None:
         )
 
 
+def _timing(
+    delay: Duration | None,
+    debounce: Duration | Debounce | None,
+    throttle: Duration | Throttle | None,
+) -> list[str]:
+    modifiers: list[str] = []
+    if delay is not None:
+        modifiers.append("delay." + duration(delay, "delay"))
+    if debounce is not None:
+        modifiers.append(debounce_to_string(debounce))
+    if throttle is not None:
+        modifiers.append(throttle_to_string(throttle))
+    return modifiers
+
+
 class DatastarAttributes:
     """Namespace for Datastar `data-*` attributes.
 
@@ -105,7 +159,7 @@ class DatastarAttributes:
     as `"data-star-"`, when loading a custom aliased Datastar bundle.
     """
 
-    __slots__ = ("prefix",)
+    __slots__ = ("prefix", "pro")
 
     def __init__(self, prefix: str = "data-") -> None:
         if not prefix:
@@ -113,31 +167,39 @@ class DatastarAttributes:
         self.prefix = prefix if prefix.endswith("-") else prefix + "-"
         # Every helper writes the prefix into an attribute name.
         validate_attribute_key(self.prefix)
+        # Datastar Pro attributes (`data.pro.persist(...)`).
+        self.pro = DatastarProAttributes(self.prefix)
 
     def attr(self, key: str, expression: str) -> Attrs:
         """Set one HTML attribute from a reactive expression.
 
         `expression` is JavaScript evaluated in the browser — never pass
-        user-supplied text; use a signal reference or `string_literal()`.
+        user-supplied text; use a signal reference or `literal()`.
 
         ```python
         data.attr("title", "$item.label")
         # Attrs(' data-attr:title="$item.label"')
         ```
         """
+        cache_key = (self.prefix, key, expression)
+        hit = _ATTR.get(cache_key)
+        if hit is not None:
+            return hit
         validate_attribute_key(key)
         _reject_uppercase_key("attr", key, "data.attrs({key: expression})")
-        return Attrs(f' {self.prefix}attr:{key}="{escape_attr(expression)}"')
+        return remember_attrs(
+            _ATTR, cache_key, f' {self.prefix}attr:{key}="{escape_attr(expression)}"'
+        )
 
     def attrs(self, mapping: dict[str, str]) -> Attrs:
         """Set several HTML attributes from a mapping of expressions.
 
         Values are JavaScript expressions evaluated in the browser — never
-        pass user-supplied text; use a signal reference or `string_literal()`.
+        pass user-supplied text; use a signal reference or `literal()`.
 
         ```python
-        data.attrs({"open": "sidebarOpen"})
-        # Attrs(' data-attr="{'open':sidebarOpen}"')
+        data.attrs({"open": "$sidebarOpen"})
+        # Attrs(' data-attr="{'open':$sidebarOpen}"')
         ```
         """
         return Attrs(f' {self.prefix}attr="{escape_attr(js_object(mapping))}"')
@@ -159,6 +221,10 @@ class DatastarAttributes:
         # Attrs(' data-bind__prop.checked__event.change="isChecked"')
         ```
         """
+        cache_key = (self.prefix, signal_name, prop, event)
+        hit = _BIND.get(cache_key)
+        if hit is not None:
+            return hit
         check_signal_name(signal_name)
         if prop is not None:
             validate_attribute_key(prop)
@@ -171,7 +237,11 @@ class DatastarAttributes:
             modifiers += f"__prop.{prop}"
         if event is not None:
             modifiers += f"__event.{event}"
-        return Attrs(f' {self.prefix}bind{modifiers}="{escape_attr(signal_name)}"')
+        return remember_attrs(
+            _BIND,
+            cache_key,
+            f' {self.prefix}bind{modifiers}="{escape_attr(signal_name)}"',
+        )
 
     def class_(self, name: str, expression: str) -> Attrs:
         """Toggle one CSS class from a reactive expression.
@@ -201,7 +271,7 @@ class DatastarAttributes:
         """Create one computed signal from a reactive expression.
 
         `expression` is JavaScript evaluated in the browser — never pass
-        user-supplied text; use a signal reference or `string_literal()`.
+        user-supplied text; use a signal reference or `literal()`.
 
         ```python
         data.computed("fullName", "$first + $last")
@@ -214,7 +284,7 @@ class DatastarAttributes:
         """Create several computed signals in one `data-computed` object.
 
         Values are JavaScript expressions evaluated in the browser — never
-        pass user-supplied text; use a signal reference or `string_literal()`.
+        pass user-supplied text; use a signal reference or `literal()`.
         Dotted keys merge into one nested object; using a name both as a
         signal and as a path prefix raises `StarioError`.
 
@@ -228,14 +298,17 @@ class DatastarAttributes:
         )
         return Attrs(f' {self.prefix}computed="{escape_attr(js_object(tree))}"')
 
-    def effect(self, expression: str) -> Attrs:
-        """Run a side effect when the element initializes or updates.
+    def effect(self, *statements: str) -> Attrs:
+        """Run statements when the element initializes and when a signal they read changes.
 
         ```python
         data.effect("el.focus()")
         # Attrs(' data-effect="el.focus()"')
         ```
         """
+        expression = (
+            statements[0] if len(statements) == 1 else _code("effect", statements)
+        )
         return Attrs(f' {self.prefix}effect="{escape_attr(expression)}"')
 
     def ignore(self, self_only: bool = False) -> Attrs:
@@ -276,12 +349,11 @@ class DatastarAttributes:
 
     def init(
         self,
-        expression: str,
-        *,
-        delay: TimeValue | None = None,
+        *statements: str,
+        delay: Duration | None = None,
         view_transition: bool = False,
     ) -> Attrs:
-        """Run an expression on element initialization.
+        """Run statements when the element initializes.
 
         ```python
         data.init("setup()")
@@ -291,17 +363,19 @@ class DatastarAttributes:
         # Attrs(' data-init__delay.200ms__viewtransition="setup()"')
         ```
         """
-        if delay is None:
-            if view_transition:
-                return Attrs(
-                    f' {self.prefix}init__viewtransition="{escape_attr(expression)}"'
-                )
-            return Attrs(f' {self.prefix}init="{escape_attr(expression)}"')
-
-        modifiers = "delay." + short_time_to_string(delay, "delay")
+        expression = (
+            statements[0] if len(statements) == 1 else _code("init", statements)
+        )
+        cache_key = (self.prefix, expression, delay, view_transition)
+        hit = _INIT.get(cache_key)
+        if hit is not None:
+            return hit
+        key = self.prefix + "init"
+        if delay is not None:
+            key += "__delay." + duration(delay, "delay")
         if view_transition:
-            modifiers += "__viewtransition"
-        return Attrs(f' {self.prefix}init__{modifiers}="{escape_attr(expression)}"')
+            key += "__viewtransition"
+        return remember_attrs(_INIT, cache_key, f' {key}="{escape_attr(expression)}"')
 
     def json_signals(
         self,
@@ -317,52 +391,106 @@ class DatastarAttributes:
         # Attrs(' data-json-signals')
 
         data.json_signals(include=["email", "password"], terse=True)
-        # Attrs(' data-json-signals__terse="{'include':'email|password'}"')
+        # data-json-signals__terse="{'include':'^(?:email|password)(?:\\\\.|$)'}"
         ```
         """
         filters = filter_js(include, exclude)
-        value: str | bool = filters if filters is not None else True
         if terse:
             key = self.prefix + "json-signals__terse"
         else:
             key = self.prefix + "json-signals"
-        if value is True:
+        if filters is None:
             return Attrs(f" {key}")
-        return Attrs(f' {key}="{escape_attr(cast(str, value))}"')
+        return Attrs(f' {key}="{escape_attr(filters)}"')
 
     def on(
         self,
         event: JSEvent | str,
-        expression: str,
-        *,
+        *statements: str,
         once: bool = False,
         passive: bool = False,
         capture: bool = False,
-        delay: TimeValue | None = None,
-        debounce: Debounce | None = None,
-        throttle: Throttle | None = None,
+        delay: Duration | None = None,
+        debounce: Duration | Debounce | None = None,
+        throttle: Duration | Throttle | None = None,
         view_transition: bool = False,
-        target: Literal["window", "document", "outside"] | None = None,
+        window: bool = False,
+        document: bool = False,
+        outside: bool = False,
         prevent: bool = False,
         stop: bool = False,
         case: Case = "kebab",
+        target: Literal["window", "document", "outside"] | None = None,
     ) -> Attrs:
-        """Listen for an event.
+        """Listen for an event and run the statements in order.
 
         ```python
-        data.on("click", "@get('/cart/count')")
+        data.on("click", at.get("/cart/count"))
         # Attrs(' data-on:click="@get('/cart/count')"')
 
-        data.on("click", "$open = false", target="outside")
+        data.on("submit", at.post("/rename"), "$_edit = false", prevent=True)
+        # Attrs(' data-on:submit__prevent="@post('/rename'); $_edit = false"')
+
+        data.on("click", "$open = false", outside=True)
         # Attrs(' data-on:click__outside="$open = false"')
 
         data.on("input", at.get("/search"), debounce="300ms")
         # Attrs(' data-on:input__debounce.300ms="@get('/search')"')
         ```
 
-        `delay`, `debounce` and `throttle` take `"300ms"`, `0.3` (seconds) or a
-        small int of seconds; `debounce=300` raises (see the module docstring).
+        Modifiers have Datastar's names: `window`, `document` and `outside`
+        pick where the listener sits (one at most). `target=` is the
+        deprecated spelling of the same three.
         """
+        expression = statements[0] if len(statements) == 1 else _code("on", statements)
+        if (
+            not once
+            and not passive
+            and not capture
+            and delay is None
+            and debounce is None
+            and throttle is None
+            and not view_transition
+            and not window
+            and not document
+            and not outside
+            and not prevent
+            and not stop
+            and case == "kebab"
+            and target is None
+        ):
+            cache_key: tuple[object, ...] = (self.prefix, event, expression)
+            hit = _ON.get(cache_key)
+            if hit is not None:
+                return hit
+        else:
+            cache_key = (
+                self.prefix,
+                event,
+                expression,
+                once,
+                passive,
+                capture,
+                delay,
+                debounce,
+                throttle,
+                view_transition,
+                window,
+                document,
+                outside,
+                prevent,
+                stop,
+                case,
+                target,
+            )
+            try:
+                hit = _ON.get(cache_key)
+            except TypeError:  # an unhashable argument: the checks below name it
+                hit = None
+                cache_key = ()
+            if hit is not None:
+                return hit
+
         if passive and prevent:
             raise StarioError(
                 "passive and prevent contradict each other",
@@ -372,25 +500,31 @@ class DatastarAttributes:
                     "`prevent` calls it. Pass only one."
                 ),
             )
-
         validate_attribute_key(event)
 
-        if (
-            not once
-            and not passive
-            and not capture
-            and delay is None
-            and debounce is None
-            and throttle is None
-            and not view_transition
-            and target is None
-            and not prevent
-            and not stop
-            and case == "kebab"
-            and event.islower()
-            and "_" not in event
-        ):
-            return Attrs(f' {self.prefix}on:{event}="{escape_attr(expression)}"')
+        if target is not None:
+            validate_attribute_key(target)
+            _deprecated(f"data.on(target={target!r})", f"write {target}=True")
+            if target == "window":
+                window = True
+            elif target == "document":
+                document = True
+            elif target == "outside":
+                outside = True
+            else:
+                raise StarioError(
+                    f"Unknown data.on target: {target!r}",
+                    help_text="Write window=True, document=True or outside=True.",
+                )
+        if window + document + outside > 1:
+            raise StarioError(
+                "data.on() takes one of window, document and outside",
+                context={"event": event},
+                help_text=(
+                    "Each one moves the listener to a different place. Datastar "
+                    "would silently pick one; pass only the one you mean."
+                ),
+            )
 
         modifiers: list[str] = []
         if once:
@@ -399,20 +533,17 @@ class DatastarAttributes:
             modifiers.append("passive")
         if capture:
             modifiers.append("capture")
-        if target is not None:
-            # Modifiers are part of the attribute name: check them like one.
-            validate_attribute_key(target)
-            modifiers.append(target)
+        if window:
+            modifiers.append("window")
+        if document:
+            modifiers.append("document")
+        if outside:
+            modifiers.append("outside")
         if prevent:
             modifiers.append("prevent")
         if stop:
             modifiers.append("stop")
-        if delay is not None:
-            modifiers.append("delay." + short_time_to_string(delay, "delay"))
-        if debounce is not None:
-            modifiers.append(debounce_to_string(debounce))
-        if throttle is not None:
-            modifiers.append(throttle_to_string(throttle))
+        modifiers += _timing(delay, debounce, throttle)
         if view_transition:
             modifiers.append("viewtransition")
 
@@ -429,22 +560,25 @@ class DatastarAttributes:
                 modifiers.append("case." + inferred)
 
         if modifiers:
-            return Attrs(
+            text = (
                 f' {self.prefix}on:{kebab_event}__{"__".join(modifiers)}="'
                 f'{escape_attr(expression)}"'
             )
-        return Attrs(f' {self.prefix}on:{kebab_event}="{escape_attr(expression)}"')
+        else:
+            text = f' {self.prefix}on:{kebab_event}="{escape_attr(expression)}"'
+        if not cache_key:
+            return Attrs(text)
+        return remember_attrs(_ON, cache_key, text)
 
     def on_intersect(
         self,
-        expression: str,
-        *,
+        *statements: str,
         threshold: float | Literal["half", "full"] | str | None = None,
         once: bool = False,
         exit: bool = False,
-        delay: TimeValue | None = None,
-        debounce: Debounce | None = None,
-        throttle: Throttle | None = None,
+        delay: Duration | None = None,
+        debounce: Duration | Debounce | None = None,
+        throttle: Duration | Throttle | None = None,
         view_transition: bool = False,
     ) -> Attrs:
         """React to viewport intersection.
@@ -454,6 +588,9 @@ class DatastarAttributes:
         # Attrs(' data-on-intersect__threshold.25__once__viewtransition="load()"')
         ```
         """
+        expression = (
+            statements[0] if len(statements) == 1 else _code("on_intersect", statements)
+        )
         modifiers: list[str] = []
         if threshold is not None:
             if isinstance(threshold, str):
@@ -480,12 +617,7 @@ class DatastarAttributes:
             modifiers.append("once")
         if exit:
             modifiers.append("exit")
-        if delay is not None:
-            modifiers.append("delay." + short_time_to_string(delay, "delay"))
-        if debounce is not None:
-            modifiers.append(debounce_to_string(debounce))
-        if throttle is not None:
-            modifiers.append(throttle_to_string(throttle))
+        modifiers += _timing(delay, debounce, throttle)
         if view_transition:
             modifiers.append("viewtransition")
 
@@ -498,13 +630,12 @@ class DatastarAttributes:
 
     def on_interval(
         self,
-        expression: str,
-        *,
-        duration: TimeValue = "1s",
+        *statements: str,
+        duration: Duration = "1s",
         leading: bool = False,
         view_transition: bool = False,
     ) -> Attrs:
-        """Run an expression on an interval.
+        """Run statements on an interval.
 
         ```python
         data.on_interval("tick()")
@@ -514,30 +645,24 @@ class DatastarAttributes:
         # Attrs(' data-on-interval__duration.2s.leading="tick()"')
         ```
         """
-        if duration == "1s" and not leading:
-            if view_transition:
-                return Attrs(
-                    f' {self.prefix}on-interval__viewtransition="'
-                    f'{escape_attr(expression)}"'
-                )
-            return Attrs(f' {self.prefix}on-interval="{escape_attr(expression)}"')
-
-        modifiers = "duration." + time_to_string(duration)
-        if leading:
-            modifiers += ".leading"
-        if view_transition:
-            modifiers += "__viewtransition"
-        return Attrs(
-            f' {self.prefix}on-interval__{modifiers}="{escape_attr(expression)}"'
+        expression = (
+            statements[0] if len(statements) == 1 else _code("on_interval", statements)
         )
+        key = self.prefix + "on-interval"
+        if duration != "1s" or leading:
+            key += "__duration." + _duration(duration, "duration")
+            if leading:
+                key += ".leading"
+        if view_transition:
+            key += "__viewtransition"
+        return Attrs(f' {key}="{escape_attr(expression)}"')
 
     def on_signal_patch(
         self,
-        expression: str,
-        *,
-        delay: TimeValue | None = None,
-        debounce: Debounce | None = None,
-        throttle: Throttle | None = None,
+        *statements: str,
+        delay: Duration | None = None,
+        debounce: Duration | Debounce | None = None,
+        throttle: Duration | Throttle | None = None,
         include: FilterValue | None = None,
         exclude: FilterValue | None = None,
     ) -> Attrs:
@@ -545,17 +670,16 @@ class DatastarAttributes:
 
         ```python
         data.on_signal_patch("save()", debounce="500ms", include=["draft"])
-        # Attrs(' data-on-signal-patch__debounce.500ms="save()" data-on-signal-patch-filter="{'include':'draft'}"')
+        # data-on-signal-patch__debounce.500ms="save()"
+        # data-on-signal-patch-filter="{'include':'^(?:draft)(?:\\\\.|$)'}"
         ```
         """
-        modifiers: list[str] = []
-        if delay is not None:
-            modifiers.append("delay." + short_time_to_string(delay, "delay"))
-        if debounce is not None:
-            modifiers.append(debounce_to_string(debounce))
-        if throttle is not None:
-            modifiers.append(throttle_to_string(throttle))
-
+        expression = (
+            statements[0]
+            if len(statements) == 1
+            else _code("on_signal_patch", statements)
+        )
+        modifiers = _timing(delay, debounce, throttle)
         if modifiers:
             key = f"{self.prefix}on-signal-patch__{'__'.join(modifiers)}"
         else:
@@ -609,18 +733,17 @@ class DatastarAttributes:
         *,
         if_missing: bool = False,
     ) -> Attrs:
-        """Patch one signal from a Datastar expression.
+        """Deprecated: patch one signal from a Datastar expression.
 
-        `expression` is JavaScript evaluated in the browser — never pass
-        user-supplied text; use a signal reference or `string_literal()`.
-        The value is wrapped in parentheses, so a top-level comma in the
-        expression stays part of the signal's value.
-
-        ```python
-        data.signal("myCount", "0", if_missing=True)
-        # Attrs(' data-signals__ifmissing="{'myCount': (0)}"')
-        ```
+        `expression` is JavaScript, unlike the values of `data.signals()`, so
+        `data.signal("name", "Bob")` reads a variable named `Bob`. Write
+        `data.signals({"name": "Bob"})` for a value. Removed in 6.0.
         """
+        _deprecated(
+            "data.signal(name, expression)",
+            "write data.signals({name: value}) for a value, or "
+            "data.computed(name, expression) for an expression",
+        )
         obj = signal_object(name, expression)
         if if_missing:
             return Attrs(f' {self.prefix}signals__ifmissing="{escape_attr(obj)}"')
@@ -635,17 +758,17 @@ class DatastarAttributes:
         """Patch several signals.
 
         Keys are sent as JSON object keys, so any signal name works. A
-        dotted key is a nested path — `{"ui.open": True}` sets the same
-        signal as `data.signal("ui.open", ...)`. Values may be any Mapping
-        or Sequence (a `list[str]` variable, a tuple), sent as JSON objects
-        and arrays.
+        dotted key is a nested path — `{"ui.open": True}` sets `$ui.open`.
+        Values are JSON values, not JavaScript: `{"name": "Bob"}` is the
+        text Bob. Values may be any Mapping or Sequence (a `list[str]`
+        variable, a tuple), sent as JSON objects and arrays.
 
         ```python
         data.signals({"count": 0, "open": False})
         # Attrs(" data-signals='{\"count\":0,\"open\":false}'")
         ```
         """
-        # A JSON backslash is always `\\`; write it as `\u005c` so no string
+        # A JSON backslash is always `\\`; write it as `\` so no string
         # ends in `\\"`, which Datastar's statement splitter takes for an
         # escaped quote (it does not count the backslashes before it).
         value = escape_sq_attribute_value(
@@ -690,37 +813,151 @@ class DatastarAttributes:
         """
         return Attrs(f' {self.prefix}text="{escape_attr(expression)}"')
 
+    # --- Datastar Pro, deprecated here: use data.pro.* -----------------------
+
     def animate(self, expression: str) -> Attrs:
-        """Animate element attributes over time. **Datastar Pro only.**
+        """Deprecated: `data.pro.animate`. Removed in 6.0."""
+        _deprecated("data.animate", "write data.pro.animate (Datastar Pro)")
+        return self.pro.animate(expression)
+
+    def custom_validity(self, expression: str) -> Attrs:
+        """Deprecated: `data.pro.custom_validity`. Removed in 6.0."""
+        _deprecated(
+            "data.custom_validity", "write data.pro.custom_validity (Datastar Pro)"
+        )
+        return self.pro.custom_validity(expression)
+
+    def match_media(self, signal_name: str, expression: str) -> Attrs:
+        """Deprecated: `data.pro.match_media`. Removed in 6.0."""
+        _deprecated("data.match_media", "write data.pro.match_media (Datastar Pro)")
+        return self.pro.match_media(signal_name, expression)
+
+    def on_raf(
+        self, expression: str, *, throttle: Duration | Throttle | None = None
+    ) -> Attrs:
+        """Deprecated: `data.pro.on_raf`. Removed in 6.0."""
+        _deprecated("data.on_raf", "write data.pro.on_raf (Datastar Pro)")
+        return self.pro.on_raf(expression, throttle=throttle)
+
+    def on_resize(
+        self,
+        expression: str,
+        *,
+        debounce: Duration | Debounce | None = None,
+        throttle: Duration | Throttle | None = None,
+    ) -> Attrs:
+        """Deprecated: `data.pro.on_resize`. Removed in 6.0."""
+        _deprecated("data.on_resize", "write data.pro.on_resize (Datastar Pro)")
+        return self.pro.on_resize(expression, debounce=debounce, throttle=throttle)
+
+    def persist(
+        self,
+        *,
+        include: FilterValue | None = None,
+        exclude: FilterValue | None = None,
+        storage_key: str | None = None,
+        session: bool = False,
+    ) -> Attrs:
+        """Deprecated: `data.pro.persist`. Removed in 6.0."""
+        _deprecated("data.persist", "write data.pro.persist (Datastar Pro)")
+        return self.pro.persist(
+            include=include, exclude=exclude, storage_key=storage_key, session=session
+        )
+
+    def query_string(
+        self,
+        *,
+        include: FilterValue | None = None,
+        exclude: FilterValue | None = None,
+        filter_empty: bool = False,
+        history: bool = False,
+    ) -> Attrs:
+        """Deprecated: `data.pro.query_string`. Removed in 6.0."""
+        _deprecated("data.query_string", "write data.pro.query_string (Datastar Pro)")
+        return self.pro.query_string(
+            include=include, exclude=exclude, filter_empty=filter_empty, history=history
+        )
+
+    def replace_url(self, expression: str) -> Attrs:
+        """Deprecated: `data.pro.replace_url`. Removed in 6.0.
+
+        To change the URL from a handler, use `SSE(w).replace_url(url)`,
+        which works with the free bundle.
+        """
+        _deprecated(
+            "data.replace_url",
+            "write data.pro.replace_url (Datastar Pro), or SSE(w).replace_url(url) "
+            "from a handler",
+        )
+        return self.pro.replace_url(expression)
+
+    def scroll_into_view(
+        self,
+        *,
+        behavior: Literal["smooth", "instant", "auto"] | None = None,
+        horizontal: Literal["start", "center", "end", "nearest"] | None = None,
+        vertical: Literal["start", "center", "end", "nearest"] | None = None,
+        focus: bool = False,
+    ) -> Attrs:
+        """Deprecated: `data.pro.scroll_into_view`. Removed in 6.0."""
+        _deprecated(
+            "data.scroll_into_view", "write data.pro.scroll_into_view (Datastar Pro)"
+        )
+        return self.pro.scroll_into_view(
+            behavior=behavior, horizontal=horizontal, vertical=vertical, focus=focus
+        )
+
+    def view_transition(self, expression: str) -> Attrs:
+        """Deprecated: `data.pro.view_transition`. Removed in 6.0."""
+        _deprecated(
+            "data.view_transition", "write data.pro.view_transition (Datastar Pro)"
+        )
+        return self.pro.view_transition(expression)
+
+
+class DatastarProAttributes:
+    """Datastar Pro attributes: `data.pro.persist(...)`.
+
+    They do nothing with the free Datastar bundle. Load a Pro bundle with
+    `ModuleScript(src=...)` before you use them.
+    """
+
+    __slots__ = ("prefix",)
+
+    def __init__(self, prefix: str = "data-") -> None:
+        self.prefix = prefix
+
+    def animate(self, expression: str) -> Attrs:
+        """Animate element attributes over time.
 
         ```python
-        data.animate("$x")
+        data.pro.animate("$x")
         # Attrs(' data-animate="$x"')
         ```
         """
         return Attrs(f' {self.prefix}animate="{escape_attr(expression)}"')
 
     def custom_validity(self, expression: str) -> Attrs:
-        """Set a custom validity message. **Datastar Pro only.**
+        """Set a custom validity message.
 
         ```python
-        data.custom_validity("$msg")
+        data.pro.custom_validity("$msg")
         # Attrs(' data-custom-validity="$msg"')
         ```
         """
         return Attrs(f' {self.prefix}custom-validity="{escape_attr(expression)}"')
 
     def match_media(self, signal_name: str, expression: str) -> Attrs:
-        """Sync a signal with `matchMedia`. **Datastar Pro only.**
+        """Sync a signal with `matchMedia`.
 
         `data-match-media` has no value form, so the key is spelled to
         survive HTML lowercasing and Datastar's case conversion and still
         yield `signal_name` exactly.
 
         ```python
-        data.match_media("isDark", "'prefers-color-scheme: dark'")
+        data.pro.match_media("isDark", "'prefers-color-scheme: dark'")
         # Attrs(' data-match-media:is-dark="'prefers-color-scheme: dark'"')
-        data.match_media("is_dark", "'prefers-color-scheme: dark'")
+        data.pro.match_media("is_dark", "'prefers-color-scheme: dark'")
         # Attrs(' data-match-media:is_dark__case.kebab="'prefers-color-scheme: dark'"')
         ```
         """
@@ -733,12 +970,12 @@ class DatastarAttributes:
         self,
         expression: str,
         *,
-        throttle: Throttle | None = None,
+        throttle: Duration | Throttle | None = None,
     ) -> Attrs:
-        """Run an expression on every animation frame. **Datastar Pro only.**
+        """Run an expression on every animation frame.
 
         ```python
-        data.on_raf("draw()", throttle="100ms")
+        data.pro.on_raf("draw()", throttle="100ms")
         # Attrs(' data-on-raf__throttle.100ms="draw()"')
         ```
         """
@@ -753,22 +990,17 @@ class DatastarAttributes:
         self,
         expression: str,
         *,
-        debounce: Debounce | None = None,
-        throttle: Throttle | None = None,
+        debounce: Duration | Debounce | None = None,
+        throttle: Duration | Throttle | None = None,
     ) -> Attrs:
-        """React to element resize. **Datastar Pro only.**
+        """React to element resize.
 
         ```python
-        data.on_resize("layout()", debounce="50ms", throttle="100ms")
+        data.pro.on_resize("layout()", debounce="50ms", throttle="100ms")
         # Attrs(' data-on-resize__debounce.50ms__throttle.100ms="layout()"')
         ```
         """
-        modifiers: list[str] = []
-        if debounce is not None:
-            modifiers.append(debounce_to_string(debounce))
-        if throttle is not None:
-            modifiers.append(throttle_to_string(throttle))
-
+        modifiers = _timing(None, debounce, throttle)
         if modifiers:
             return Attrs(
                 f' {self.prefix}on-resize__{"__".join(modifiers)}="'
@@ -784,15 +1016,14 @@ class DatastarAttributes:
         storage_key: str | None = None,
         session: bool = False,
     ) -> Attrs:
-        """Persist signals. **Datastar Pro only.**
+        """Persist signals.
 
         ```python
-        data.persist(include="draft", storage_key="prefs", session=True)
-        # Attrs(' data-persist:prefs__session="{'include':'draft'}"')
+        data.pro.persist(include=["draft"], storage_key="prefs", session=True)
+        # data-persist:prefs__session="{'include':'^(?:draft)(?:\\\\.|$)'}"
         ```
         """
         filters = filter_js(include, exclude)
-        value: str | bool = filters if filters is not None else True
         if storage_key is not None:
             validate_attribute_key(storage_key)
         key = (
@@ -802,9 +1033,9 @@ class DatastarAttributes:
         )
         if session:
             key += "__session"
-        if value is True:
+        if filters is None:
             return Attrs(f" {key}")
-        return Attrs(f' {key}="{escape_attr(cast(str, value))}"')
+        return Attrs(f' {key}="{escape_attr(filters)}"')
 
     def query_string(
         self,
@@ -814,11 +1045,11 @@ class DatastarAttributes:
         filter_empty: bool = False,
         history: bool = False,
     ) -> Attrs:
-        """Sync signals with the URL. **Datastar Pro only.**
+        """Sync signals with the URL.
 
         ```python
-        data.query_string(include="page", history=True)
-        # Attrs(' data-query-string__history="{'include':'page'}"')
+        data.pro.query_string(include=["page"], history=True)
+        # data-query-string__history="{'include':'^(?:page)(?:\\\\.|$)'}"
         ```
         """
         modifiers: list[str] = []
@@ -832,16 +1063,15 @@ class DatastarAttributes:
         else:
             key = self.prefix + "query-string"
         filters = filter_js(include, exclude)
-        value: str | bool = filters if filters is not None else True
-        if value is True:
+        if filters is None:
             return Attrs(f" {key}")
-        return Attrs(f' {key}="{escape_attr(cast(str, value))}"')
+        return Attrs(f' {key}="{escape_attr(filters)}"')
 
     def replace_url(self, expression: str) -> Attrs:
-        """Replace the current browser URL. **Datastar Pro only.**
+        """Replace the current browser URL.
 
         ```python
-        data.replace_url("`/page/${$page}`")
+        data.pro.replace_url("`/page/${$page}`")
         # Attrs(' data-replace-url="`/page/${$page}`"')
         ```
         """
@@ -855,10 +1085,10 @@ class DatastarAttributes:
         vertical: Literal["start", "center", "end", "nearest"] | None = None,
         focus: bool = False,
     ) -> Attrs:
-        """Scroll this element into view. **Datastar Pro only.**
+        """Scroll this element into view.
 
         ```python
-        data.scroll_into_view(behavior="smooth", vertical="center", focus=True)
+        data.pro.scroll_into_view(behavior="smooth", vertical="center", focus=True)
         # Attrs(' data-scroll-into-view__smooth__vcenter__focus')
         ```
         """
@@ -877,10 +1107,10 @@ class DatastarAttributes:
         return Attrs(f" {self.prefix}scroll-into-view")
 
     def view_transition(self, expression: str) -> Attrs:
-        """Set `view-transition-name`. **Datastar Pro only.**
+        """Set `view-transition-name`.
 
         ```python
-        data.view_transition("$id")
+        data.pro.view_transition("$id")
         # Attrs(' data-view-transition="$id"')
         ```
         """

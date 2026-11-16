@@ -9,9 +9,12 @@ from stario import Route
 from stario.datastar import (
     DATASTAR_CDN_URL,
     SSE,
+    Debounce,
     ModuleScript,
+    Throttle,
     at,
     data,
+    literal,
 )
 from stario.datastar.attributes import DatastarAttributes
 from stario.datastar.format import (
@@ -31,6 +34,12 @@ from stario.markup import render
 from stario.markup.escape import escape_attribute_value, escape_sq_attribute_value
 from stario.markup.types import Attrs
 from tests.helpers import TestWriter
+
+
+def _old_signal(name: str, expression: str, *, if_missing: bool = False) -> Attrs:
+    """`data.signal` (deprecated) for the wire-format tables."""
+    with pytest.warns(DeprecationWarning, match="data.signal"):
+        return data.signal(name, expression, if_missing=if_missing)
 
 
 class _ClosedLoop:
@@ -403,7 +412,7 @@ class TestSseEventMeta:
     def test_patch_elements_emits_id_and_retry_after_event_line(self):
         w, _sink, loop = _make_writer()
         try:
-            SSE(w).patch_elements(b"<p>x</p>", event_id="e7", retry=250)
+            SSE(w).patch_elements(b"<p>x</p>", event_id="e7", retry="250ms")
             body = _sse_body(w)
             assert body.startswith(
                 b"event: datastar-patch-elements\nid: e7\nretry: 250\n"
@@ -414,17 +423,35 @@ class TestSseEventMeta:
     def test_retry_default_1000_is_omitted(self):
         w, _sink, loop = _make_writer()
         try:
-            SSE(w).patch_elements(b"<p>x</p>", retry=1000)
+            SSE(w).patch_elements(b"<p>x</p>", retry="1s")
             assert b"retry:" not in _sse_body(w)
         finally:
             loop.close()
 
-    @pytest.mark.parametrize("retry", [0, -1, True, "500", 2.5])
-    def test_retry_must_be_positive_int(self, retry):
+    @pytest.mark.parametrize(
+        ("retry", "message"),
+        [
+            (1000, "has no unit"),
+            (2.5, "has no unit"),
+            (True, "Invalid duration"),
+            ("500", "Invalid duration"),
+            ("1.5s", "has a dot"),
+            ("0ms", "longer than 0"),
+        ],
+    )
+    def test_retry_is_a_positive_duration(self, retry, message):
         w, _sink, loop = _make_writer()
         try:
-            with pytest.raises(StarioError, match="positive int"):
+            with pytest.raises(StarioError, match=message):
                 SSE(w).patch_elements(b"<p>x</p>", retry=cast(Any, retry))
+        finally:
+            loop.close()
+
+    def test_retry_seconds_go_out_as_milliseconds(self):
+        w, _sink, loop = _make_writer()
+        try:
+            SSE(w).patch_signals({"n": 1}, retry="3s")
+            assert b"retry: 3000\n" in _sse_body(w)
         finally:
             loop.close()
 
@@ -441,7 +468,7 @@ class TestSseEventMeta:
         w, _sink, loop = _make_writer()
         try:
             sse = SSE(w)
-            sse.patch_signals({"n": 1}, event_id="s1", retry=50)
+            sse.patch_signals({"n": 1}, event_id="s1", retry="50ms")
             sse.remove("#x", event_id="r1")
             body = _sse_body(w)
             assert b"event: datastar-patch-signals\nid: s1\nretry: 50\n" in body
@@ -454,7 +481,7 @@ class TestSseEventMeta:
         try:
             sse = SSE(w)
             sse.execute_script("console.log(1)", event_id="js1")
-            sse.navigate("/next", retry=42)
+            sse.navigate("/next", retry="42ms")
             body = _sse_body(w)
             assert body.count(b"id: js1\n") == 1
             assert body.count(b"retry: 42\n") == 1
@@ -480,7 +507,7 @@ class TestDatastarAttributeValidation:
         assert data.on("myEvent", "go()") == Attrs(
             ' data-on:my-event__case.camel="go()"'
         )
-        assert data.on("DOMContentLoaded", "go()", target="window") == Attrs(
+        assert data.on("DOMContentLoaded", "go()", window=True) == Attrs(
             ' data-on:d-o-m-content-loaded__window__case.pascal="go()"'
         )
         # An explicit case wins over inference.
@@ -524,18 +551,39 @@ class TestDatastarAttributeValidation:
 
     @pytest.mark.parametrize(
         "time",
-        [None, True, -1, -0.1, float("inf"), "0.5s", "150", "fast", "1.2ms"],
+        [
+            None,
+            True,
+            -1,
+            -0.1,
+            float("inf"),
+            "0.5s",
+            "150",
+            "fast",
+            "1.2ms",
+            "05s",
+            "ms",
+            "s",
+            "1m",
+            "٣s",
+        ],
     )
-    def test_time_to_string_rejects_ambiguous_values(self, time):
-        with pytest.raises(StarioError, match="Invalid Datastar time value"):
+    def test_time_to_string_rejects_everything_but_whole_ms_or_s(self, time):
+        with pytest.raises(StarioError, match=r"no unit|has a dot|Invalid duration"):
             time_to_string(time)
 
     def test_timing_modifier_helpers_reject_unknown_modifiers(self):
-        with pytest.raises(StarioError, match="Invalid debounce modifier"):
-            debounce_to_string(("150ms", "trailing"))  # type: ignore[arg-type]
+        with (
+            pytest.warns(DeprecationWarning, match="Debounce"),
+            pytest.raises(StarioError, match="Invalid debounce modifier"),
+        ):
+            debounce_to_string(cast(Any, ("150ms", "trailing")))
 
-        with pytest.raises(StarioError, match="Invalid throttle modifier"):
-            throttle_to_string(("150ms", "leading"))  # type: ignore[arg-type]
+        with (
+            pytest.warns(DeprecationWarning, match="Throttle"),
+            pytest.raises(StarioError, match="Invalid throttle modifier"),
+        ):
+            throttle_to_string(cast(Any, ("150ms", "leading")))
 
 
 class TestStringLiteral:
@@ -582,23 +630,23 @@ class TestSignalNames:
             (data.ref("ui.el"), Attrs(' data-ref="ui.el"')),
             # signal: value-form object; dotted names nest
             (
-                data.signal("myCount", "0"),
+                _old_signal("myCount", "0"),
                 Attrs(" data-signals=\"{'myCount': (0)}\""),
             ),
             (
-                data.signal("_local", "0"),
+                _old_signal("_local", "0"),
                 Attrs(" data-signals=\"{'_local': (0)}\""),
             ),
             (
-                data.signal("ui.open", "0"),
+                _old_signal("ui.open", "0"),
                 Attrs(" data-signals=\"{'ui': {'open': (0)}}\""),
             ),
             (
-                data.signal("myCount", "$a, $b"),
+                _old_signal("myCount", "$a, $b"),
                 Attrs(" data-signals=\"{'myCount': ($a, $b)}\""),
             ),
             (
-                data.signal("myCount", "0", if_missing=True),
+                _old_signal("myCount", "0", if_missing=True),
                 Attrs(" data-signals__ifmissing=\"{'myCount': (0)}\""),
             ),
             # signals(): JSON form, keys verbatim
@@ -623,19 +671,19 @@ class TestSignalNames:
             ),
             # match_media: key form spelled to round-trip through case conversion
             (
-                data.match_media("isDark", "$dark"),
+                data.pro.match_media("isDark", "$dark"),
                 Attrs(' data-match-media:is-dark="$dark"'),
             ),
             (
-                data.match_media("is_dark", "$dark"),
+                data.pro.match_media("is_dark", "$dark"),
                 Attrs(' data-match-media:is_dark__case.kebab="$dark"'),
             ),
             (
-                data.match_media("IsDark", "$dark"),
+                data.pro.match_media("IsDark", "$dark"),
                 Attrs(' data-match-media:is-dark__case.pascal="$dark"'),
             ),
             (
-                data.match_media("_menu_open", "$dark"),
+                data.pro.match_media("_menu_open", "$dark"),
                 Attrs(' data-match-media:_menu_open__case.kebab="$dark"'),
             ),
         ],
@@ -792,7 +840,7 @@ class TestDatastarAttributeMatrix:
                 {"data-on:click__prevent": "go()"},
             ),
             (
-                data.on("keydown", "go()", debounce=("150ms", "leading")),
+                data.on("keydown", "go()", debounce=Debounce("150ms", leading=True)),
                 {"data-on:keydown__debounce.150ms.leading": "go()"},
             ),
             (
@@ -804,12 +852,12 @@ class TestDatastarAttributeMatrix:
                 {"data-on-intersect__viewtransition": "seen()"},
             ),
             (
-                data.persist(include=["draft", "settings"]),
-                {"data-persist": "{'include':'draft|settings'}"},
+                data.pro.persist(include=["draft", "settings"]),
+                {"data-persist": "{'include':'^(?:draft|settings)(?:\\x5c.|$)'}"},
             ),
-            (data.persist(session=True), {"data-persist__session": True}),
+            (data.pro.persist(session=True), {"data-persist__session": True}),
             (
-                data.persist(storage_key="prefs", session=True),
+                data.pro.persist(storage_key="prefs", session=True),
                 {"data-persist:prefs__session": True},
             ),
             (
@@ -817,7 +865,9 @@ class TestDatastarAttributeMatrix:
                 {"data-star-text": "$title"},
             ),
             (
-                data.scroll_into_view(behavior="smooth", vertical="center", focus=True),
+                data.pro.scroll_into_view(
+                    behavior="smooth", vertical="center", focus=True
+                ),
                 {"data-scroll-into-view__smooth__vcenter__focus": True},
             ),
         ],
@@ -874,15 +924,18 @@ class TestDatastarActions:
     """Test Datastar action helpers."""
 
     def test_get_with_query(self):
-        action = at.get("/search", {"q": "test"})
+        with pytest.warns(DeprecationWarning, match="queries"):
+            action = at.get("/search", {"q": "test"})
         assert action == "@get('/search?q=test')"
 
     def test_get_merges_existing_query(self):
-        action = at.get("/search?sort=recent", {"q": "test"})
+        with pytest.warns(DeprecationWarning, match="queries"):
+            action = at.get("/search?sort=recent", {"q": "test"})
         assert action == "@get('/search?sort=recent&q=test')"
 
     def test_get_query_uses_doseq(self):
-        action = at.get("/search", {"tag": ["a", "b"]})
+        with pytest.warns(DeprecationWarning, match="queries"):
+            action = at.get("/search", {"tag": ["a", "b"]})
         assert action == "@get('/search?tag=a&tag=b')"
 
     def test_post_with_options(self):
@@ -913,7 +966,7 @@ class TestDatastarActions:
 
     def test_retry_max_wait_uses_v1_option_name(self):
         """Datastar 1.0.x expects `retryMaxWait`, not `retryMaxWaitMs`."""
-        action = at.get("/api", retry_max_wait_ms=5_000)
+        action = at.get("/api", retry_max_wait="5s")
         assert "retryMaxWait: 5000" in action
         assert "retryMaxWaitMs" not in action
 
@@ -931,9 +984,9 @@ class TestDatastarActions:
             open_when_hidden=None,
             payload=None,
             retry=None,
-            retry_interval_ms=None,
+            retry_interval=None,
             retry_scaler=None,
-            retry_max_wait_ms=None,
+            retry_max_wait=None,
             retry_max_count=None,
             request_cancellation=None,
         )
@@ -945,18 +998,22 @@ class TestDatastarActions:
         assert action == "@delete('/api/item/123')"
 
     def test_query(self):
-        action = at.query("/search", {"page": "2"}, include="q")
+        action = at.query("/search?page=2", include="q")
         assert action == ("@query('/search?page=2', {filterSignals: {'include':'q'}})")
 
     def test_intl_basic(self):
-        action = at.intl("number", "$price", {"style": "currency", "currency": "USD"})
+        action = at.pro.intl(
+            "number", "$price", {"style": "currency", "currency": "USD"}
+        )
         assert (
             action == "@intl('number', $price, {'style':'currency','currency':'USD'})"
         )
 
     def test_set_all_with_filters(self):
         action = at.set_all("null", include=["draft"], exclude="tmp.*")
-        assert action == "@setAll(null, {'include':'draft','exclude':'tmp.*'})"
+        assert action == (
+            "@setAll(null, {'include':'^(?:draft)(?:\\x5c.|$)','exclude':'tmp.*'})"
+        )
 
     def test_actions_take_route_href(self):
         subscribe = Route("GET /rooms/{room_id}/subscribe")
@@ -1007,8 +1064,8 @@ class TestBackslashNeverPrecedesAClosingQuote:
         assert json.loads(raw) == payload
 
 
-class TestBareIntTimes:
-    """A bare int of 10 or more in debounce/throttle/delay is a missing unit."""
+class TestDurations:
+    """A duration is a string with a unit everywhere; a number raises with the fix."""
 
     @pytest.mark.parametrize(
         "make",
@@ -1016,46 +1073,294 @@ class TestBareIntTimes:
             lambda t: data.on("input", "go()", debounce=t),
             lambda t: data.on("input", "go()", throttle=t),
             lambda t: data.on("input", "go()", delay=t),
-            lambda t: data.on("input", "go()", debounce=(t, "leading")),
-            lambda t: data.on("input", "go()", throttle=(t, "trailing")),
             lambda t: data.init("go()", delay=t),
+            lambda t: data.on_interval("go()", duration=t),
             lambda t: data.on_intersect("go()", debounce=t),
             lambda t: data.on_signal_patch("go()", throttle=t),
-            lambda t: data.on_raf("go()", throttle=t),
-            lambda t: data.on_resize("go()", debounce=t),
+            lambda t: data.pro.on_raf("go()", throttle=t),
+            lambda t: data.pro.on_resize("go()", debounce=t),
+            lambda t: Debounce(t),
+            lambda t: Throttle(t),
+            lambda t: at.get("/x", retry_interval=t),
+            lambda t: at.get("/x", retry_max_wait=t),
         ],
     )
-    def test_millisecond_count_without_a_unit_raises(self, make):
-        with pytest.raises(StarioError, match="would wait 300 seconds") as info:
-            make(300)
+    @pytest.mark.parametrize("number", [300, 2, 0])
+    def test_every_number_raises_with_both_units(self, make, number):
+        with pytest.raises(StarioError, match="has no unit") as info:
+            make(number)
         help_text = info.value.help_text or ""
-        assert "'300ms'" in help_text
-        assert "0.3" in help_text
-        assert "'300s'" in help_text
+        assert f"'{number}ms'" in help_text
+        assert f"'{number}s'" in help_text
 
-    def test_error_names_the_argument(self):
-        with pytest.raises(StarioError, match=r"throttle=10 would wait"):
-            data.on("scroll", "go()", throttle=10)
+    def test_float_seconds_suggest_milliseconds(self):
+        with pytest.raises(StarioError, match=r"debounce=0\.3 has no unit") as info:
+            data.on("input", "go()", debounce=cast(Any, 0.3))
+        assert "debounce='300ms'" in (info.value.help_text or "")
 
-    @pytest.mark.parametrize(
-        ("value", "rendered"),
-        [
-            (2, "2s"),
-            (9, "9s"),
-            (0, "0s"),
-            (0.3, "300ms"),
-            ("300ms", "300ms"),
-            ("30s", "30s"),
-        ],
-    )
-    def test_small_ints_floats_and_strings_still_work(self, value, rendered):
+    def test_on_interval_500_no_longer_waits_500_seconds(self):
+        with pytest.raises(StarioError, match="duration=500 has no unit"):
+            data.on_interval("poll()", duration=cast(Any, 500))
+
+    def test_fractional_seconds_name_the_dot_rule(self):
+        with pytest.raises(StarioError, match="has a dot") as info:
+            data.on("input", "go()", debounce="1.5s")
+        assert "'1500ms'" in (info.value.help_text or "")
+
+    @pytest.mark.parametrize("value", ["300ms", "30s", "0ms", "0s"])
+    def test_strings_with_a_unit_render_as_they_are(self, value):
         assert data.on("input", "go()", debounce=value) == Attrs(
-            f' data-on:input__debounce.{rendered}="go()"'
+            f' data-on:input__debounce.{value}="go()"'
+        )
+        assert f"duration.{value}" in data.on_interval("p()", duration=value).rendered
+
+    def test_retry_times_go_to_datastar_in_milliseconds(self):
+        assert at.get("/live", retry_interval="2s", retry_max_wait="500ms") == (
+            "@get('/live', {retryInterval: 2000, retryMaxWait: 500})"
         )
 
-    def test_interval_duration_keeps_whole_seconds(self):
-        # A 30 s poll written as an int is common and meant.
-        assert "duration.30s" in data.on_interval("poll()", duration=30).rendered
+    def test_old_retry_ms_names_warn_and_still_work(self):
+        with pytest.warns(DeprecationWarning, match="retry_interval='1500ms'"):
+            action = at.get("/old-retry", retry_interval_ms=1500)
+        assert action == "@get('/old-retry', {retryInterval: 1500})"
+        with pytest.raises(StarioError, match="not both"):
+            at.get("/both", retry_interval="1s", retry_interval_ms=1000)
+
+    def test_branch_threshold_is_gone(self):
+        from stario.datastar import format as fmt
+
+        assert not hasattr(fmt, "BARE_SECONDS_LIMIT")
+
+
+class TestDebounceThrottle:
+    def test_defaults_are_datastars_own(self):
+        assert Debounce("300ms").modifier == "debounce.300ms"
+        assert Throttle("1s").modifier == "throttle.1s"
+
+    def test_edge_flags(self):
+        assert (
+            Debounce("300ms", leading=True, trailing=False).modifier
+            == "debounce.300ms.leading.notrailing"
+        )
+        assert Debounce("300ms", leading=True).modifier == "debounce.300ms.leading"
+        assert (
+            Throttle("1s", leading=False, trailing=True).modifier
+            == "throttle.1s.noleading.trailing"
+        )
+        assert Throttle("1s", trailing=True).modifier == "throttle.1s.trailing"
+
+    def test_neither_edge_raises(self):
+        with pytest.raises(StarioError, match="never runs"):
+            Debounce("300ms", trailing=False)
+        with pytest.raises(StarioError, match="never runs"):
+            Throttle("1s", leading=False)
+
+    def test_used_in_helpers(self):
+        assert data.on(
+            "scroll", "go()", throttle=Throttle("100ms", trailing=True)
+        ) == Attrs(' data-on:scroll__throttle.100ms.trailing="go()"')
+        assert data.on_signal_patch(
+            "save()", debounce=Debounce("1s", leading=True)
+        ) == Attrs(' data-on-signal-patch__debounce.1s.leading="save()"')
+
+    def test_frozen_and_hashable(self):
+        assert hash(Debounce("300ms")) == hash(Debounce("300ms"))
+        assert Debounce("300ms") == Debounce("300ms")
+        with pytest.raises(AttributeError):
+            Debounce("300ms").wait = "1s"  # type: ignore[misc]
+
+    def test_tuples_warn_and_still_render(self):
+        with pytest.warns(DeprecationWarning, match="Debounce"):
+            attrs = data.on(
+                "input", "tuple_debounce()", debounce=cast(Any, ("150ms", "leading"))
+            )
+        assert attrs == Attrs(
+            ' data-on:input__debounce.150ms.leading="tuple_debounce()"'
+        )
+
+
+class TestStatements:
+    def test_on_joins_statements_in_order(self):
+        assert data.on(
+            "submit", at.post("/rename"), "$_edit = false", prevent=True
+        ) == Attrs(" data-on:submit__prevent=\"@post('/rename'); $_edit = false\"")
+
+    def test_init_and_effect_join_statements(self):
+        assert data.init("a()", "b()") == Attrs(' data-init="a(); b()"')
+        assert data.effect("a()", "b()") == Attrs(' data-effect="a(); b()"')
+        assert data.on_interval("a()", "b()", duration="2s") == Attrs(
+            ' data-on-interval__duration.2s="a(); b()"'
+        )
+
+    @pytest.mark.parametrize(
+        "make",
+        [
+            lambda: data.on("click"),
+            lambda: data.init(),
+            lambda: data.effect(),
+            lambda: data.on_interval(),
+        ],
+    )
+    def test_no_statement_raises(self, make):
+        with pytest.raises(StarioError, match="needs at least one statement"):
+            make()
+
+
+class TestLiteral:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("O'Brien", "'O\\'Brien'"),
+            ("</script>", "'\\x3c/script>'"),
+            (3, "3"),
+            (2.5, "2.5"),
+            (True, "true"),
+            (None, "null"),
+            ({"n": 1, "tags": ["a", "b"]}, "{'n':1,'tags':['a','b']}"),
+            (("x",), "['x']"),
+        ],
+    )
+    def test_python_values_become_js_literals(self, value, expected):
+        assert literal(value) == expected
+
+    def test_string_literal_is_the_same_for_text(self):
+        assert literal("a\\b") == string_literal("a\\b")
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), b"x", object()])
+    def test_refuses_what_js_cannot_hold(self, value):
+        with pytest.raises(StarioError, match="literal"):
+            literal(cast(Any, value))
+
+    def test_refuses_non_str_keys(self):
+        with pytest.raises(StarioError, match="keys must be str"):
+            literal(cast(Any, {1: "x"}))
+
+
+class TestSignalFilters:
+    """Names are exact paths; an exclude never sends local signals."""
+
+    def _regex(self, action: str, which: str) -> str:
+        import re
+
+        js = re.search(rf"'{which}':'([^']*)'", action)
+        assert js is not None, action
+        return js[1].replace("\\x5c", "\\")
+
+    def test_names_are_anchored_paths(self):
+        import re
+
+        pattern = re.compile(
+            self._regex(at.post("/x", include=["id", "form"]), "include")
+        )
+        assert pattern.search("id")
+        assert pattern.search("form.title")
+        assert not pattern.search("video")
+        assert not pattern.search("form2")
+        assert not pattern.search("idx")
+        assert not pattern.search("user.id")
+
+    def test_exclude_keeps_local_signals_out(self):
+        import re
+
+        pattern = re.compile(self._regex(at.post("/x", exclude=["secret"]), "exclude"))
+        assert pattern.search("_draft")
+        assert pattern.search("form._open")
+        assert pattern.search("secret")
+        assert not pattern.search("title")
+
+    def test_exclude_regex_string_keeps_local_signals_out(self):
+        action = at.post("/x", exclude="tmp")
+        assert "'exclude':'(^|\\x5c.)_|tmp'" in action
+
+    def test_include_only_leaves_datastars_default_exclude(self):
+        assert "exclude" not in at.post("/x", include=["title"])
+
+    def test_client_side_filters_do_not_add_the_local_rule(self):
+        # setAll / toggleAll / json-signals never leave the browser.
+        assert at.set_all("null", exclude=["a"]) == (
+            "@setAll(null, {'exclude':'^(?:a)(?:\\x5c.|$)'})"
+        )
+
+
+class TestNewSseCommands:
+    def test_replace_url_escapes_like_navigate(self):
+        w, _sink, loop = _make_writer()
+        try:
+            SSE(w).replace_url("/?q=a b&type=fire")
+            body = _sse_body(w).decode()
+            assert "history.replaceState(history.state, '', " in body
+            assert "mode append" in body
+            assert "selector body" in body
+            assert "/?q=a%20b&type=fire" in body
+        finally:
+            loop.close()
+
+    def test_replace_url_refuses_unsafe_targets(self):
+        w, _sink, loop = _make_writer()
+        try:
+            with pytest.raises(StarioError):
+                SSE(w).replace_url("javascript:alert(1)")
+        finally:
+            loop.close()
+
+
+class TestDeprecations:
+    def test_queries_warn(self):
+        with pytest.warns(DeprecationWarning, match=r"ROUTE\.href\(query="):
+            assert at.get("/warn-items", {"q": "x"}) == "@get('/warn-items?q=x')"
+
+    def test_data_signal_warns(self):
+        with pytest.warns(DeprecationWarning, match=r"data\.signals"):
+            data.signal("count", "0")
+
+    def test_target_warns_and_maps_to_the_flag(self):
+        with pytest.warns(DeprecationWarning, match="outside=True"):
+            attrs = data.on("click", "close_target()", target="outside")
+        assert attrs == data.on("click", "close_target()", outside=True)
+
+    @pytest.mark.parametrize(
+        "call",
+        [
+            lambda: data.persist(),
+            lambda: data.query_string(),
+            lambda: data.replace_url("$u"),
+            lambda: data.animate("$x"),
+            lambda: data.scroll_into_view(),
+            lambda: at.clipboard("x"),
+            lambda: at.fit("$v", 0, 1, 0, 100),
+        ],
+    )
+    def test_pro_names_warn_and_forward(self, call):
+        with pytest.warns(DeprecationWarning, match=r"\.pro\."):
+            call()
+
+    def test_listener_places_are_exclusive(self):
+        with pytest.raises(StarioError, match="one of window, document and outside"):
+            data.on("click", "go()", window=True, outside=True)
+
+
+class TestHelperCache:
+    def test_same_arguments_return_the_same_fragment(self):
+        assert data.on("click", "cached()") is data.on("click", "cached()")
+        assert data.on("input", "cached()", debounce="300ms") is data.on(
+            "input", "cached()", debounce="300ms"
+        )
+        assert at.post("/cached") is at.post("/cached")
+        assert at.post("/cached", include=["a"]) is at.post("/cached", include=["a"])
+
+    def test_prefix_is_part_of_the_key(self):
+        star = DatastarAttributes("data-star-")
+        assert star.on("click", "go()") == Attrs(' data-star-on:click="go()"')
+        assert data.on("click", "go()") == Attrs(' data-on:click="go()"')
+
+    def test_a_bad_call_still_raises_after_a_good_one(self):
+        data.on("click", "go()")
+        with pytest.raises(StarioError):
+            data.on("click", "go()", debounce=cast(Any, 300))
+
+    def test_unhashable_options_are_built_not_cached(self):
+        action = at.post("/h", headers={"X-A": "b"}, payload={"t": "$t"})
+        assert action == at.post("/h", headers={"X-A": "b"}, payload={"t": "$t"})
 
 
 class TestSignalsTakeMappingsAndSequences:

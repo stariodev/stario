@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from stario.http.route import Route
+from stario.testing.client import DatastarReplyError
 
 if TYPE_CHECKING:
     from stario.http.dispatch import Node
@@ -220,6 +221,9 @@ async def _stream_problems(client: TestClient, url: str, page: _Page) -> list[st
                     )
                     continue
                 event = await _first_event(response)
+        except DatastarReplyError as error:
+            found.append(f"{url}: the stream {live} answers {error.status_code}")
+            continue
         except TimeoutError:
             event = None
         if event is None:
