@@ -36,8 +36,8 @@ In `data.*` and `at.*`, a `str` argument is a Datastar expression, which is code
 
 ```python
 data.on("click", f"$tags = $tags.filter(t => t !== {literal(tag)})")
-at.post(SAVE.href(), payload={"title": title})               # data: the text
-at.post(SAVE.href(), payload="{id: $id, title: el.value}")   # one expression
+at.post(SAVE.href(), payload={"title": title})  # data: the text
+at.post(SAVE.href(), payload="{id: $id, title: el.value}")  # one expression
 ```
 
 Datastar runs every attribute with one of its names, also one that you write in a mapping or with `markup.data()`. For example, `data({"text": label})` writes `data-text`, and Datastar runs the label as code. Use other names for plain data, such as `data-label` and `data-testid`.

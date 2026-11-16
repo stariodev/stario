@@ -235,7 +235,7 @@ class ServerConfig:
         if unix_socket is None and not host.strip():
             raise StarioError(
                 "host must be non-empty for TCP listen",
-                help_text="Set STARIO_HOST (or HOST) or pass a non-empty host to ServerConfig.",
+                help_text="Set STARIO_HOST or pass a non-empty host to ServerConfig.",
             )
         if threads < 1:
             raise StarioError(
@@ -297,10 +297,11 @@ class ServerConfig:
         """Read `STARIO_*` listen, limit, compression, and shutdown settings.
 
         The port is `STARIO_PORT`, else `PORT`, else 8000. The host is
-        `STARIO_HOST`, else `HOST`, else `127.0.0.1`. Each is read on its own:
-        setting a port never changes the host, so a platform that sets only
-        `PORT` also needs `HOST=0.0.0.0` (or `STARIO_HOST`). A blank value
-        counts as unset.
+        `STARIO_HOST`, else `127.0.0.1`. Setting a port never changes the
+        host, so a platform that sets only `PORT` also needs
+        `STARIO_HOST=0.0.0.0`. A plain `HOST` is not read: tcsh, SuSE and
+        conda export it with values that are not bind addresses. A blank
+        value counts as unset.
         """
         return server_config_from_env()
 
@@ -313,15 +314,18 @@ def _port_from_env() -> int:
 
 
 def _host_from_env() -> str:
-    """`STARIO_HOST`, then `HOST`, then `DEFAULT_HOST`. Never derived from the port."""
-    return env_str("STARIO_HOST", env_str("HOST", DEFAULT_HOST))
+    """`STARIO_HOST`, then `DEFAULT_HOST`. Never derived from the port.
+
+    A plain `HOST` is not read: shells and tools export it (tcsh and SuSE
+    with the machine name, conda with a target triple).
+    """
+    return env_str("STARIO_HOST", DEFAULT_HOST)
 
 
 def server_config_from_env() -> ServerConfig:
     """Read `STARIO_*` listen, limit, compression, and shutdown settings.
 
-    The port falls back to `PORT` and the host to `HOST`; see
-    `ServerConfig.from_env`.
+    The port falls back to `PORT`; see `ServerConfig.from_env`.
     """
     return _config_from_env(
         lambda: ServerConfig(

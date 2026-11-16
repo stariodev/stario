@@ -115,16 +115,17 @@ def test_host_comes_from_stario_host(monkeypatch) -> None:
     assert ServerConfig.from_env().host == "10.0.0.5"
 
 
-def test_host_falls_back_to_host(monkeypatch) -> None:
+def test_plain_host_is_not_read(monkeypatch) -> None:
+    # tcsh and SuSE export HOST as the machine name; conda as a target triple.
     monkeypatch.delenv("STARIO_HOST", raising=False)
-    monkeypatch.setenv("HOST", "0.0.0.0")
-    assert ServerConfig.from_env().host == "0.0.0.0"
+    monkeypatch.setenv("HOST", "x86_64-apple-darwin13.4.0")
+    assert ServerConfig.from_env().host == "127.0.0.1"
 
 
-def test_blank_stario_host_falls_back_to_host(monkeypatch) -> None:
+def test_blank_stario_host_is_loopback(monkeypatch) -> None:
     monkeypatch.setenv("STARIO_HOST", " ")
     monkeypatch.setenv("HOST", "0.0.0.0")
-    assert ServerConfig.from_env().host == "0.0.0.0"
+    assert ServerConfig.from_env().host == "127.0.0.1"
 
 
 def test_host_defaults_to_loopback(monkeypatch) -> None:
