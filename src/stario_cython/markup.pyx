@@ -744,17 +744,6 @@ def shared_safe_string(rendered):
 # ---------------------------------------------------------------------------
 # Errors shared by Tag.__call__ and render
 
-cdef object _attrs_before_children_error(object tag_repr):
-    return StarioError(
-        "HTML attributes must be passed before children",
-        context={"tag": tag_repr},
-        help_text=(
-            "Pass attribute mappings and Attrs fragments first, then child nodes."
-        ),
-        example='h.Div(classes("card"), h.Span("ok"))',
-    )
-
-
 cdef object _unfilled_slot_name(object node):
     if type(node) is _BakeSlot:
         return _slot_name(node)
@@ -888,10 +877,37 @@ cdef object _bad_attr_value_error(object key, object value):
         },
         help_text=(
             "HTML attributes support scalar values only: str, SafeString, int, "
-            "float, bool, or None. Use helpers like classes(), styles(), or data() "
+            "float, bool, or None (and classes()/styles() as the value of "
+            "'class'/'style'). Use helpers like classes(), styles(), or data() "
             "for common formatting."
         ),
         example='h.Div({"id": "main"})',
+    )
+
+
+cdef object _attrs_value_fragment(object key, Attrs value):
+    """The fragment of an ``Attrs`` given as the value of ``key``.
+
+    ``{"class": classes("a", "b")}`` renders like ``classes("a", "b")``
+    passed to the tag. The fragment must hold exactly one attribute, named
+    ``key``; an empty fragment (``classes(None)``) renders nothing.
+    """
+    cdef str rendered = value.rendered
+    cdef list parsed
+    if not PyUnicode_GET_LENGTH(rendered):
+        return None
+    parsed = _parse_attrs(rendered)
+    if len(parsed) == 1 and parsed[0][0] == key:
+        return rendered
+    raise StarioError(
+        f"The value of attribute '{key}' is an Attrs fragment for other attributes",
+        context={"attribute": key, "value": rendered[:100]},
+        help_text=(
+            "An Attrs value inside a mapping must render that one attribute, "
+            "as classes() does for 'class' and styles() for 'style'. Pass any "
+            "other Attrs fragment (data.*, aria(), ...) to the tag itself."
+        ),
+        example='h.Div({"id": "card"}, data.on("click", "$open = true"), "text")',
     )
 
 
@@ -908,6 +924,8 @@ cdef object _attr_fragment(object key, object value):
         return None
     if value_type is int or value_type is float:
         return _pair_string(key, str(value))
+    if value_type is Attrs:
+        return _attrs_value_fragment(key, value)
     raise _bad_attr_value_error(key, value)
 
 
@@ -976,6 +994,7 @@ cdef int _push(Pair* pairs, Py_ssize_t* count, Py_ssize_t* total, unsigned int* 
 cdef int _push_value(Pair* pairs, Py_ssize_t* count, Py_ssize_t* total, unsigned int* maxchar,
                      object raw_key, object value) except -1:
     cdef object key
+    cdef object fragment
     cdef object value_type = type(value)
     if type(raw_key) is _BakeSlot or value_type is _BakeSlot:
         return _PAIR_SLOT
@@ -990,6 +1009,11 @@ cdef int _push_value(Pair* pairs, Py_ssize_t* count, Py_ssize_t* total, unsigned
         return _PAIR_OK
     if value_type is int or value_type is float:
         return _push(pairs, count, total, maxchar, key, str(value))
+    if value_type is Attrs:
+        fragment = _attrs_value_fragment(key, value)
+        if fragment is None:
+            return _PAIR_OK
+        return _push(pairs, count, total, maxchar, None, fragment)
     raise _bad_attr_value_error(key, value)
 
 
@@ -1036,7 +1060,19 @@ cdef object _one_pair(object raw_key, object value, bint* fallback):
         return None
     if value_type is int or value_type is float:
         return _pair_string(key, str(value))
+    if value_type is Attrs:
+        return _attrs_value_fragment(key, value)
     raise _bad_attr_value_error(key, value)
+
+
+cdef inline bint _is_attr_arg(object arg):
+    """What ``Tag.__call__`` takes as attributes: Attrs or a mapping."""
+    cdef object arg_type = type(arg)
+    if arg_type is Attrs or arg_type is dict:
+        return True
+    if arg_type is bool or arg_type is tuple or arg_type is str or arg_type is list:
+        return False
+    return isinstance(arg, _Mapping)
 
 
 cdef object _attrs_one_string(tuple args, Py_ssize_t end, bint* fallback):
@@ -1624,6 +1660,16 @@ cdef class Tag:
         self._raw_flush(run, out, &slots)
         return tuple(out)
 
+    cdef object _call_reordered(self, tuple args):
+        cdef list attrs = []
+        cdef list children = []
+        for arg in args:
+            if _is_attr_arg(arg):
+                PyList_Append(attrs, arg)
+            else:
+                PyList_Append(children, arg)
+        return self(*attrs, *children)
+
     def __call__(self, *args):
         """__call__($self, /, *children)
 --
@@ -1632,12 +1678,13 @@ cdef class Tag:
 
         Arguments are processed in order:
 
-        - Each leading mapping (`dict` or other `Mapping`) or `Attrs`
-          fragment renders into the opening tag, in order. Mappings are not
-          merged or deduplicated: duplicate names render twice. `None`
+        - Each mapping (`dict` or other `Mapping`) or `Attrs` fragment
+          renders into the opening tag, in the order given. Mappings are
+          not merged or deduplicated: duplicate names render twice. `None`
           values are skipped.
-        - The first other argument starts the children. A mapping after
-          that is an error (attributes must come first).
+        - Every other argument is a child, in order. Attributes may come
+          before or after children: `h.I("x", {"class": "icon"})` renders
+          `<i class="icon">x</i>`. Putting them first is the fast path.
         - A child must be `str`, `int`, `float`, `SafeString`, an `Element`,
           a `list` of those, or `None` (skipped). Anything else (a `bool`,
           a `tuple`, an uncalled `Tag`, another object) is an error here,
@@ -1652,6 +1699,7 @@ cdef class Tag:
         cdef bint has_children = False
         cdef bint has_attrs = False
         cdef bint has_mapping = False
+        cdef bint late_attrs = False
         cdef PyObject* arg
         cdef PyObject* arg_type
         cdef object attrs = None
@@ -1683,7 +1731,7 @@ cdef class Tag:
                 continue
             elif arg_type == <PyObject*>Attrs:
                 if has_children:
-                    raise _attrs_before_children_error(self._repr())
+                    late_attrs = True
                 has_attrs = True
                 continue
             elif (
@@ -1695,7 +1743,7 @@ cdef class Tag:
                 )
             ):
                 if has_children:
-                    raise _attrs_before_children_error(self._repr())
+                    late_attrs = True
                 has_attrs = True
                 has_mapping = True
                 continue
@@ -1704,6 +1752,11 @@ cdef class Tag:
             if not has_children:
                 has_children = True
                 first = i
+
+        if late_attrs:
+            # An attribute after a child: move every attribute in front of
+            # the children (each group keeps its order) and build from that.
+            return self._call_reordered(args)
 
         if has_children and self._void:
             raise StarioError(
