@@ -10,6 +10,7 @@ Datastar ignores every other status, so a 404 or a redirect never reaches
 the user: send `patch_elements`, `patch_signals` or `navigate` instead.
 """
 
+import warnings
 from collections.abc import Mapping
 from typing import Any, Literal
 
@@ -20,6 +21,7 @@ from stario.json import JsonValue
 from stario.json import dumps as json_dumps
 from stario.json import dumps_bytes as json_dumps_bytes
 from stario.markup.render import render_bytes
+from stario_cython.markup import check_raw_text
 
 from .format import (
     Duration,
@@ -81,11 +83,20 @@ def _sse_payload_lines(data: bytes) -> list[bytes]:
     return data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n")
 
 
-def _html_bytes(content: Any) -> bytes:
+def _html_bytes(content: Any, trusted: bool) -> bytes:
     """`patch_elements` content as bytes: trusted HTML as is, markup rendered."""
     if isinstance(content, bytes):
         return content
     if isinstance(content, str):
+        if not trusted:
+            warnings.warn(
+                "patch_elements(str) sends the str as HTML, but a str is text "
+                "everywhere else in Stario; in 6.0 it is text here too. Pass "
+                "trusted=True for finished HTML you built, or send h.* "
+                "markup, a SafeString or bytes.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
         return content.encode("utf-8")
     return render_bytes(content)
 
@@ -147,12 +158,14 @@ class SSE:
         view_transition_selector: str | None = None,
         event_id: str | None = None,
         retry: Duration | None = None,
+        trusted: bool = False,
     ) -> None:
-        """Patch DOM elements with Stario markup, or trusted `bytes` / `str` HTML.
+        """Patch DOM elements with Stario markup, a `SafeString`, or `bytes`.
 
-        Markup built with `h.*` is rendered with escaping. `bytes` and `str`
-        are sent as they are, like `w.html(str)`: they are trusted HTML, so
-        never pass user text this way — wrap it in an element instead.
+        Markup built with `h.*` is rendered with escaping. A `SafeString` and
+        `bytes` are finished HTML and go out as they are. A plain `str` does
+        too, with a `DeprecationWarning`: in 6.0 it is text, as in `h.*`.
+        Pass `trusted=True` for a `str` of finished HTML you built.
         """
         if mode is not None and mode not in _PATCH_MODES:
             raise StarioError(
@@ -177,7 +190,7 @@ class SSE:
             and retry is None
         ):
             # The common event: no options, so nothing else to check.
-            html_bytes = _html_bytes(content)
+            html_bytes = _html_bytes(content, trusted)
             if 10 not in html_bytes and 13 not in html_bytes:  # LF, CR
                 # One data line: the same bytes as the general path,
                 # without building the line list.
@@ -208,7 +221,7 @@ class SSE:
                         "viewTransitionSelector", view_transition_selector
                     )
                 )
-            html_bytes = _html_bytes(content)
+            html_bytes = _html_bytes(content, trusted)
 
         # SSE represents multiline payloads as repeated `data:` lines.
         # Split on CR, LF, and CRLF: a bare CR is a line terminator in the
@@ -307,8 +320,13 @@ class SSE:
     ) -> None:
         """Run trusted developer-authored JavaScript by appending a script element.
 
-        The code is streamed verbatim; do not interpolate untrusted input.
+        The code is streamed verbatim; do not interpolate untrusted input
+        (put values in with `literal()`). Code that holds `</script` or
+        `<!--` raises, as in `h.Script`.
         """
+        # The same check as h.Script: "</script" in the code would end the
+        # element and turn the rest into page markup.
+        check_raw_text(code, "script")
         code_bytes = code.encode("utf-8")
         if auto_remove:
             script = b'<script data-effect="el.remove();">' + code_bytes + b"</script>"

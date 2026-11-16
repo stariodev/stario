@@ -10,6 +10,27 @@ Changes that remove rules an app guide had to state, because coding agents
 read the rule and still got it wrong. Everything under Added is new
 surface; the behaviour under Changed says what an existing app sees.
 
+### Security
+
+From an audit of every escaping rule (rendered cases, and Datastar's own
+expression compiler for the Datastar ones).
+
+- **A `SafeString` attribute value escapes `"`, `<` and `>`.** `@baked`
+  returns a `SafeString`, so `h.Div({"title": tip(user_text)})` could end
+  the value and add `onfocus=...`. `&` stays, so entities you wrote
+  (`&nbsp;`) keep their meaning. `Attrs` stays the way to write raw
+  attribute bytes.
+- **A script URL in `href`, `src`, `action`, `formaction` or `xlink:href`
+  raises.** `javascript:` and `vbscript:` everywhere, and `data:` outside
+  `src` (an inline `<img src="data:...">` still works). The check reads the
+  scheme as a browser does (case, leading spaces and controls, tabs and
+  newlines inside it). `SafeString("javascript:void(0)")` opts out. Cost:
+  about 7 ns for a relative URL and 23 ns for an absolute one, on these
+  attributes only.
+- **`sse.execute_script(code)` raises on `</script` and `<!--`,** as
+  `h.Script` does. Before, such code ended the script element and the rest
+  became page markup.
+
 ### Added
 
 - **`from stario import at, data, SSE, read_signals`**, and `HtmlElement`,
@@ -75,6 +96,12 @@ surface; the behaviour under Changed says what an existing app sees.
   Datastar attributes per row renders in 175 µs instead of 396 µs (5.8.3),
   best of five interleaved runs; `data.on("input", at.get(url),
   debounce="300ms")` takes 0.55 µs instead of 1.85 µs.
+- **`stario.json.dumps_script(value)`**: JSON that is safe inside a
+  `<script>`, with `<`, `>`, `&`, U+2028 and U+2029 escaped. Still valid
+  JSON and JavaScript. `h.Script(dumps(data))` raises when the data holds
+  `</script`; its error now names `dumps_script`.
+- **`w.html(s, trusted=True)` and `sse.patch_elements(s, trusted=True)`**
+  send a `str` of finished HTML (a template engine's output) as it is.
 - **`TestClient` raises `DatastarReplyError`** when a request that sends
   `datastar-request` gets a reply other than 200 or 204. Datastar ignores
   such a reply, so the user would see nothing (a `w.text("not found",
@@ -108,10 +135,32 @@ surface; the behaviour under Changed says what an existing app sees.
 - **Datastar 1.0.5:** `ModuleScript()` loads `@v1.0.5` (bug fixes: `retry:
   'never'` stops, `data-bind` on number and date inputs).
 
+- **`aria()` writes `True` / `False` as `"true"` / `"false"`.** A bare
+  `aria-expanded` means `""` (undefined) to ARIA, and dropping the
+  attribute is not false. `None` still omits it.
+- **`styles()` accepts `"`, `&`, `<` and `>` in a value:**
+  `styles({"font-family": '"Inter", sans-serif'})` used to raise, because
+  the `;` check ran on the escaped text (`&quot;`). `; { } \` still raise.
+- **A leading newline in `<textarea>`, `<pre>` and `<listing>` is kept.**
+  The HTML parser drops one newline after these start tags, so Stario
+  writes one more when the text starts with a newline.
+- **`literal()` writes NUL as `\x00`.** Inside an attribute the browser
+  turned it into U+FFFD.
+- **`@baked` raw-text slots follow a direct `h.Script(...)` call:** a
+  `SafeString` goes out unchecked, and an element raises (it used to render
+  its HTML into the script).
+- **`data.class_`, `data.attr` and `data.style` refuse `__` in the name.**
+  It starts a Datastar modifier, so the rest changed how the attribute
+  worked.
+
 ### Deprecated
 
 Each warns with its replacement and goes in 6.0.
 
+- `w.html(str)` and `sse.patch_elements(str)` without `trusted=True`. A
+  `str` is text everywhere else in Stario (`h.Div(s)`), and in 6.0 it is
+  text here too. Send `h.*` markup, a `SafeString`, `bytes`, or pass
+  `trusted=True`.
 - `at.get(url, queries)`: build the URL with `ROUTE.href(query={...})`. A
   `$signal` in `queries` was sent as the literal text.
 - `retry_interval_ms=` / `retry_max_wait_ms=`: `retry_interval="1s"`.

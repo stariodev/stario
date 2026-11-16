@@ -36,7 +36,7 @@ from cpython.mem cimport PyMem_Free, PyMem_Malloc, PyMem_Realloc
 from cpython.object cimport PyObject
 from cpython.ref cimport Py_DECREF, Py_INCREF, Py_XDECREF
 from cpython.tuple cimport PyTuple_GET_ITEM, PyTuple_GET_SIZE
-from libc.string cimport memcpy
+from libc.string cimport memcmp, memcpy
 
 from stario.exceptions import StarioError
 
@@ -607,7 +607,8 @@ cdef int _check_raw_text(object text, object tag) except -1:
                 f"Raw text in <{tag}> is sent verbatim, so it must "
                 f"not contain '</{tag}'"
                 + (" or '<!--'" if script else "")
-                + ". Build it differently, or pass a SafeString if you "
+                + ". For JSON data use stario.json.dumps_script(value); for "
+                "a JS value use literal(value). Pass a SafeString if you "
                 "control the bytes."
             ),
             example='h.Script("const tag = \'<\\\\/script>\';")',
@@ -911,13 +912,105 @@ cdef object _attrs_value_fragment(object key, Attrs value):
     )
 
 
+cdef object _safe_attr_text(object s):
+    """A ``SafeString`` in an attribute value: ``"`` ``<`` ``>`` escaped.
+
+    ``&`` stays, so entities the author wrote (``&nbsp;``, ``&#39;``) keep
+    their meaning. A ``"`` can no longer end the value and start another
+    attribute: ``@baked`` output (a ``SafeString``) holds quotes as text.
+    ``Attrs`` stays the way to write raw attribute bytes.
+    """
+    if '"' in s or "<" in s or ">" in s:
+        return s.replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
+    return s
+
+
+cdef inline int _check_url_attr(object key, object value) except -1:
+    """Raise for a script URL in ``href`` / ``src`` / ``action`` / ``formaction``.
+
+    Cheap for the common case: a key of another length or first letter
+    returns at once, and so does a value without ``:``.
+    """
+    cdef Py_ssize_t n = PyUnicode_GET_LENGTH(key)
+    cdef unsigned int c
+    if n != 4 and n != 3 and n != 6 and n != 10:
+        return 0
+    c = <unsigned int>PyUnicode_READ_CHAR(key, 0) | 0x20
+    if c != 104 and c != 115 and c != 97 and c != 102 and c != 120:  # h s a f x
+        return 0
+    if ":" not in value:
+        return 0
+    return _check_url_scheme(key, value)
+
+
+cdef int _check_url_scheme(object key, object value) except -1:
+    cdef bint is_src
+    cdef int kind
+    cdef const void* text
+    cdef Py_ssize_t i = 0, n, m = 0
+    cdef unsigned int c
+    cdef char scheme[11]
+    if key == "href" or key == "action" or key == "formaction" or key == "xlink:href":
+        is_src = False
+    elif key == "src":
+        is_src = True
+    else:
+        name = key.lower()
+        if name == "src":
+            is_src = True
+        elif name == "href" or name == "action" or name == "formaction" or name == "xlink:href":
+            is_src = False
+        else:
+            return 0
+    # Read the scheme as the URL parser does: controls and spaces in front
+    # are dropped, and tabs and newlines anywhere ("java\tscript:").
+    kind = PyUnicode_KIND(value)
+    text = PyUnicode_DATA(value)
+    n = PyUnicode_GET_LENGTH(value)
+    while i < n and PyUnicode_READ(kind, text, i) <= 32:
+        i += 1
+    while i < n:
+        c = <unsigned int>PyUnicode_READ(kind, text, i)
+        i += 1
+        if c == 9 or c == 10 or c == 13:
+            continue
+        if c == 58:  # ":"
+            break
+        if 65 <= c <= 90:
+            c += 32
+        if c < 97 or c > 122 or m == 10:
+            return 0  # not a letter, or longer than "javascript": a safe scheme
+        scheme[m] = <char>c
+        m += 1
+    else:
+        return 0
+    if (
+        (m == 10 and memcmp(scheme, b"javascript", 10) == 0)
+        or (m == 8 and memcmp(scheme, b"vbscript", 8) == 0)
+        or (not is_src and m == 4 and memcmp(scheme, b"data", 4) == 0)
+    ):
+        raise StarioError(
+            f"{key}={value[:40]!r} is a script URL",
+            context={"attribute": key, "value": value[:100]},
+            help_text=(
+                "A javascript:, vbscript: or (outside src) data: URL runs code "
+                "or a page when the user clicks it. Link to a route "
+                "(ROUTE.href()), check user URLs for http(s), or pass "
+                "SafeString(url) when you wrote the URL yourself."
+            ),
+            example='h.A({"href": PROFILE.href(user_id=user.id)}, "Profile")',
+        )
+    return 0
+
+
 cdef object _attr_fragment(object key, object value):
     """`` key="value"`` for one scalar value, or None to omit (matches ``wire``)."""
     cdef object value_type = type(value)
     if value_type is str:
+        _check_url_attr(key, value)
         return _pair_string(key, c_escape_attr(value))
     if value_type is SafeString:
-        return _pair_string(key, (<SafeString>value).rendered)
+        return _pair_string(key, _safe_attr_text((<SafeString>value).rendered))
     if value is True:
         return f" {key}"
     if value is None or value is False:
@@ -1000,9 +1093,12 @@ cdef int _push_value(Pair* pairs, Py_ssize_t* count, Py_ssize_t* total, unsigned
         return _PAIR_SLOT
     key = _valid_key(raw_key)
     if value_type is str:
+        _check_url_attr(key, value)
         return _push(pairs, count, total, maxchar, key, c_escape_attr(value))
     if value_type is SafeString:
-        return _push(pairs, count, total, maxchar, key, (<SafeString>value).rendered)
+        return _push(
+            pairs, count, total, maxchar, key, _safe_attr_text((<SafeString>value).rendered)
+        )
     if value is True:
         return _push(pairs, count, total, maxchar, key, None)
     if value is None or value is False:
@@ -1051,9 +1147,10 @@ cdef object _one_pair(object raw_key, object value, bint* fallback):
         return None
     key = _valid_key(raw_key)
     if value_type is str:
+        _check_url_attr(key, value)
         return _pair_string(key, c_escape_attr(value))
     if value_type is SafeString:
-        return _pair_string(key, (<SafeString>value).rendered)
+        return _pair_string(key, _safe_attr_text((<SafeString>value).rendered))
     if value is True:
         return " " + key
     if value is None or value is False:
@@ -1479,6 +1576,7 @@ cdef class Tag:
     cdef readonly str empty_html           # "<div></div>" or "<br/>"
     cdef readonly Element empty            # the element a bare call returns
     cdef bint _void
+    cdef bint _keep_newline                # textarea, pre, listing (see _keep_leading_newline)
 
     def __init__(
         self,
@@ -1537,6 +1635,7 @@ cdef class Tag:
         self.empty_mode = empty
         self.raw_text = raw_text
         self._void = empty == "void"
+        self._keep_newline = name.lower() in ("textarea", "pre", "listing")
         # Every element built from this tag renders these: shared strings
         # (interned, so immortal, on free-threaded builds).
         tag_start = prefix + "<" + name
@@ -1786,6 +1885,8 @@ cdef class Tag:
                 # not keep them alive.
                 children = args[first:]
                 first = 0
+            if self._keep_newline:
+                children = _keep_leading_newline(children, first)
 
         if attrs is None and children is None:
             return self.empty
@@ -1797,6 +1898,36 @@ cdef class Tag:
         if children is not None and not self.raw_text:
             e._first = first
         return e
+
+
+cdef tuple _keep_leading_newline(tuple children, Py_ssize_t first):
+    """``<textarea>``, ``<pre>``, ``<listing>``: one more newline in front.
+
+    The HTML parser drops one newline right after these start tags, so
+    text that starts with a newline would lose it. A child that starts
+    with one gets a second; the parser drops that one.
+    """
+    cdef Py_ssize_t i
+    cdef PyObject* child
+    cdef object text
+    cdef Py_UCS4 c
+    for i in range(first, PyTuple_GET_SIZE(children)):
+        child = PyTuple_GET_ITEM(children, i)
+        if child == <PyObject*>None:
+            continue
+        if stario_type(child) == <PyObject*>str:
+            text = <object>child
+        elif stario_type(child) == <PyObject*>SafeString:
+            text = (<SafeString><object>child).rendered
+        else:
+            return children
+        if not PyUnicode_GET_LENGTH(text):
+            continue
+        c = PyUnicode_READ_CHAR(text, 0)
+        if c == 10 or c == 13:
+            return children[:i] + ("\n",) + children[i:]
+        return children
+    return children
 
 
 cdef class VoidTag(Tag):
@@ -1988,6 +2119,10 @@ cdef object _prefixed_fragment(object prefix, object key, object value):
         )
     if value_type is int or value_type is float:
         return _pair_string(wire_key, str(value))
+    if value_type is bool and prefix == "aria":
+        # ARIA states are the strings "true" / "false": a bare
+        # aria-expanded means "" (undefined), and dropping it is not false.
+        return _pair_string(wire_key, "true" if value else "false")
     return _attr_fragment(wire_key, value)
 
 
@@ -2069,9 +2204,11 @@ def styles(declarations):
         ):
             return _styles_checked(declarations)
         if value_type is str:
-            rendered_value = c_escape_attr(value)
-            if _css_breakout(rendered_value, False):
+            # Check the value itself: its escaped form has `;` in every
+            # entity (`&quot;`), which is not a breakout.
+            if _css_breakout(value, False):
                 return _styles_checked(declarations)
+            rendered_value = c_escape_attr(value)
         elif value_type is int or value_type is float:
             rendered_value = str(value)
         else:

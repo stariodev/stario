@@ -82,12 +82,14 @@ def _styles_checked(declarations: StyleDeclarations) -> Attrs:
 
         value_type = type(value)
         if value_type is str:
-            rendered_value = escape_attribute_value(cast(str, value))
+            raw_value = cast(str, value)
+            rendered_value = escape_attribute_value(raw_value)
+            # The raw value: every entity in the escaped one has a `;`.
             if (
-                ";" in rendered_value
-                or "{" in rendered_value
-                or "}" in rendered_value
-                or "\\" in rendered_value
+                ";" in raw_value
+                or "{" in raw_value
+                or "}" in raw_value
+                or "\\" in raw_value
             ):
                 raise StarioError(
                     f"Invalid CSS value for property '{rendered_key}'",

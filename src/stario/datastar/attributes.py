@@ -104,6 +104,16 @@ def _deprecated(old: str, new: str) -> None:
 
 def _reject_uppercase_key(helper: str, key: str, alternative: str) -> None:
     """Key-form attributes travel in the attribute name, which HTML lowercases."""
+    if "__" in key:
+        raise StarioError(
+            f"data.{helper}() name {key!r} has '__'",
+            context={"helper": helper, "name": key},
+            help_text=(
+                "'__' starts a Datastar modifier in an attribute name, so the "
+                f"rest would change how the attribute works. Use {alternative}, "
+                "where the name is a JavaScript object key."
+            ),
+        )
     if any(c.isupper() for c in key):
         raise StarioError(
             f"data.{helper}() cannot use a name with uppercase letters: {key!r}",
@@ -251,6 +261,16 @@ class DatastarAttributes:
         ```
         """
         validate_attribute_key(name)
+        if "__" in name:
+            raise StarioError(
+                f"data.class_() name {name!r} has '__'",
+                context={"helper": "class_", "name": name},
+                help_text=(
+                    "'__' starts a Datastar modifier in an attribute name. Use "
+                    "data.classes({name: expression}), where the name is a "
+                    "JavaScript object key."
+                ),
+            )
         key, case = key_case(name)
         if case is not None:
             key = f"{key}__case.{case}"

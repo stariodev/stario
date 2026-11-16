@@ -86,8 +86,19 @@ class Writer(Protocol):
         """Serialize `value` to compact UTF-8 JSON and finish the response."""
         ...
 
-    def html(self, content: bytes | str | HtmlElement, status: int = 200) -> None:
-        """Send `bytes`, `str`, or markup nodes as ``text/html``."""
+    def html(
+        self,
+        content: bytes | str | HtmlElement,
+        status: int = 200,
+        *,
+        trusted: bool = False,
+    ) -> None:
+        """Send markup nodes, a ``SafeString``, or ``bytes`` as ``text/html``.
+
+        A plain ``str`` warns (``DeprecationWarning``): it is text everywhere
+        else, and in 6.0 it is text here. ``trusted=True`` sends a ``str``
+        of finished HTML as it is, without the warning.
+        """
         ...
 
     def redirect(self, url: str, status: int = 307) -> None:

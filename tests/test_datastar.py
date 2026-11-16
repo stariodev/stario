@@ -257,7 +257,7 @@ class TestSseWireFormat:
     def test_multiline_html_splits_into_repeated_data_lines(self):
         w, _sink, loop = _make_writer()
         try:
-            SSE(w).patch_elements("<div>\n  <p>a</p>\n</div>")
+            SSE(w).patch_elements("<div>\n  <p>a</p>\n</div>", trusted=True)
             result = _sse_body(w)
 
             assert (
@@ -271,7 +271,7 @@ class TestSseWireFormat:
     def test_crlf_in_patch_elements_splits_once(self):
         w, _sink, loop = _make_writer()
         try:
-            SSE(w).patch_elements("<div>\r\n<p>a</p>\r\n</div>")
+            SSE(w).patch_elements("<div>\r\n<p>a</p>\r\n</div>", trusted=True)
             result = _sse_body(w)
 
             assert (
@@ -286,7 +286,7 @@ class TestSseWireFormat:
     def test_bare_cr_in_patch_elements_becomes_data_line(self):
         w, _sink, loop = _make_writer()
         try:
-            SSE(w).patch_elements("<div>\revil")
+            SSE(w).patch_elements("<div>\revil", trusted=True)
             result = _sse_body(w)
             assert b"event: datastar-patch-elements\n" in result
             assert b"\revil" not in result
@@ -333,13 +333,12 @@ class TestSseScriptTrustContract:
     a `</script>` sequence would break out of the script element.
     """
 
-    def test_execute_streams_code_verbatim_including_script_close(self):
+    def test_execute_refuses_code_that_ends_the_script(self):
         w, _sink, loop = _make_writer()
         try:
-            SSE(w).execute_script('console.log("</script>")', auto_remove=False)
-            result = _sse_body(w)
-
-            assert b'data: elements <script>console.log("</script>")</script>' in result
+            for code in ('console.log("</script>")', "x = 1 <!-- y"):
+                with pytest.raises(StarioError, match="would end the element"):
+                    SSE(w).execute_script(code, auto_remove=False)
         finally:
             loop.close()
 

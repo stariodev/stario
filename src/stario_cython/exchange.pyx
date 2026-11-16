@@ -3944,12 +3944,29 @@ cdef class RequestHandle:
             ) from exc
         self.respond(payload, b"application/json; charset=utf-8", status)
 
-    def html(self, content, status=200):
-        """Send `bytes`, `str`, or markup nodes as `text/html`."""
+    def html(self, content, status=200, *, trusted=False):
+        """Send markup nodes, a `SafeString`, or `bytes` as `text/html`.
+
+        A plain `str` is sent as HTML too, with a `DeprecationWarning`: a
+        `str` is text everywhere else in Stario, and in 6.0 it is text here.
+        Pass `trusted=True` when the `str` is finished HTML you built (a
+        template engine's output), to send it as it is without the warning.
+        """
         global _markup_render
         if isinstance(content, bytes):
             body = content
         elif isinstance(content, str):
+            if not trusted:
+                import warnings
+
+                warnings.warn(
+                    "w.html(str) sends the str as HTML, but a str is text "
+                    "everywhere else in Stario; in 6.0 it is text here too. "
+                    "Pass trusted=True for finished HTML you built, or send "
+                    "h.* markup, a SafeString or bytes.",
+                    DeprecationWarning,
+                    stacklevel=1,
+                )
             body = _utf8(content)
         else:
             if _markup_render is None:

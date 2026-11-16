@@ -508,8 +508,9 @@ class TestAttributeTypes:
     def test_prefixed_helper(self):
         attrs = prefixed("aria", {"expanded": True, "hidden": False})
         result = render(h.Div(attrs))
-        assert "aria-expanded" in result
-        assert "aria-hidden" not in result
+        # ARIA states are the strings "true" / "false".
+        assert 'aria-expanded="true"' in result
+        assert 'aria-hidden="false"' in result
 
     def test_attribute_key_rejects_safestring(self):
         with pytest.raises(StarioError, match="Invalid attribute name type"):
@@ -1175,8 +1176,9 @@ class TestEdgeCases:
         assert result == "<p>say \"hello\" and 'bye'</p>"
 
     def test_safestring_attribute(self):
-        result = render(h.Div({"data-raw": SafeString("raw<>value")}))
-        assert 'data-raw="raw<>value"' in result
+        # `"` `<` `>` are escaped so the value cannot end; `&` stays.
+        result = render(h.Div({"data-raw": SafeString('raw<>"&nbsp;value')}))
+        assert 'data-raw="raw&lt;&gt;&quot;&nbsp;value"' in result
 
 
 class TestTrustBoundaries:

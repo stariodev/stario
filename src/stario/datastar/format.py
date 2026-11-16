@@ -296,6 +296,8 @@ def string_literal(value: str) -> str:
         .replace("\n", "\\n")
         .replace("\r", "\\r")
         .replace("\t", "\\t")
+        # A NUL inside an HTML attribute arrives as U+FFFD.
+        .replace("\x00", "\\x00")
         .replace("\u2028", "\\u2028")
         .replace("\u2029", "\\u2029")
     )
