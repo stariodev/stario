@@ -48,9 +48,9 @@ INJECT = "x onfocus=alert(1) autofocus"
         lambda: data.on("click", "go()", target=INJECT),  # type: ignore[arg-type]
         lambda: data.on("click", "go()", case=INJECT),  # type: ignore[arg-type]
         lambda: data.on_intersect("go()", threshold=INJECT),
-        lambda: data.pro.scroll_into_view(behavior=INJECT),  # type: ignore[arg-type]
-        lambda: data.pro.scroll_into_view(horizontal=INJECT),  # type: ignore[arg-type]
-        lambda: data.pro.scroll_into_view(vertical=INJECT),  # type: ignore[arg-type]
+        lambda: data.scroll_into_view(behavior=INJECT),  # type: ignore[arg-type]
+        lambda: data.scroll_into_view(horizontal=INJECT),  # type: ignore[arg-type]
+        lambda: data.scroll_into_view(vertical=INJECT),  # type: ignore[arg-type]
         lambda: DatastarAttributes("data- onfocus=alert(1) x-").text("$x"),
     ],
 )
@@ -73,7 +73,7 @@ def test_datastar_attribute_name_parts_still_accept_documented_values():
         "data-on-intersect__threshold.25"
     ]
     assert _attr_names(
-        data.pro.scroll_into_view(behavior="smooth", horizontal="start", vertical="end")
+        data.scroll_into_view(behavior="smooth", horizontal="start", vertical="end")
     ) == ["data-scroll-into-view__smooth__hstart__vend"]
     assert _attr_names(DatastarAttributes("data-star").text("$x")) == ["data-star-text"]
 
@@ -123,8 +123,8 @@ def test_fetch_open_when_hidden_is_a_boolean_literal():
 
 def test_fit_rejects_non_number_bounds():
     with pytest.raises(StarioError):
-        at.pro.fit("$x", "0); alert(1); (0", 1, 0, 1)  # type: ignore[arg-type]
-    assert at.pro.fit("$x", 0, 1.5, 0, 100) == "@fit($x, 0, 1.5, 0, 100, false, false)"
+        at.fit("$x", "0); alert(1); (0", 1, 0, 1)  # type: ignore[arg-type]
+    assert at.fit("$x", 0, 1.5, 0, 100) == "@fit($x, 0, 1.5, 0, 100, false, false)"
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +133,7 @@ def test_fit_rejects_non_number_bounds():
 
 
 def test_intl_nested_option_strings_are_literals():
-    action = at.pro.intl("number", "$x", {"a": {"b": "alert(1)"}, "c": ["alert(2)"]})
+    action = at.intl("number", "$x", {"a": {"b": "alert(1)"}, "c": ["alert(2)"]})
     assert action == "@intl('number', $x, {'a':{'b':'alert(1)'},'c':['alert(2)']})"
 
 

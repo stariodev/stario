@@ -32,7 +32,8 @@ Rules:
   with a unit: `"300ms"` or `"2s"`. A number raises with the fix.
   `Debounce("300ms", leading=True)` and `Throttle("1s", trailing=True)` set
   the edge flags.
-- Datastar Pro attributes live under `data.pro`.
+- Datastar Pro attributes (`persist`, `query_string`, `replace_url`, …)
+  say so in their docstring. The free Datastar bundle ignores them.
 
 Reference: https://data-star.dev/reference/attributes
 """
@@ -159,7 +160,7 @@ class DatastarAttributes:
     as `"data-star-"`, when loading a custom aliased Datastar bundle.
     """
 
-    __slots__ = ("prefix", "pro")
+    __slots__ = ("prefix",)
 
     def __init__(self, prefix: str = "data-") -> None:
         if not prefix:
@@ -167,8 +168,6 @@ class DatastarAttributes:
         self.prefix = prefix if prefix.endswith("-") else prefix + "-"
         # Every helper writes the prefix into an attribute name.
         validate_attribute_key(self.prefix)
-        # Datastar Pro attributes (`data.pro.persist(...)`).
-        self.pro = DatastarProAttributes(self.prefix)
 
     def attr(self, key: str, expression: str) -> Attrs:
         """Set one HTML attribute from a reactive expression.
@@ -813,151 +812,39 @@ class DatastarAttributes:
         """
         return Attrs(f' {self.prefix}text="{escape_attr(expression)}"')
 
-    # --- Datastar Pro, deprecated here: use data.pro.* -----------------------
+    # --- Datastar Pro attributes: the free bundle ignores them --------------
 
     def animate(self, expression: str) -> Attrs:
-        """Deprecated: `data.pro.animate`. Removed in 6.0."""
-        _deprecated("data.animate", "write data.pro.animate (Datastar Pro)")
-        return self.pro.animate(expression)
-
-    def custom_validity(self, expression: str) -> Attrs:
-        """Deprecated: `data.pro.custom_validity`. Removed in 6.0."""
-        _deprecated(
-            "data.custom_validity", "write data.pro.custom_validity (Datastar Pro)"
-        )
-        return self.pro.custom_validity(expression)
-
-    def match_media(self, signal_name: str, expression: str) -> Attrs:
-        """Deprecated: `data.pro.match_media`. Removed in 6.0."""
-        _deprecated("data.match_media", "write data.pro.match_media (Datastar Pro)")
-        return self.pro.match_media(signal_name, expression)
-
-    def on_raf(
-        self, expression: str, *, throttle: Duration | Throttle | None = None
-    ) -> Attrs:
-        """Deprecated: `data.pro.on_raf`. Removed in 6.0."""
-        _deprecated("data.on_raf", "write data.pro.on_raf (Datastar Pro)")
-        return self.pro.on_raf(expression, throttle=throttle)
-
-    def on_resize(
-        self,
-        expression: str,
-        *,
-        debounce: Duration | Debounce | None = None,
-        throttle: Duration | Throttle | None = None,
-    ) -> Attrs:
-        """Deprecated: `data.pro.on_resize`. Removed in 6.0."""
-        _deprecated("data.on_resize", "write data.pro.on_resize (Datastar Pro)")
-        return self.pro.on_resize(expression, debounce=debounce, throttle=throttle)
-
-    def persist(
-        self,
-        *,
-        include: FilterValue | None = None,
-        exclude: FilterValue | None = None,
-        storage_key: str | None = None,
-        session: bool = False,
-    ) -> Attrs:
-        """Deprecated: `data.pro.persist`. Removed in 6.0."""
-        _deprecated("data.persist", "write data.pro.persist (Datastar Pro)")
-        return self.pro.persist(
-            include=include, exclude=exclude, storage_key=storage_key, session=session
-        )
-
-    def query_string(
-        self,
-        *,
-        include: FilterValue | None = None,
-        exclude: FilterValue | None = None,
-        filter_empty: bool = False,
-        history: bool = False,
-    ) -> Attrs:
-        """Deprecated: `data.pro.query_string`. Removed in 6.0."""
-        _deprecated("data.query_string", "write data.pro.query_string (Datastar Pro)")
-        return self.pro.query_string(
-            include=include, exclude=exclude, filter_empty=filter_empty, history=history
-        )
-
-    def replace_url(self, expression: str) -> Attrs:
-        """Deprecated: `data.pro.replace_url`. Removed in 6.0.
-
-        To change the URL from a handler, use `SSE(w).replace_url(url)`,
-        which works with the free bundle.
-        """
-        _deprecated(
-            "data.replace_url",
-            "write data.pro.replace_url (Datastar Pro), or SSE(w).replace_url(url) "
-            "from a handler",
-        )
-        return self.pro.replace_url(expression)
-
-    def scroll_into_view(
-        self,
-        *,
-        behavior: Literal["smooth", "instant", "auto"] | None = None,
-        horizontal: Literal["start", "center", "end", "nearest"] | None = None,
-        vertical: Literal["start", "center", "end", "nearest"] | None = None,
-        focus: bool = False,
-    ) -> Attrs:
-        """Deprecated: `data.pro.scroll_into_view`. Removed in 6.0."""
-        _deprecated(
-            "data.scroll_into_view", "write data.pro.scroll_into_view (Datastar Pro)"
-        )
-        return self.pro.scroll_into_view(
-            behavior=behavior, horizontal=horizontal, vertical=vertical, focus=focus
-        )
-
-    def view_transition(self, expression: str) -> Attrs:
-        """Deprecated: `data.pro.view_transition`. Removed in 6.0."""
-        _deprecated(
-            "data.view_transition", "write data.pro.view_transition (Datastar Pro)"
-        )
-        return self.pro.view_transition(expression)
-
-
-class DatastarProAttributes:
-    """Datastar Pro attributes: `data.pro.persist(...)`.
-
-    They do nothing with the free Datastar bundle. Load a Pro bundle with
-    `ModuleScript(src=...)` before you use them.
-    """
-
-    __slots__ = ("prefix",)
-
-    def __init__(self, prefix: str = "data-") -> None:
-        self.prefix = prefix
-
-    def animate(self, expression: str) -> Attrs:
-        """Animate element attributes over time.
+        """Animate element attributes over time. **Datastar Pro.**
 
         ```python
-        data.pro.animate("$x")
+        data.animate("$x")
         # Attrs(' data-animate="$x"')
         ```
         """
         return Attrs(f' {self.prefix}animate="{escape_attr(expression)}"')
 
     def custom_validity(self, expression: str) -> Attrs:
-        """Set a custom validity message.
+        """Set a custom validity message. **Datastar Pro.**
 
         ```python
-        data.pro.custom_validity("$msg")
+        data.custom_validity("$msg")
         # Attrs(' data-custom-validity="$msg"')
         ```
         """
         return Attrs(f' {self.prefix}custom-validity="{escape_attr(expression)}"')
 
     def match_media(self, signal_name: str, expression: str) -> Attrs:
-        """Sync a signal with `matchMedia`.
+        """Sync a signal with `matchMedia`. **Datastar Pro.**
 
         `data-match-media` has no value form, so the key is spelled to
         survive HTML lowercasing and Datastar's case conversion and still
         yield `signal_name` exactly.
 
         ```python
-        data.pro.match_media("isDark", "'prefers-color-scheme: dark'")
+        data.match_media("isDark", "'prefers-color-scheme: dark'")
         # Attrs(' data-match-media:is-dark="'prefers-color-scheme: dark'"')
-        data.pro.match_media("is_dark", "'prefers-color-scheme: dark'")
+        data.match_media("is_dark", "'prefers-color-scheme: dark'")
         # Attrs(' data-match-media:is_dark__case.kebab="'prefers-color-scheme: dark'"')
         ```
         """
@@ -972,10 +859,10 @@ class DatastarProAttributes:
         *,
         throttle: Duration | Throttle | None = None,
     ) -> Attrs:
-        """Run an expression on every animation frame.
+        """Run an expression on every animation frame. **Datastar Pro.**
 
         ```python
-        data.pro.on_raf("draw()", throttle="100ms")
+        data.on_raf("draw()", throttle="100ms")
         # Attrs(' data-on-raf__throttle.100ms="draw()"')
         ```
         """
@@ -993,10 +880,10 @@ class DatastarProAttributes:
         debounce: Duration | Debounce | None = None,
         throttle: Duration | Throttle | None = None,
     ) -> Attrs:
-        """React to element resize.
+        """React to element resize. **Datastar Pro.**
 
         ```python
-        data.pro.on_resize("layout()", debounce="50ms", throttle="100ms")
+        data.on_resize("layout()", debounce="50ms", throttle="100ms")
         # Attrs(' data-on-resize__debounce.50ms__throttle.100ms="layout()"')
         ```
         """
@@ -1016,10 +903,10 @@ class DatastarProAttributes:
         storage_key: str | None = None,
         session: bool = False,
     ) -> Attrs:
-        """Persist signals.
+        """Persist signals. **Datastar Pro.**
 
         ```python
-        data.pro.persist(include=["draft"], storage_key="prefs", session=True)
+        data.persist(include=["draft"], storage_key="prefs", session=True)
         # data-persist:prefs__session="{'include':'^(?:draft)(?:\\\\.|$)'}"
         ```
         """
@@ -1045,10 +932,10 @@ class DatastarProAttributes:
         filter_empty: bool = False,
         history: bool = False,
     ) -> Attrs:
-        """Sync signals with the URL.
+        """Sync signals with the URL. **Datastar Pro.**
 
         ```python
-        data.pro.query_string(include=["page"], history=True)
+        data.query_string(include=["page"], history=True)
         # data-query-string__history="{'include':'^(?:page)(?:\\\\.|$)'}"
         ```
         """
@@ -1068,10 +955,13 @@ class DatastarProAttributes:
         return Attrs(f' {key}="{escape_attr(filters)}"')
 
     def replace_url(self, expression: str) -> Attrs:
-        """Replace the current browser URL.
+        """Replace the current browser URL. **Datastar Pro.**
+
+        To change the URL from a handler with the free bundle, send
+        `SSE(w).replace_url(url)`.
 
         ```python
-        data.pro.replace_url("`/page/${$page}`")
+        data.replace_url("`/page/${$page}`")
         # Attrs(' data-replace-url="`/page/${$page}`"')
         ```
         """
@@ -1085,10 +975,10 @@ class DatastarProAttributes:
         vertical: Literal["start", "center", "end", "nearest"] | None = None,
         focus: bool = False,
     ) -> Attrs:
-        """Scroll this element into view.
+        """Scroll this element into view. **Datastar Pro.**
 
         ```python
-        data.pro.scroll_into_view(behavior="smooth", vertical="center", focus=True)
+        data.scroll_into_view(behavior="smooth", vertical="center", focus=True)
         # Attrs(' data-scroll-into-view__smooth__vcenter__focus')
         ```
         """
@@ -1107,10 +997,10 @@ class DatastarProAttributes:
         return Attrs(f" {self.prefix}scroll-into-view")
 
     def view_transition(self, expression: str) -> Attrs:
-        """Set `view-transition-name`.
+        """Set `view-transition-name`. **Datastar Pro.**
 
         ```python
-        data.pro.view_transition("$id")
+        data.view_transition("$id")
         # Attrs(' data-view-transition="$id"')
         ```
         """

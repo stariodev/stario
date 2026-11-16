@@ -20,8 +20,8 @@ instances. Import the classes when you need a separate namespace (tests or
 multiple configured builders).
 """
 
-from .actions import DatastarActions, DatastarProActions, at
-from .attributes import DatastarAttributes, DatastarProAttributes, data
+from .actions import DatastarActions, at
+from .attributes import DatastarAttributes, data
 from .format import Debounce, Duration, Throttle, literal
 from .signals import FileSignal, is_datastar, read_signals
 from .sse import SSE
@@ -32,8 +32,6 @@ __all__ = [
     "SSE",
     "DatastarActions",
     "DatastarAttributes",
-    "DatastarProActions",
-    "DatastarProAttributes",
     "Debounce",
     "Duration",
     "FileSignal",

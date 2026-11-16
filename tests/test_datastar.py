@@ -671,19 +671,19 @@ class TestSignalNames:
             ),
             # match_media: key form spelled to round-trip through case conversion
             (
-                data.pro.match_media("isDark", "$dark"),
+                data.match_media("isDark", "$dark"),
                 Attrs(' data-match-media:is-dark="$dark"'),
             ),
             (
-                data.pro.match_media("is_dark", "$dark"),
+                data.match_media("is_dark", "$dark"),
                 Attrs(' data-match-media:is_dark__case.kebab="$dark"'),
             ),
             (
-                data.pro.match_media("IsDark", "$dark"),
+                data.match_media("IsDark", "$dark"),
                 Attrs(' data-match-media:is-dark__case.pascal="$dark"'),
             ),
             (
-                data.pro.match_media("_menu_open", "$dark"),
+                data.match_media("_menu_open", "$dark"),
                 Attrs(' data-match-media:_menu_open__case.kebab="$dark"'),
             ),
         ],
@@ -852,12 +852,12 @@ class TestDatastarAttributeMatrix:
                 {"data-on-intersect__viewtransition": "seen()"},
             ),
             (
-                data.pro.persist(include=["draft", "settings"]),
+                data.persist(include=["draft", "settings"]),
                 {"data-persist": "{'include':'^(?:draft|settings)(?:\\x5c.|$)'}"},
             ),
-            (data.pro.persist(session=True), {"data-persist__session": True}),
+            (data.persist(session=True), {"data-persist__session": True}),
             (
-                data.pro.persist(storage_key="prefs", session=True),
+                data.persist(storage_key="prefs", session=True),
                 {"data-persist:prefs__session": True},
             ),
             (
@@ -865,9 +865,7 @@ class TestDatastarAttributeMatrix:
                 {"data-star-text": "$title"},
             ),
             (
-                data.pro.scroll_into_view(
-                    behavior="smooth", vertical="center", focus=True
-                ),
+                data.scroll_into_view(behavior="smooth", vertical="center", focus=True),
                 {"data-scroll-into-view__smooth__vcenter__focus": True},
             ),
         ],
@@ -1002,9 +1000,7 @@ class TestDatastarActions:
         assert action == ("@query('/search?page=2', {filterSignals: {'include':'q'}})")
 
     def test_intl_basic(self):
-        action = at.pro.intl(
-            "number", "$price", {"style": "currency", "currency": "USD"}
-        )
+        action = at.intl("number", "$price", {"style": "currency", "currency": "USD"})
         assert (
             action == "@intl('number', $price, {'style':'currency','currency':'USD'})"
         )
@@ -1077,8 +1073,8 @@ class TestDurations:
             lambda t: data.on_interval("go()", duration=t),
             lambda t: data.on_intersect("go()", debounce=t),
             lambda t: data.on_signal_patch("go()", throttle=t),
-            lambda t: data.pro.on_raf("go()", throttle=t),
-            lambda t: data.pro.on_resize("go()", debounce=t),
+            lambda t: data.on_raf("go()", throttle=t),
+            lambda t: data.on_resize("go()", debounce=t),
             lambda t: Debounce(t),
             lambda t: Throttle(t),
             lambda t: at.get("/x", retry_interval=t),
@@ -1317,22 +1313,6 @@ class TestDeprecations:
         with pytest.warns(DeprecationWarning, match="outside=True"):
             attrs = data.on("click", "close_target()", target="outside")
         assert attrs == data.on("click", "close_target()", outside=True)
-
-    @pytest.mark.parametrize(
-        "call",
-        [
-            lambda: data.persist(),
-            lambda: data.query_string(),
-            lambda: data.replace_url("$u"),
-            lambda: data.animate("$x"),
-            lambda: data.scroll_into_view(),
-            lambda: at.clipboard("x"),
-            lambda: at.fit("$v", 0, 1, 0, 100),
-        ],
-    )
-    def test_pro_names_warn_and_forward(self, call):
-        with pytest.warns(DeprecationWarning, match=r"\.pro\."):
-            call()
 
     def test_listener_places_are_exclusive(self):
         with pytest.raises(StarioError, match="one of window, document and outside"):

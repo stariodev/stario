@@ -19,7 +19,7 @@ from a cache.
 `include=` / `exclude=` take a list of signal paths (each matches itself and
 its children) or a `str` regex. An `exclude=` never lets a local `_` signal
 leave the browser. Retry times are durations with a unit: `"2s"`.
-Datastar Pro actions live under `at.pro`.
+Datastar Pro actions (`clipboard`, `intl`, `fit`) say so in their docstring.
 """
 
 import math
@@ -154,11 +154,7 @@ def _retry_ms(
 class DatastarActions:
     """Namespace for Datastar `@...` action strings."""
 
-    __slots__ = ("pro",)
-
-    def __init__(self) -> None:
-        # Datastar Pro actions (`at.pro.clipboard(...)`).
-        self.pro = DatastarProActions()
+    __slots__ = ()
 
     def peek(self, callable_expr: str) -> str:
         """Build `@peek(expr)` to read a value without subscribing."""
@@ -425,51 +421,10 @@ class DatastarActions:
         """
         return self._fetch("query", url, queries, **options)
 
-    # --- Datastar Pro, deprecated here: use at.pro.* -------------------------
+    # --- Datastar Pro actions: the free bundle ignores them -----------------
 
     def clipboard(self, text: str, is_base64: bool = False) -> str:
-        """Deprecated: `at.pro.clipboard`. Removed in 6.0."""
-        _deprecated("at.clipboard", "write at.pro.clipboard (Datastar Pro)", 2)
-        return self.pro.clipboard(text, is_base64)
-
-    def intl(
-        self,
-        type: IntlType | str,
-        value: str,
-        options: dict[str, Any] | None = None,
-        locale: str | list[str] | None = None,
-    ) -> str:
-        """Deprecated: `at.pro.intl`. Removed in 6.0."""
-        _deprecated("at.intl", "write at.pro.intl (Datastar Pro)", 2)
-        return self.pro.intl(type, value, options, locale)
-
-    def fit(
-        self,
-        v: str,
-        old_min: float,
-        old_max: float,
-        new_min: float,
-        new_max: float,
-        should_clamp: bool = False,
-        should_round: bool = False,
-    ) -> str:
-        """Deprecated: `at.pro.fit`. Removed in 6.0."""
-        _deprecated("at.fit", "write at.pro.fit (Datastar Pro)", 2)
-        return self.pro.fit(
-            v, old_min, old_max, new_min, new_max, should_clamp, should_round
-        )
-
-
-class DatastarProActions:
-    """Datastar Pro actions: `at.pro.clipboard(...)`.
-
-    They do nothing with the free Datastar bundle.
-    """
-
-    __slots__ = ()
-
-    def clipboard(self, text: str, is_base64: bool = False) -> str:
-        """Build `@clipboard(...)`."""
+        """Build `@clipboard(...)`. **Datastar Pro.**"""
         if is_base64:
             return f"@clipboard({string_literal(text)}, true)"
         return f"@clipboard({string_literal(text)})"
@@ -481,7 +436,7 @@ class DatastarProActions:
         options: dict[str, Any] | None = None,
         locale: str | list[str] | None = None,
     ) -> str:
-        """Build `@intl(...)`.
+        """Build `@intl(...)`. **Datastar Pro.**
 
         `value` is a JavaScript expression. String values inside `options` are
         emitted as JavaScript string literals; numbers and booleans pass through.
@@ -511,7 +466,7 @@ class DatastarProActions:
         should_clamp: bool = False,
         should_round: bool = False,
     ) -> str:
-        """Build `@fit(...)` to remap a numeric expression."""
+        """Build `@fit(...)` to remap a numeric expression. **Datastar Pro.**"""
         bounds = ", ".join(
             _js_number(name, value)
             for name, value in (

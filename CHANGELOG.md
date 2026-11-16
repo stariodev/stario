@@ -66,9 +66,6 @@ surface; the behaviour under Changed says what an existing app sees.
   edges off raises. They replace the `("300ms", "leading")` tuples.
 - **`data.on(..., window=True | document=True | outside=True)`**, Datastar's
   own modifier names. One at most; two raise.
-- **`data.pro` and `at.pro`** hold the Datastar Pro helpers (`persist`,
-  `query_string`, `replace_url`, `clipboard`, …). They do nothing with the
-  free bundle, so they are now apart from the free ones.
 - **`at.get(..., retry_interval="2s", retry_max_wait="30s")`**: durations,
   sent to Datastar in milliseconds.
 - **The same helper call returns the same fragment.** `data.on`,
@@ -123,7 +120,6 @@ Each warns with its replacement and goes in 6.0.
   Write `data.signals({...})`, or `data.computed` for an expression.
 - `debounce=` / `throttle=` tuples: `Debounce(...)` / `Throttle(...)`.
 - `data.on(target=...)`: `window=True`, `document=True`, `outside=True`.
-- The Pro helpers on `data` and `at`: `data.pro.*`, `at.pro.*`.
 
 ## 5.8.3 - 2026-11-11
 
