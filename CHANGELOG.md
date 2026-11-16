@@ -4,6 +4,57 @@ All notable changes to Stario are documented in this file.
 
 The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+Changes that remove rules an app guide had to state, because coding agents
+read the rule and still got it wrong. Everything under Added is new
+surface; the two behaviours under Changed say what an existing app sees.
+
+### Added
+
+- **`from stario import at, data, SSE, read_signals`**, and `HtmlElement`,
+  `SafeString`, `baked`, `render` from the root too. They are the same
+  objects as in `stario.datastar` and `stario.markup`, which still work.
+  `from stario.http import ServerConfig` works as well.
+- **`serve()` falls back to `$PORT`.** The port is `STARIO_PORT`, else
+  `PORT`, else 8000. The host stays `STARIO_HOST` (default `127.0.0.1`).
+- **Attributes may come after children:** `h.I("🗑", {"class": "icon"},
+  data.on("click", ...))` renders `<i class="icon" data-on:click=...>🗑</i>`.
+  Before, it raised `StarioError` when the call ran, often inside a live
+  stream where only the server log showed it. Attributes first stays the
+  fast path.
+- **`classes()` and `styles()` as a mapping value:** `{"id": "c", "class":
+  classes("card", {"on": active})}`. An `Attrs` value must render the one
+  attribute it is the value of; anything else raises with the fix.
+- **`stario.json.loads(s, type=list[str])`** returns `list[str]` to the type
+  checker and checks the outer JSON type at run time (`ValueError`, like
+  invalid JSON). Without `type=` it still returns `object`.
+- **`data.signals` and `SSE.patch_signals` take any Mapping or Sequence
+  value.** `{"tags": tags}` with a `list[str]` variable passes the type
+  checker; a tuple or a mapping object is sent as a JSON array or object.
+- **`HtmlElement` includes `list[Element]` and `list[str]`**, so
+  `items = [h.Li(t) for t in tags]` passes as a child and as a
+  `-> HtmlElement` return without an annotation.
+- **`stario.testing.check_pages(client)`** checks every HTML page reachable
+  from `/` and the GET routes: 5xx answers, duplicate ids, Datastar actions
+  without a route, undefined `$signals`, a `<dialog>` a patch would close,
+  and `data-init` streams. `assert not await check_pages(client)`;
+  `check_page(client, url)` checks one page after a test made rows. A page
+  that fails because an outside service is down is skipped
+  (`skip_errors=`).
+
+### Changed
+
+- **A bare int of 10 or more in `debounce=`, `throttle=` or `delay=`
+  raises** with the fix (`"300ms"` or `0.3`; `"300s"` when seconds are
+  meant). An int is whole seconds, so `debounce=300` waited five minutes.
+  Ints below 10 and `on_interval(duration=)` are unchanged.
+- **`w.redirect()` and `RedirectException` answer a Datastar request with
+  an SSE `navigate`** (status 200) instead of a 3xx. Datastar's fetch
+  followed the 3xx itself and patched the page with the answer, so the
+  address bar never changed. A plain request still gets the 3xx; to send a
+  3xx to a Datastar request, set `location` and call `w.empty(303)`.
+
 ## 5.8.3 - 2026-11-11
 
 A fix for multi-threaded serving on event loops other than uvloop.
