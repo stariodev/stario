@@ -72,3 +72,36 @@ def test_server_config_rejects_bad_max_connections_env(monkeypatch) -> None:
     monkeypatch.setenv("STARIO_MAX_CONNECTIONS", "-3")
     with pytest.raises(StarioError, match="max_connections must be at least 1"):
         ServerConfig.from_env()
+
+
+def test_port_comes_from_stario_port(monkeypatch) -> None:
+    monkeypatch.setenv("STARIO_PORT", "8123")
+    monkeypatch.setenv("PORT", "9555")
+    assert ServerConfig.from_env().port == 8123
+
+
+def test_port_falls_back_to_port(monkeypatch) -> None:
+    monkeypatch.delenv("STARIO_PORT", raising=False)
+    monkeypatch.setenv("PORT", "9555")
+    config = ServerConfig.from_env()
+    assert config.port == 9555
+    assert config.host == "127.0.0.1"
+
+
+def test_blank_stario_port_falls_back_to_port(monkeypatch) -> None:
+    monkeypatch.setenv("STARIO_PORT", " ")
+    monkeypatch.setenv("PORT", "9555")
+    assert ServerConfig.from_env().port == 9555
+
+
+def test_port_defaults_to_8000(monkeypatch) -> None:
+    monkeypatch.delenv("STARIO_PORT", raising=False)
+    monkeypatch.delenv("PORT", raising=False)
+    assert ServerConfig.from_env().port == 8000
+
+
+def test_bad_port_names_the_variable(monkeypatch) -> None:
+    monkeypatch.delenv("STARIO_PORT", raising=False)
+    monkeypatch.setenv("PORT", "web")
+    with pytest.raises(StarioError, match="PORT must be an integer"):
+        ServerConfig.from_env()

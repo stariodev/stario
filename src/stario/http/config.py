@@ -294,16 +294,32 @@ class ServerConfig:
 
     @classmethod
     def from_env(cls) -> "ServerConfig":
-        """Read `STARIO_*` listen, limit, compression, and shutdown settings."""
+        """Read `STARIO_*` listen, limit, compression, and shutdown settings.
+
+        The port is `STARIO_PORT`, else `PORT` (the variable most hosting
+        platforms set), else 8000. The host stays `STARIO_HOST` (default
+        `127.0.0.1`) whichever port variable is used.
+        """
         return server_config_from_env()
 
 
+def _port_from_env() -> int:
+    """`STARIO_PORT`, then `PORT`, then `DEFAULT_PORT`."""
+    if env_optional_str("STARIO_PORT") is not None:
+        return env_int("STARIO_PORT", DEFAULT_PORT)
+    return env_int("PORT", DEFAULT_PORT)
+
+
 def server_config_from_env() -> ServerConfig:
-    """Read `STARIO_*` listen, limit, compression, and shutdown settings."""
+    """Read `STARIO_*` listen, limit, compression, and shutdown settings.
+
+    The port falls back to `PORT` when `STARIO_PORT` is unset; see
+    `ServerConfig.from_env`.
+    """
     return _config_from_env(
         lambda: ServerConfig(
             host=env_str("STARIO_HOST", DEFAULT_HOST),
-            port=env_int("STARIO_PORT", DEFAULT_PORT),
+            port=_port_from_env(),
             unix_socket=env_optional_str("STARIO_UNIX_SOCKET"),
             unix_socket_mode=env_octal_mode(
                 "STARIO_UNIX_SOCKET_MODE", DEFAULT_UNIX_SOCKET_MODE
