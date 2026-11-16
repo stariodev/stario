@@ -128,6 +128,9 @@ class RedirectException(Exception):
     `location` is the `Location` URL or path. URL safety is checked when
     `w.redirect()` runs, not at construction. A non-3xx `status_code`
     raises `StarioError` at construction time.
+
+    The answer is `w.redirect(location, status_code)`: a Datastar request
+    gets an SSE `navigate` to `location`, every other request the 3xx.
     """
 
     __slots__ = ("location", "status_code")
