@@ -88,9 +88,6 @@ include "router.pxi"
 # Lazily bound on first w.html() call — stario.markup is heavier than the
 # imports above, and text/json/redirect/empty do not need it.
 _markup_render = None
-# Lazily bound on the first redirect of a Datastar request (stario.datastar
-# imports this module's package).
-_datastar_navigate = None
 
 cdef class HttpConnection:
     """HttpConnection vtable. ``CHttpProtocol`` overrides every entry."""
@@ -3963,13 +3960,7 @@ cdef class RequestHandle:
         self.respond(body, b"text/html; charset=utf-8", status)
 
     def redirect(self, url, status=307):
-        """Send a redirect with an empty body and a `Location` header.
-
-        A Datastar request (`Datastar-Request` header) gets an SSE `navigate`
-        to `url` instead, because Datastar does not move the browser on a 3xx.
-        """
-        global _datastar_navigate
-        cdef RequestExchange ex
+        """Send a redirect with an empty body and a `Location` header."""
         if not 300 <= status < 400:
             raise StarioError(
                 "Redirect status must be a 3xx status code",
@@ -3979,18 +3970,7 @@ cdef class RequestHandle:
                     "or pass a 3xx redirect status."
                 ),
             )
-        location = normalized_location(url)
-        ex = self._ex
-        if ex is None:
-            _raise_finished()
-        if ex.ensure_request().headers.unsafe_get(b"datastar-request") is not None:
-            if _datastar_navigate is None:
-                from stario.http.redirect import datastar_navigate
-
-                _datastar_navigate = datastar_navigate
-            _datastar_navigate(self, location)
-            return
-        self.headers.set("location", location)
+        self.headers.set("location", normalized_location(url))
         self.respond(b"", b"text/plain; charset=utf-8", status)
 
     def empty(self, status=204):

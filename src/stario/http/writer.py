@@ -91,12 +91,7 @@ class Writer(Protocol):
         ...
 
     def redirect(self, url: str, status: int = 307) -> None:
-        """Send a redirect with an empty body and a ``Location`` header.
-
-        A Datastar request (``Datastar-Request`` header) gets an SSE
-        ``navigate`` to ``url`` instead (status 200), since Datastar does not
-        follow a 3xx into a new page. ``RedirectException`` goes through here.
-        """
+        """Send a redirect with an empty body and a ``Location`` header."""
         ...
 
     def empty(self, status: int = 204) -> None:
