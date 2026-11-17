@@ -1,17 +1,18 @@
-"""A Datastar request is answered with SSE events or a 204, never a redirect.
+"""`is_datastar` tells a Datastar request from a page load.
 
-`is_datastar` tells the two kinds of request apart, `w.redirect` refuses a
-Datastar request, and the TestClient raises on a reply Datastar ignores.
+The HTTP layer does not look at the `datastar-request` header: a redirect is
+a redirect, and the TestClient returns every reply as the server sent it.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from stario import App, Context, RedirectException, Route, Writer, is_datastar
-from stario.datastar import SSE, at, data
+from stario import App, Context, RedirectException, Route, Writer
+from stario.datastar import SSE, at, data, is_datastar
+from stario.datastar.testing import datastar_checks
 from stario.markup import html as h
-from stario.testing import DatastarReplyError, TestClient, check_pages
+from stario.testing import TestClient, check_pages
 
 DS = {"datastar-request": "true"}
 
@@ -71,37 +72,23 @@ async def test_plain_request_redirects_as_before() -> None:
 
 
 @pytest.mark.parametrize("path", ["/redirect", "/raised"])
-async def test_redirect_on_a_datastar_request_raises_with_the_fix(path: str) -> None:
+async def test_redirect_ignores_the_datastar_header(path: str) -> None:
     async with TestClient(_app(), follow_redirects=False) as client:
-        with pytest.raises(DatastarReplyError) as info:
-            await client.post(path, headers=DS)
-        assert info.value.status_code == 500
-        span = client.tracer.get_span(client.exchanges[-1].response.span_id)
-    # The span carries the StarioError with the fix, not the bare redirect.
-    assert span is not None
-    assert span.error is not None
-    assert "Datastar does not follow redirects" in span.error
-    assert "SSE(w).navigate(url)" in span.error
-    assert "is_datastar(c.req)" in span.error
+        response = await client.post(path, headers=DS)
+    assert response.status_code == 303
+    assert response.headers.get("location") == "/login"
 
 
-async def test_client_raises_on_a_reply_datastar_ignores() -> None:
+async def test_client_returns_every_reply_as_sent() -> None:
     async with TestClient(_app()) as client:
-        with pytest.raises(DatastarReplyError, match="Datastar ignores a 404") as info:
-            await client.post("/missing", headers=DS)
-        assert info.value.status_code == 404
-        assert "not found" in str(info.value)
-        assert "navigate" in (info.value.help_text or "")
-        # The same handler without the header is plain HTTP.
-        assert (await client.post("/missing")).status_code == 404
-        assert (await client.post("/nothing", headers=DS)).status_code == 204
-
-
-async def test_stream_raises_too() -> None:
-    async with TestClient(_app()) as client:
-        with pytest.raises(DatastarReplyError):
-            async with client.stream("POST", "/missing", headers=DS):
-                pass
+        missing = await client.post("/missing", headers=DS)
+        nothing = await client.post("/nothing", headers=DS)
+        async with client.stream("POST", "/missing", headers=DS) as streamed:
+            streamed_status = streamed.status_code
+    assert missing.status_code == 404
+    assert missing.text == "not found"
+    assert nothing.status_code == 204
+    assert streamed_status == 404
 
 
 async def test_check_pages_reports_a_stream_datastar_ignores() -> None:
@@ -117,5 +104,7 @@ async def test_check_pages_reports_a_stream_datastar_ignores() -> None:
     app.add(Route("GET /"), home)
     app.add(live, stream)
     async with TestClient(app) as client:
-        problems = await check_pages(client)
+        plain = await check_pages(client)
+        problems = await check_pages(client, checks=datastar_checks())
+    assert not plain
     assert any("the stream /live answers 404" in p for p in problems), problems

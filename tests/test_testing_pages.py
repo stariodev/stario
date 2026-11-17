@@ -6,10 +6,17 @@ import unittest
 
 import pytest
 
-from stario import App, Context, HtmlElement, Route, Writer, at, data, h
-from stario.datastar import SSE
+from stario import App, Context, HtmlElement, Route, Writer, h
+from stario.datastar import SSE, at, data
+from stario.datastar.testing import datastar_checks
 from stario.markup.types import TagAttributes
-from stario.testing import OUTSIDE_SERVICE_ERRORS, TestClient, check_page, check_pages
+from stario.testing import (
+    OUTSIDE_SERVICE_ERRORS,
+    HtmlPage,
+    TestClient,
+    check_page,
+    check_pages,
+)
 
 
 def _page(*body: HtmlElement | TagAttributes) -> HtmlElement:
@@ -51,7 +58,7 @@ def _good_app() -> App:
 
 async def test_a_good_app_has_no_problems() -> None:
     async with TestClient(_good_app()) as client:
-        problems = await check_pages(client)
+        problems = await check_pages(client, checks=datastar_checks())
     assert not problems
     assert problems.pages == ["/", "/about"]
     assert problems.skipped == []
@@ -79,7 +86,13 @@ async def test_every_problem_is_one_line() -> None:
     app.add(Route("GET /"), home)
     app.add(Route("GET /broken"), broken)
     async with TestClient(app) as client:
-        problems = await check_pages(client)
+        plain = await check_pages(client)
+        problems = await check_pages(client, checks=datastar_checks())
+    # Without checks= only the HTML checks run: no Datastar knowledge.
+    assert plain == [
+        "/: two elements have id='x'",
+        "/broken: answers 500 (RuntimeError: boom)",
+    ]
     assert problems == [
         "/: two elements have id='x'",
         "/: POST /missing has no route",
@@ -118,8 +131,8 @@ async def test_stream_problems() -> None:
     app.add(Route("GET /changes"), changes)
     app.add(Route("GET /signals"), signals)
     async with TestClient(app) as client:
-        problems = await check_pages(client)
-        quiet = await check_pages(client, streams=False)
+        problems = await check_pages(client, checks=datastar_checks())
+        quiet = await check_pages(client, checks=datastar_checks(streams=False))
     assert problems == [
         "/: GET /gone has no route",
         "/: the stream /silent sent no event within 2 s (send the current view first)",
@@ -200,8 +213,10 @@ async def test_signals_defined_by_a_script_and_limit() -> None:
     app.add(Route("GET /"), home)
     app.add(Route("GET /p/{n}"), numbered)
     async with TestClient(app) as client:
-        flagged = await check_pages(client)
-        problems = await check_pages(client, signals=["_toast"], limit=3)
+        flagged = await check_pages(client, checks=datastar_checks())
+        problems = await check_pages(
+            client, checks=datastar_checks(signals=["_toast"]), limit=3
+        )
     assert flagged == ["/: data-text reads $_toast, which no element defines"]
     assert not problems
     assert problems.pages == ["/", "/p/0", "/p/1"]
@@ -220,3 +235,25 @@ async def test_check_page_sees_rows_a_test_made() -> None:
         rows += ["a", "b"]
         problems = await check_page(client, "/todos")
     assert problems == ["/todos: two elements have id='row'"]
+
+
+async def test_a_check_of_your_own() -> None:
+    async def no_images_without_alt(
+        _client: TestClient, url: str, page: HtmlPage
+    ) -> list[str]:
+        return [
+            f"{url}: an <img> has no alt"
+            for tag, attrs, _ in page.tags
+            if tag == "img" and "alt" not in dict(attrs)
+        ]
+
+    async def home(_c: Context, w: Writer) -> None:
+        w.html(_page(h.Img({"src": "/a.png"}), h.Img({"src": "/b.png", "alt": "b"})))
+
+    app = App()
+    app.add(Route("GET /"), home)
+    async with TestClient(app) as client:
+        problems = await check_pages(client, checks=[no_images_without_alt])
+        one = await check_page(client, "/", checks=[no_images_without_alt])
+    assert problems == ["/: an <img> has no alt"]
+    assert one == ["/: an <img> has no alt"]

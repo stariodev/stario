@@ -55,7 +55,7 @@ def _answer_framework_exception(w: Writer, exc: BaseException) -> BaseException 
 
     Returns ``None`` when answered, else the exception to log on the 500
     path: ``exc`` itself, or the ``StarioError`` that answering raised (a
-    ``RedirectException`` on a Datastar request names its fix that way).
+    ``RedirectException`` with a bad location or status).
     """
     try:
         if isinstance(exc, RedirectException):

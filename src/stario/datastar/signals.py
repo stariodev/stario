@@ -81,7 +81,7 @@ def is_datastar(req: Request) -> bool:
         w.redirect(LOGIN.href(), status=303)
     ```
 
-    `w.redirect()` on a Datastar request raises: Datastar does not follow a
-    redirect into a new page.
+    Datastar's fetch follows a redirect itself and does not move the address
+    bar, so a Datastar request takes `navigate`, not `w.redirect()`.
     """
     return req.headers.unsafe_get(b"datastar-request") is not None

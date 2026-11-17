@@ -152,17 +152,16 @@ def test_removed_shim_modules(removed_module: str) -> None:
         importlib.import_module(removed_module)
 
 
-def test_root_reexports_handler_names() -> None:
-    """The names a handler file imports most come from `stario` too."""
+def test_root_reexports_markup_not_datastar() -> None:
+    """The root carries Stario's own markup names; Datastar stays in its package."""
     import stario
-    import stario.datastar
     import stario.markup
 
-    for name in ("at", "data", "SSE", "read_signals"):
-        assert getattr(stario, name) is getattr(stario.datastar, name)
     for name in ("HtmlElement", "SafeString", "baked", "render", "classes"):
         assert getattr(stario, name) is getattr(stario.markup, name)
-    assert set(stario.__all__) >= {"at", "data", "SSE", "read_signals", "HtmlElement"}
+    datastar_names = {"at", "data", "SSE", "read_signals", "is_datastar", "literal"}
+    assert not datastar_names & set(stario.__all__)
+    assert not any(hasattr(stario, name) for name in datastar_names)
 
 
 def test_server_config_from_stario_http() -> None:
@@ -180,7 +179,8 @@ def test_root_import_in_a_fresh_interpreter() -> None:
         [
             sys.executable,
             "-c",
-            "from stario import SSE, at, data, h, read_signals\n"
+            "from stario import App, h\n"
+            "from stario.datastar import SSE, at, data, read_signals\n"
             "from stario.http import ServerConfig\n"
             "assert 'data-on:click' in data.on('click', at.post('/x')).rendered\n",
         ],

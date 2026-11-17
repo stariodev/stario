@@ -14,7 +14,6 @@ from typing import Any, Self
 from urllib.parse import urljoin
 from uuid import UUID
 
-from stario.exceptions import StarioError
 from stario.http.app import App
 from stario.http.bootstrap import AppRun, Bootstrap
 from stario.http.compression import CompressionConfig
@@ -46,52 +45,6 @@ class TestExchange:
 
     request: ClientRequest
     response: TestResponse
-
-
-class DatastarReplyError(StarioError):
-    """A request with `datastar-request` got a reply that Datastar ignores."""
-
-    __slots__ = ("status_code",)
-
-    def __init__(self, message: str, *, status_code: int, **kwargs: Any) -> None:
-        super().__init__(message, **kwargs)
-        self.status_code = status_code
-
-
-def _check_datastar_reply(
-    request: ClientRequest, status_code: int, body: bytes | None
-) -> None:
-    """Raise when a Datastar request got a reply that Datastar ignores.
-
-    Datastar applies a 200 and a 204 and drops every other status, so the
-    browser shows nothing. A test that sends `datastar-request` sees what
-    the browser would see.
-    """
-    if status_code in (200, 204) or request.headers.get("datastar-request") is None:
-        return
-    context: dict[str, object] = {
-        "request": f"{request.method} {request.path}",
-        "status": status_code,
-    }
-    if body:
-        context["body"] = body[:200].decode("utf-8", "replace")
-    raise DatastarReplyError(
-        f"Datastar ignores a {status_code} reply: {request.method} {request.path}",
-        status_code=status_code,
-        context=context,
-        help_text=(
-            "Datastar applies only a 200 and a 204, so the user sees nothing. "
-            "Send the outcome as events: SSE(w).patch_signals({...}) or "
-            "SSE(w).patch_elements(view); SSE(w).navigate(url) instead of a "
-            "redirect; w.empty() when nothing changes. To test the plain HTTP "
-            "answer, send the request without the datastar-request header."
-        ),
-        example=(
-            "if (todo := get_todo(db, todo_id)) is None:\n"
-            "    SSE(w).patch_signals({'_error': 'That todo was deleted.'})\n"
-            "    return"
-        ),
-    )
 
 
 class TestClient:
@@ -459,7 +412,6 @@ class TestClient:
             except TimeoutError:
                 raise await self._timed_out(exchange, seconds) from None
             merge_cookie_jar(self.cookies, response_headers)
-            _check_datastar_reply(request, status_code, None)
             yield TestStreamResponse(
                 status_code=status_code,
                 url=request.url,
@@ -631,5 +583,4 @@ class TestClient:
             cookies=parse_response_cookies(response_headers),
         )
         self.exchanges.append(TestExchange(request=request, response=response))
-        _check_datastar_reply(request, status_code, response.content)
         return response

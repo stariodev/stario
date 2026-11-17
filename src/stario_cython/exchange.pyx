@@ -3980,31 +3980,10 @@ cdef class RequestHandle:
         self.respond(body, b"text/html; charset=utf-8", status)
 
     def redirect(self, url, status=307):
-        """Send a redirect with an empty body and a `Location` header.
-
-        A Datastar request (`Datastar-Request` header) raises instead: its
-        fetch follows the 3xx itself, so the address bar never changes.
-        """
+        """Send a redirect with an empty body and a `Location` header."""
         cdef RequestExchange ex = self._ex
         if ex is None:
             _raise_finished()
-        if ex.ensure_request().headers.unsafe_get(b"datastar-request") is not None:
-            raise StarioError(
-                "Datastar does not follow redirects",
-                context={"location": str(url)[:200], "status": status},
-                help_text=(
-                    "A Datastar request takes SSE events: send "
-                    "SSE(w).navigate(url) to move the browser. When page loads "
-                    "and Datastar requests both reach this handler, branch with "
-                    "is_datastar(c.req)."
-                ),
-                example=(
-                    "if is_datastar(c.req):\n"
-                    "    SSE(w).navigate(LOGIN.href())\n"
-                    "else:\n"
-                    "    w.redirect(LOGIN.href(), status=303)"
-                ),
-            )
         if not 300 <= status < 400:
             raise StarioError(
                 "Redirect status must be a 3xx status code",

@@ -40,10 +40,10 @@ expression compiler for the Datastar ones).
 
 ### Added
 
-- **`from stario import at, data, SSE, read_signals`**, and `HtmlElement`,
-  `SafeString`, `baked`, `render` from the root too. They are the same
-  objects as in `stario.datastar` and `stario.markup`, which still work.
-  `from stario.http import ServerConfig` works as well.
+- **`from stario import HtmlElement, SafeString, baked, render`**: the
+  same objects as in `stario.markup`, which still works. Datastar names stay
+  in `stario.datastar`. `from stario.http import ServerConfig` works as
+  well.
 - **`serve()` falls back to `PORT`.** The port is `STARIO_PORT`, else
   `PORT`, else 8000. The host stays `STARIO_HOST`, else `127.0.0.1`: setting
   a port never changes the host, so a platform that sets only `PORT` also
@@ -65,12 +65,16 @@ expression compiler for the Datastar ones).
   `items = [h.Li(t) for t in tags]` passes as a child and as a
   `-> HtmlElement` return without an annotation.
 - **`stario.testing.check_pages(client)`** checks every HTML page reachable
-  from `/` and the GET routes: 5xx answers, duplicate ids, Datastar actions
-  without a route, undefined `$signals`, a `<dialog>` a patch would close,
-  and `data-init` streams. `assert not await check_pages(client)`;
-  `check_page(client, url)` checks one page after a test made rows. A page
-  that fails because an outside service is down is skipped
-  (`skip_errors=`).
+  from `/` and the GET routes for 5xx answers and duplicate ids.
+  `assert not await check_pages(client)`; `check_page(client, url)` checks
+  one page after a test made rows. A page that fails because an outside
+  service is down is skipped (`skip_errors=`). `checks=` adds your own
+  checks: async functions `check(client, url, page) -> list[str]` that get
+  the parsed `HtmlPage`.
+- **`stario.datastar.testing.datastar_checks()`** for `check_pages(client,
+  checks=datastar_checks())`: Datastar actions without a route, undefined
+  `$signals`, a `<dialog>` a patch would close, and `data-init` streams
+  (`signals=`, `streams=`).
 
 - **`sse.replace_url(url)`** sets the address bar without a reload or a
   history entry, escaped like `navigate`. Before, apps wrote
@@ -115,13 +119,6 @@ expression compiler for the Datastar ones).
   `<script>`, with `<`, `>`, `&`, U+2028 and U+2029 escaped. Still valid
   JSON and JavaScript. `h.Script(dumps(data))` raises when the data holds
   `</script`; its error now names `dumps_script`.
-- **`TestClient` raises `DatastarReplyError`** when a request that sends
-  `datastar-request` gets a reply other than 200 or 204. Datastar ignores
-  such a reply, so the user would see nothing (a `w.text("not found",
-  404)` in a Datastar handler). The error names the fix: send the outcome
-  as events, `navigate` instead of a redirect, `w.empty()` when nothing
-  changes. To test the plain HTTP answer, send the request without the
-  header. `check_pages` reports such a stream as before.
 
 ### Changed
 
@@ -145,11 +142,6 @@ expression compiler for the Datastar ones).
   names both spellings (`'300ms'`, `'300s'`); `"1.5s"` raises with
   `'1500ms'` (a dot splits Datastar modifiers). SSE `retry=3000` (ms) is
   now `retry="3s"`.
-- **`w.redirect()` and `RedirectException` raise on a Datastar request.**
-  Datastar's fetch follows the 3xx itself, so the address bar never
-  changed and the next page was morphed into this one. The `StarioError`
-  names `SSE(w).navigate(url)` and `is_datastar(c.req)`. Stario never
-  turns one into the other.
 - **`include=` / `exclude=` names are exact signal paths.** `["id"]`
   matches `id` and `id.x`, not `video` or `form.idx`. A `str` is still a
   regex.

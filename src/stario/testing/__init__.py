@@ -8,18 +8,18 @@ code. The client only builds requests and parses responses.
 Public surface: `TestClient`, `TestResponse`, `TestStreamResponse`,
 `TestTracer`, `aload_app` (bootstrap loading for integration tests),
 `VirtualTimeLoop` (an event loop whose clock jumps over timer waits), and
-`check_pages` / `check_page` (every HTML page checked for duplicate ids,
-actions without a route, undefined signals and broken streams:
+`check_pages` / `check_page` (every HTML page checked for 5xx answers and
+duplicate ids, plus the checks you pass in `checks=`:
 `assert not await check_pages(client)`).
-A request that sends `datastar-request` and gets a reply other than 200 or
-204 raises `DatastarReplyError`: Datastar ignores that reply in a browser.
 Tests need an async runner (for example pytest-asyncio).
 """
 
-from stario.testing.client import DatastarReplyError, TestClient
+from stario.testing.client import TestClient
 from stario.testing.load import aload_app
 from stario.testing.pages import (
     OUTSIDE_SERVICE_ERRORS,
+    HtmlPage,
+    PageCheck,
     PageProblems,
     check_page,
     check_pages,
@@ -30,7 +30,8 @@ from stario.testing.vtime import VirtualTimeLoop
 
 __all__ = [
     "OUTSIDE_SERVICE_ERRORS",
-    "DatastarReplyError",
+    "HtmlPage",
+    "PageCheck",
     "PageProblems",
     "TestClient",
     "TestResponse",
