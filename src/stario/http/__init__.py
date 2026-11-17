@@ -8,7 +8,8 @@ matched handler as a task.
 `ParsedQuery` for one HTTP exchange.
 
 **Process** — `await serve(bootstrap, …)` on a running loop, or
-`asyncio.run(stario.serve(bootstrap))` / `uvloop.run(...)`.
+`asyncio.run(stario.serve(bootstrap))` / `uvloop.run(...)`; `ServerConfig`
+(also importable from `stario`).
 Lower-level embedding imports the submodules:
 
 ```python
@@ -29,6 +30,7 @@ For tests, import `aload_app` from `stario.testing`.
 
 from stario.http.app import App
 from stario.http.bootstrap import AppRun, run_app
+from stario.http.config import ServerConfig
 from stario.http.context import Context, Handler, Match, Middleware
 from stario.http.dispatch import Router, default_not_found, method_not_allowed_handler
 from stario.http.headers import Headers, RequestHeaders
@@ -53,6 +55,7 @@ __all__ = [
     "RequestHeaders",
     "Route",
     "Router",
+    "ServerConfig",
     "Writer",
     "catch_errors",
     "default_not_found",

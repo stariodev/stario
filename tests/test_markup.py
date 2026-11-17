@@ -257,11 +257,92 @@ class TestAttrs:
         result = render(h.Div({"id": "main"}, Attrs(' data-x="1"'), "content"))
         assert result == '<div id="main" data-x="1">content</div>'
 
-    def test_attrs_must_appear_before_children(self):
-        with pytest.raises(
-            StarioError, match="attributes must be passed before children"
-        ):
-            h.Div("content", Attrs(' class="late"'))
+    def test_attrs_after_children_render_in_the_opening_tag(self):
+        assert render(h.Div("content", Attrs(' class="late"'))) == (
+            '<div class="late">content</div>'
+        )
+
+
+class TestAttributesAfterChildren:
+    """Attributes may follow children; each group keeps its own order."""
+
+    def test_mapping_after_a_child(self):
+        assert render(h.I("x", {"class": "icon"})) == '<i class="icon">x</i>'
+
+    def test_interleaved_attributes_and_children_keep_their_order(self):
+        bold = h.B("two")
+        el = h.P({"id": "a"}, "one", classes("c"), bold, {"title": "t"}, None, "3")
+        assert render(el) == '<p id="a" class="c" title="t">one<b>two</b>3</p>'
+        assert el.children == ("one", bold, None, "3")
+        assert el["title"] == "t"
+
+    def test_same_result_as_attributes_first(self):
+        late = h.A("Home", {"href": "/"}, [h.Span("!")])
+        first = h.A({"href": "/"}, "Home", [h.Span("!")])
+        assert render(late) == render(first)
+
+    def test_mapping_object_after_a_child(self):
+        from types import MappingProxyType
+
+        el = h.Div("x", MappingProxyType({"id": "m"}))
+        assert render(el) == '<div id="m">x</div>'
+
+    def test_raw_text_element(self):
+        assert render(h.Script("let a = 1", {"type": "module"})) == (
+            '<script type="module">let a = 1</script>'
+        )
+
+    def test_void_element_still_rejects_children(self):
+        with pytest.raises(StarioError, match="void element"):
+            h.Img("caption", {"src": "/a.png"})  # type: ignore[arg-type]
+
+    def test_bad_child_after_attributes_still_raises(self):
+        with pytest.raises(StarioError, match="Boolean values"):
+            h.Div("x", {"id": "a"}, True)  # type: ignore[arg-type]
+
+    def test_baked_builder(self):
+        @baked
+        def card(title, body):
+            return h.Div(h.H2(title), {"class": "card"}, body)
+
+        assert render(card("T", "<b>")) == (
+            '<div class="card"><h2>T</h2>&lt;b&gt;</div>'
+        )
+
+
+class TestAttrsAsMappingValue:
+    """`{"class": classes(...)}` renders like passing `classes(...)` itself."""
+
+    def test_classes_as_class_value(self):
+        el = h.Div({"id": "c", "class": classes("card", {"on": True})}, "x")
+        assert render(el) == '<div id="c" class="card on">x</div>'
+
+    def test_single_pair_mapping(self):
+        assert render(h.Span({"class": classes("a")})) == '<span class="a"></span>'
+
+    def test_styles_as_style_value(self):
+        el = h.Div({"style": styles({"color": "red"})})
+        assert render(el) == '<div style="color:red;"></div>'
+
+    def test_empty_attrs_renders_nothing(self):
+        assert render(h.Div({"class": Attrs("")}, "x")) == "<div>x</div>"
+
+    def test_many_pairs_take_the_list_path(self):
+        attrs: dict[str, Any] = {f"data-k{i}": str(i) for i in range(40)}
+        attrs["class"] = classes("z")
+        out = render(h.Div(attrs))
+        assert ' class="z"' in out
+        assert ' data-k39="39"' in out
+
+    def test_attrs_for_another_attribute_raises(self):
+        with pytest.raises(StarioError, match="Attrs fragment for other attributes"):
+            h.Div({"class": Attrs(' id="x"')})
+        with pytest.raises(StarioError, match="Attrs fragment for other attributes"):
+            h.Div({"class": Attrs(' class="a" id="x"')})
+
+    def test_with_attrs_accepts_classes_value(self):
+        el = h.Div({"id": "a"}, "x").with_attrs({"class": classes("b")})
+        assert el["class"] == "b"
 
 
 class TestComment:
@@ -427,7 +508,9 @@ class TestAttributeTypes:
     def test_prefixed_helper(self):
         attrs = prefixed("aria", {"expanded": True, "hidden": False})
         result = render(h.Div(attrs))
+        # One rule for every attribute: True is present, False is absent.
         assert "aria-expanded" in result
+        assert 'aria-expanded="' not in result
         assert "aria-hidden" not in result
 
     def test_attribute_key_rejects_safestring(self):
@@ -1085,18 +1168,18 @@ class TestEdgeCases:
         assert result == "<div>text</div>"
 
     def test_mixed_attributes_and_children(self):
-        with pytest.raises(
-            StarioError, match="attributes must be passed before children"
-        ):
-            render(h.Div({"id": "1"}, "text", {"class": "test"}))
+        assert render(h.Div({"id": "1"}, "text", {"class": "test"})) == (
+            '<div id="1" class="test">text</div>'
+        )
 
     def test_text_content_keeps_quotes_literal(self):
         result = render(h.P("say \"hello\" and 'bye'"))
         assert result == "<p>say \"hello\" and 'bye'</p>"
 
     def test_safestring_attribute(self):
-        result = render(h.Div({"data-raw": SafeString("raw<>value")}))
-        assert 'data-raw="raw<>value"' in result
+        # `"` `<` `>` are escaped so the value cannot end; `&` stays.
+        result = render(h.Div({"data-raw": SafeString('raw<>"&nbsp;value')}))
+        assert 'data-raw="raw&lt;&gt;&quot;&nbsp;value"' in result
 
 
 class TestTrustBoundaries:

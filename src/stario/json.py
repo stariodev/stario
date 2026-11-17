@@ -252,6 +252,41 @@ def dumps_bytes(value: object, /, *, default: JsonDefault | None = None) -> byte
     return _stdlib_default_encode(value, default).encode()
 
 
+def dumps_script(value: object, /) -> str:
+    """JSON text that is safe inside a `<script>` element.
+
+    `<`, `>` and `&` become `\\u003c`, `\\u003e` and `\\u0026`, and U+2028
+    and U+2029 are escaped too. The result is still valid JSON and valid
+    JavaScript, and user data in it can never end the script:
+
+    ```python
+    h.Script({"type": "application/json", "id": "state"}, dumps_script(state))
+    h.Script(f"const state = {dumps_script(state)};")
+    ```
+
+    `h.Script(dumps(value))` raises instead when the data holds `</script`.
+    """
+    text = dumps(value)
+    # Most JSON has none of these: five C scans instead of five copies.
+    # `<` covers "</script" and "<!--"; `>` and `&` close the HTML-comment
+    # and entity cases; U+2028/U+2029 end a string literal in older engines.
+    if (
+        "<" in text
+        or ">" in text
+        or "&" in text
+        or "\u2028" in text
+        or "\u2029" in text
+    ):
+        text = (
+            text.replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("&", "\\u0026")
+            .replace("\u2028", "\\u2028")
+            .replace("\u2029", "\\u2029")
+        )
+    return text
+
+
 def loads(data: str | bytes | bytearray, /) -> object:
     """Parse JSON text, bytes, or a byte array into Python values."""
     return _decode(data)
@@ -267,6 +302,7 @@ __all__ = [
     "StdlibJsonCodec",
     "dumps",
     "dumps_bytes",
+    "dumps_script",
     "loads",
     "set_codec",
 ]

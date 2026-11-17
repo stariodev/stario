@@ -36,7 +36,7 @@ from cpython.mem cimport PyMem_Free, PyMem_Malloc, PyMem_Realloc
 from cpython.object cimport PyObject
 from cpython.ref cimport Py_DECREF, Py_INCREF, Py_XDECREF
 from cpython.tuple cimport PyTuple_GET_ITEM, PyTuple_GET_SIZE
-from libc.string cimport memcpy
+from libc.string cimport memcmp, memcpy, memset
 
 from stario.exceptions import StarioError
 
@@ -113,12 +113,13 @@ cdef extern from *:
     };
 
     /* Bytes each character adds when escaped, per mode (ESC_TEXT,
-       ESC_DQUOTE, ESC_SQUOTE): a table sum, so the scan of clean text has
-       no branches and the compiler can vectorise it. */
-    static const unsigned char stario_escape_extra[3][256] = {
+       ESC_DQUOTE, ESC_SQUOTE, ESC_SAFE): a table sum, so the scan of clean
+       text has no branches and the compiler can vectorise it. */
+    static const unsigned char stario_escape_extra[4][256] = {
         {[38] = 4, [60] = 3, [62] = 3},             /* & < > */
         {[38] = 4, [60] = 3, [62] = 3, [34] = 5},   /* and " */
         {[38] = 4, [60] = 3, [62] = 3, [39] = 4},   /* and ' */
+        {[60] = 3, [62] = 3, [34] = 5},             /* " < > (& stays) */
     };
 
     /* A clean prefix of p[0:n] (bytes: Latin-1 or UTF-8): n when nothing
@@ -127,14 +128,14 @@ cdef extern from *:
        rescan from there). Eight bytes a step (SWAR), two exact zero-byte
        tests per step: < and > differ in bit 1 only, so (x | 0x02) ^ 0x3e
        is zero for both; & is x ^ 0x26, and its partner in the quote modes
-       differs in one bit too (" is 0x22, ' is 0x27). The tail goes byte
-       by byte. */
+       differs in one bit too (" is 0x22, ' is 0x27). ESC_SAFE tests " alone
+       (x ^ 0x22). The tail goes byte by byte. */
     static inline Py_ssize_t stario_clean_run_mode(const unsigned char* p,
                                                    Py_ssize_t n, int mode) {
         const uint64_t ones = 0x0101010101010101ULL;
         const uint64_t highs = 0x8080808080808080ULL;
         const uint64_t amp_or = ones * (mode == 1 ? 0x04 : mode == 2 ? 0x01 : 0x00);
-        const uint64_t amp_eq = ones * (mode == 2 ? 0x27 : 0x26);
+        const uint64_t amp_eq = ones * (mode == 2 ? 0x27 : mode == 3 ? 0x22 : 0x26);
         const unsigned char* table = stario_escape_extra[mode];
         Py_ssize_t i = 0;
         uint64_t x, a, g;
@@ -348,7 +349,7 @@ cdef extern from *:
     int stario_disallow_instantiation(object t) except -1
     int stario_dict_get_ref(object d, object key, PyObject** out) except -1
     const unsigned char stario_text_escape[256]
-    const unsigned char stario_escape_extra[3][256]
+    const unsigned char stario_escape_extra[4][256]
     Py_ssize_t stario_clean_run(const unsigned char* p, Py_ssize_t n) nogil
     Py_ssize_t stario_clean_run_mode(const unsigned char* p, Py_ssize_t n, int mode) nogil
     Py_ssize_t stario_utf8_into(char* d, int kind, const void* p, Py_ssize_t n, int esc) nogil
@@ -434,6 +435,7 @@ cdef enum:
     ESC_TEXT = 0      # & < >
     ESC_DQUOTE = 1    # & < > "
     ESC_SQUOTE = 2    # & < > '
+    ESC_SAFE = 3      # " < > (a SafeString attribute value: & stays)
 
 
 cdef object _escape_1byte(object s, int mode):
@@ -444,7 +446,7 @@ cdef object _escape_1byte(object s, int mode):
     cdef Py_ssize_t extra = 0
     cdef Py_ssize_t w = 0
     cdef unsigned char c
-    cdef unsigned char quote = 34 if mode == ESC_DQUOTE else (39 if mode == ESC_SQUOTE else 0)
+    cdef unsigned char quote = 34 if (mode == ESC_DQUOTE or mode == ESC_SAFE) else (39 if mode == ESC_SQUOTE else 0)
     cdef const unsigned char* table = stario_escape_extra[mode]
     cdef unsigned char* dst
     cdef object out
@@ -460,7 +462,7 @@ cdef object _escape_1byte(object s, int mode):
     w = k
     for i in range(k, n):
         c = src[i]
-        if c == 38:
+        if c == 38 and mode != ESC_SAFE:
             dst[w] = 38; dst[w + 1] = 97; dst[w + 2] = 109; dst[w + 3] = 112; dst[w + 4] = 59
             w += 5
         elif c == 60:
@@ -491,7 +493,7 @@ cdef object _escape_wide(object s, int mode):
     cdef Py_ssize_t extra = 0
     cdef Py_ssize_t w = 0
     cdef Py_UCS4 c
-    cdef Py_UCS4 quote = 34 if mode == ESC_DQUOTE else (39 if mode == ESC_SQUOTE else 0)
+    cdef Py_UCS4 quote = 34 if (mode == ESC_DQUOTE or mode == ESC_SAFE) else (39 if mode == ESC_SQUOTE else 0)
     cdef const unsigned char* table = stario_escape_extra[mode]
     cdef const Py_UCS2* src2
     cdef const Py_UCS4* src4
@@ -515,7 +517,7 @@ cdef object _escape_wide(object s, int mode):
     dst = PyUnicode_DATA(out)
     for i in range(n):
         c = PyUnicode_READ(kind, src, i)
-        if c == 38:
+        if c == 38 and mode != ESC_SAFE:
             PyUnicode_WRITE(kind, dst, w, 38); PyUnicode_WRITE(kind, dst, w + 1, 97)
             PyUnicode_WRITE(kind, dst, w + 2, 109); PyUnicode_WRITE(kind, dst, w + 3, 112)
             PyUnicode_WRITE(kind, dst, w + 4, 59)
@@ -596,6 +598,9 @@ def check_raw_text(str text not None, str tag not None):
 
 
 cdef int _check_raw_text(object text, object tag) except -1:
+    # Most code has no "</" and no "<!--": two C scans, no copy.
+    if "</" not in text and "<!--" not in text:
+        return 0
     cdef object lowered = text.lower()
     cdef object name = tag.lower()  # Tag("SCRIPT", raw_text=True) ends at "</script" too
     cdef bint script = name == "script"
@@ -607,7 +612,8 @@ cdef int _check_raw_text(object text, object tag) except -1:
                 f"Raw text in <{tag}> is sent verbatim, so it must "
                 f"not contain '</{tag}'"
                 + (" or '<!--'" if script else "")
-                + ". Build it differently, or pass a SafeString if you "
+                + ". For JSON data use stario.json.dumps_script(value); for "
+                "a JS value use literal(value). Pass a SafeString if you "
                 "control the bytes."
             ),
             example='h.Script("const tag = \'<\\\\/script>\';")',
@@ -744,17 +750,6 @@ def shared_safe_string(rendered):
 # ---------------------------------------------------------------------------
 # Errors shared by Tag.__call__ and render
 
-cdef object _attrs_before_children_error(object tag_repr):
-    return StarioError(
-        "HTML attributes must be passed before children",
-        context={"tag": tag_repr},
-        help_text=(
-            "Pass attribute mappings and Attrs fragments first, then child nodes."
-        ),
-        example='h.Div(classes("card"), h.Span("ok"))',
-    )
-
-
 cdef object _unfilled_slot_name(object node):
     if type(node) is _BakeSlot:
         return _slot_name(node)
@@ -888,26 +883,183 @@ cdef object _bad_attr_value_error(object key, object value):
         },
         help_text=(
             "HTML attributes support scalar values only: str, SafeString, int, "
-            "float, bool, or None. Use helpers like classes(), styles(), or data() "
+            "float, bool, or None (and classes()/styles() as the value of "
+            "'class'/'style'). Use helpers like classes(), styles(), or data() "
             "for common formatting."
         ),
         example='h.Div({"id": "main"})',
     )
 
 
+cdef object _attrs_value_fragment(object key, Attrs value):
+    """The fragment of an ``Attrs`` given as the value of ``key``.
+
+    ``{"class": classes("a", "b")}`` renders like ``classes("a", "b")``
+    passed to the tag. The fragment must hold exactly one attribute, named
+    ``key``; an empty fragment (``classes(None)``) renders nothing.
+    """
+    cdef str rendered = value.rendered
+    cdef list parsed
+    cdef Py_ssize_t n = PyUnicode_GET_LENGTH(rendered)
+    cdef Py_ssize_t k = PyUnicode_GET_LENGTH(key)
+    if not n:
+        return None
+    # The shape classes() and styles() write: ' key="..."' with no other
+    # quote. A few C checks; anything else goes through the full parse.
+    if (
+        n >= k + 4
+        and PyUnicode_READ_CHAR(rendered, 0) == 32
+        and PyUnicode_READ_CHAR(rendered, k + 1) == 61  # =
+        and PyUnicode_READ_CHAR(rendered, k + 2) == 34  # "
+        and PyUnicode_READ_CHAR(rendered, n - 1) == 34
+        and rendered.startswith(key, 1)
+        and rendered.find('"', k + 3) == n - 1
+    ):
+        return rendered
+    parsed = _parse_attrs(rendered)
+    if len(parsed) == 1 and parsed[0][0] == key:
+        return rendered
+    raise StarioError(
+        f"The value of attribute '{key}' is an Attrs fragment for other attributes",
+        context={"attribute": key, "value": rendered[:100]},
+        help_text=(
+            "An Attrs value inside a mapping must render that one attribute, "
+            "as classes() does for 'class' and styles() for 'style'. Pass any "
+            "other Attrs fragment (data.*, aria(), ...) to the tag itself."
+        ),
+        example='h.Div({"id": "card"}, data.on("click", "$open = true"), "text")',
+    )
+
+
+cdef object _safe_attr_text(object s):
+    """A ``SafeString`` in an attribute value: ``"`` ``<`` ``>`` escaped.
+
+    ``&`` stays, so entities the author wrote (``&nbsp;``, ``&#39;``) keep
+    their meaning. A ``"`` can no longer end the value and start another
+    attribute: ``@baked`` output (a ``SafeString``) holds quotes as text.
+    ``Attrs`` stays the way to write raw attribute bytes.
+    """
+    if PyUnicode_KIND(s) == PyUnicode_1BYTE_KIND:
+        return _escape_1byte(s, ESC_SAFE)
+    return _escape_wide(s, ESC_SAFE)
+
+
+cdef bint _is_url_key(object key):
+    """``key`` is ``href``, ``src``, ``action``, ``formaction`` or
+    ``xlink:href``, in any ASCII case. C compares only: this runs for every
+    ``str`` attribute value."""
+    cdef Py_ssize_t n = PyUnicode_GET_LENGTH(key)
+    cdef int kind
+    cdef const void* text
+    cdef const char* want
+    cdef Py_ssize_t i
+    cdef unsigned int c
+    if n == 4:
+        want = b"href"
+    elif n == 3:
+        want = b"src"
+    elif n == 6:
+        want = b"action"
+    elif n == 10:
+        c = <unsigned int>PyUnicode_READ_CHAR(key, 0) | 0x20
+        if c == 102:  # f
+            want = b"formaction"
+        elif c == 120:  # x
+            want = b"xlink:href"
+        else:
+            return False
+    else:
+        return False
+    kind = PyUnicode_KIND(key)
+    text = PyUnicode_DATA(key)
+    for i in range(n):
+        c = <unsigned int>PyUnicode_READ(kind, text, i)
+        if 65 <= c <= 90:
+            c += 32
+        if c != <unsigned char>want[i]:
+            return False
+    return True
+
+
+cdef inline int _check_url_attr(object key, object value) except -1:
+    """Raise for a ``javascript:`` URL in ``href`` / ``src`` / ``action`` /
+    ``formaction`` / ``xlink:href``.
+
+    Cheap for the common case: another key returns after a few C compares,
+    and a URL without ``:`` returns at once.
+    """
+    if not _is_url_key(key):
+        return 0
+    if ":" not in value:
+        return 0
+    return _check_url_scheme(key, value)
+
+
+cdef int _check_url_scheme(object key, object value) except -1:
+    """``value`` is the value of a URL key (see ``_is_url_key``)."""
+    cdef int kind
+    cdef const void* text
+    cdef Py_ssize_t i = 0, n, m = 0
+    cdef unsigned int c
+    cdef char scheme[11]
+    # Read the scheme as the URL parser does: controls and spaces in front
+    # are dropped, and tabs and newlines anywhere ("java\tscript:").
+    kind = PyUnicode_KIND(value)
+    text = PyUnicode_DATA(value)
+    n = PyUnicode_GET_LENGTH(value)
+    while i < n and PyUnicode_READ(kind, text, i) <= 32:
+        i += 1
+    while i < n:
+        c = <unsigned int>PyUnicode_READ(kind, text, i)
+        i += 1
+        if c == 9 or c == 10 or c == 13:
+            continue
+        if c == 58:  # ":"
+            break
+        if 65 <= c <= 90:
+            c += 32
+        if c < 97 or c > 122 or m == 10:
+            return 0  # not a letter, or longer than "javascript": a safe scheme
+        scheme[m] = <char>c
+        m += 1
+    else:
+        return 0
+    # Only javascript: runs code as this site, and only when the browser
+    # navigates to it. Browsers block data: pages at the top level, and no
+    # browser runs vbscript: any more, so other schemes pass (mailto:,
+    # tel:, app links, a data: download link).
+    if m == 10 and memcmp(scheme, b"javascript", 10) == 0:
+        raise StarioError(
+            f"{key}={value[:40]!r} is a javascript: URL",
+            context={"attribute": key, "value": value[:100]},
+            help_text=(
+                "A javascript: URL runs code as your site when the user "
+                "clicks it. Link to a route (ROUTE.href()), check user URLs "
+                "for http(s), or pass SafeString(url) when you wrote the URL "
+                "yourself."
+            ),
+            example='h.A({"href": PROFILE.href(user_id=user.id)}, "Profile")',
+        )
+    return 0
+
+
 cdef object _attr_fragment(object key, object value):
     """`` key="value"`` for one scalar value, or None to omit (matches ``wire``)."""
     cdef object value_type = type(value)
     if value_type is str:
+        _check_url_attr(key, value)  # a javascript: URL runs code on click
         return _pair_string(key, c_escape_attr(value))
     if value_type is SafeString:
-        return _pair_string(key, (<SafeString>value).rendered)
+        # Finished text, but it still cannot end the quotes (see _safe_attr_text).
+        return _pair_string(key, _safe_attr_text((<SafeString>value).rendered))
     if value is True:
         return f" {key}"
     if value is None or value is False:
         return None
     if value_type is int or value_type is float:
         return _pair_string(key, str(value))
+    if value_type is Attrs:
+        return _attrs_value_fragment(key, value)
     raise _bad_attr_value_error(key, value)
 
 
@@ -976,20 +1128,29 @@ cdef int _push(Pair* pairs, Py_ssize_t* count, Py_ssize_t* total, unsigned int* 
 cdef int _push_value(Pair* pairs, Py_ssize_t* count, Py_ssize_t* total, unsigned int* maxchar,
                      object raw_key, object value) except -1:
     cdef object key
+    cdef object fragment
     cdef object value_type = type(value)
     if type(raw_key) is _BakeSlot or value_type is _BakeSlot:
         return _PAIR_SLOT
     key = _valid_key(raw_key)
     if value_type is str:
+        _check_url_attr(key, value)
         return _push(pairs, count, total, maxchar, key, c_escape_attr(value))
     if value_type is SafeString:
-        return _push(pairs, count, total, maxchar, key, (<SafeString>value).rendered)
+        return _push(
+            pairs, count, total, maxchar, key, _safe_attr_text((<SafeString>value).rendered)
+        )
     if value is True:
         return _push(pairs, count, total, maxchar, key, None)
     if value is None or value is False:
         return _PAIR_OK
     if value_type is int or value_type is float:
         return _push(pairs, count, total, maxchar, key, str(value))
+    if value_type is Attrs:
+        fragment = _attrs_value_fragment(key, value)
+        if fragment is None:
+            return _PAIR_OK
+        return _push(pairs, count, total, maxchar, None, fragment)
     raise _bad_attr_value_error(key, value)
 
 
@@ -1027,16 +1188,29 @@ cdef object _one_pair(object raw_key, object value, bint* fallback):
         return None
     key = _valid_key(raw_key)
     if value_type is str:
+        _check_url_attr(key, value)
         return _pair_string(key, c_escape_attr(value))
     if value_type is SafeString:
-        return _pair_string(key, (<SafeString>value).rendered)
+        return _pair_string(key, _safe_attr_text((<SafeString>value).rendered))
     if value is True:
         return " " + key
     if value is None or value is False:
         return None
     if value_type is int or value_type is float:
         return _pair_string(key, str(value))
+    if value_type is Attrs:
+        return _attrs_value_fragment(key, value)
     raise _bad_attr_value_error(key, value)
+
+
+cdef inline bint _is_attr_arg(object arg):
+    """What ``Tag.__call__`` takes as attributes: Attrs or a mapping."""
+    cdef object arg_type = type(arg)
+    if arg_type is Attrs or arg_type is dict:
+        return True
+    if arg_type is bool or arg_type is tuple or arg_type is str or arg_type is list:
+        return False
+    return isinstance(arg, _Mapping)
 
 
 cdef object _attrs_one_string(tuple args, Py_ssize_t end, bint* fallback):
@@ -1443,6 +1617,7 @@ cdef class Tag:
     cdef readonly str empty_html           # "<div></div>" or "<br/>"
     cdef readonly Element empty            # the element a bare call returns
     cdef bint _void
+    cdef bint _keep_newline                # textarea, pre, listing (see _keep_leading_newline)
 
     def __init__(
         self,
@@ -1501,6 +1676,7 @@ cdef class Tag:
         self.empty_mode = empty
         self.raw_text = raw_text
         self._void = empty == "void"
+        self._keep_newline = name.lower() in ("textarea", "pre", "listing")
         # Every element built from this tag renders these: shared strings
         # (interned, so immortal, on free-threaded builds).
         tag_start = prefix + "<" + name
@@ -1624,6 +1800,20 @@ cdef class Tag:
         self._raw_flush(run, out, &slots)
         return tuple(out)
 
+    cdef object _call_reordered(self, tuple args):
+        # Attributes after children are allowed: `h.I("x", {"class": "icon"})`
+        # is a natural way to write it, and raising here used to surface
+        # only in a server log (often inside a live stream). This slow path
+        # runs only for that order; attributes first stays the fast path.
+        cdef list attrs = []
+        cdef list children = []
+        for arg in args:
+            if _is_attr_arg(arg):
+                PyList_Append(attrs, arg)
+            else:
+                PyList_Append(children, arg)
+        return self(*attrs, *children)
+
     def __call__(self, *args):
         """__call__($self, /, *children)
 --
@@ -1632,12 +1822,13 @@ cdef class Tag:
 
         Arguments are processed in order:
 
-        - Each leading mapping (`dict` or other `Mapping`) or `Attrs`
-          fragment renders into the opening tag, in order. Mappings are not
-          merged or deduplicated: duplicate names render twice. `None`
+        - Each mapping (`dict` or other `Mapping`) or `Attrs` fragment
+          renders into the opening tag, in the order given. Mappings are
+          not merged or deduplicated: duplicate names render twice. `None`
           values are skipped.
-        - The first other argument starts the children. A mapping after
-          that is an error (attributes must come first).
+        - Every other argument is a child, in order. Attributes may come
+          before or after children: `h.I("x", {"class": "icon"})` renders
+          `<i class="icon">x</i>`. Putting them first is the fast path.
         - A child must be `str`, `int`, `float`, `SafeString`, an `Element`,
           a `list` of those, or `None` (skipped). Anything else (a `bool`,
           a `tuple`, an uncalled `Tag`, another object) is an error here,
@@ -1652,6 +1843,7 @@ cdef class Tag:
         cdef bint has_children = False
         cdef bint has_attrs = False
         cdef bint has_mapping = False
+        cdef bint late_attrs = False
         cdef PyObject* arg
         cdef PyObject* arg_type
         cdef object attrs = None
@@ -1683,7 +1875,7 @@ cdef class Tag:
                 continue
             elif arg_type == <PyObject*>Attrs:
                 if has_children:
-                    raise _attrs_before_children_error(self._repr())
+                    late_attrs = True
                 has_attrs = True
                 continue
             elif (
@@ -1695,7 +1887,7 @@ cdef class Tag:
                 )
             ):
                 if has_children:
-                    raise _attrs_before_children_error(self._repr())
+                    late_attrs = True
                 has_attrs = True
                 has_mapping = True
                 continue
@@ -1704,6 +1896,11 @@ cdef class Tag:
             if not has_children:
                 has_children = True
                 first = i
+
+        if late_attrs:
+            # An attribute after a child: move every attribute in front of
+            # the children (each group keeps its order) and build from that.
+            return self._call_reordered(args)
 
         if has_children and self._void:
             raise StarioError(
@@ -1733,6 +1930,8 @@ cdef class Tag:
                 # not keep them alive.
                 children = args[first:]
                 first = 0
+            if self._keep_newline:
+                children = _keep_leading_newline(children, first)
 
         if attrs is None and children is None:
             return self.empty
@@ -1744,6 +1943,36 @@ cdef class Tag:
         if children is not None and not self.raw_text:
             e._first = first
         return e
+
+
+cdef tuple _keep_leading_newline(tuple children, Py_ssize_t first):
+    """``<textarea>``, ``<pre>``, ``<listing>``: one more newline in front.
+
+    The HTML parser drops one newline right after these start tags, so
+    text that starts with a newline would lose it. A child that starts
+    with one gets a second; the parser drops that one.
+    """
+    cdef Py_ssize_t i
+    cdef PyObject* child
+    cdef object text
+    cdef Py_UCS4 c
+    for i in range(first, PyTuple_GET_SIZE(children)):
+        child = PyTuple_GET_ITEM(children, i)
+        if child == <PyObject*>None:
+            continue
+        if stario_type(child) == <PyObject*>str:
+            text = <object>child
+        elif stario_type(child) == <PyObject*>SafeString:
+            text = (<SafeString><object>child).rendered
+        else:
+            return children
+        if not PyUnicode_GET_LENGTH(text):
+            continue
+        c = PyUnicode_READ_CHAR(text, 0)
+        if c == 10 or c == 13:
+            return children[:i] + ("\n",) + children[i:]
+        return children
+    return children
 
 
 cdef class VoidTag(Tag):
@@ -1847,6 +2076,47 @@ def classes(*tokens):
     result = Attrs.__new__(Attrs, stario_shared_str(text))
     stario_immortalize(result)
     return _classes_cache.setdefault(stario_shared_tuple(tokens), result)
+
+
+# Caches for the Datastar helpers (``stario.datastar``): the same call with
+# the same arguments returns the same fragment, as ``classes()`` does. Same
+# bound rule as the other caches: a cap on the entries, short texts only,
+# never cleared, first insert wins.
+FRAGMENT_CACHE_MAX = 4096
+cdef Py_ssize_t _FRAGMENT_CACHE_MAX = 4096
+
+
+def fragment_cache():
+    """A new cache dict that every thread reads (immortal on free-threaded builds)."""
+    return stario_shared_dict()
+
+
+def remember_attrs(dict cache not None, tuple key not None, str text not None):
+    """``Attrs(text)``, stored in ``cache`` under ``key`` while it has room.
+
+    The stored fragment is immortal on free-threaded builds, so threads
+    returning it write no refcount.
+    """
+    if (
+        len(cache) >= _FRAGMENT_CACHE_MAX
+        or PyUnicode_GET_LENGTH(text) > _CLASSES_CACHE_MAX_LEN
+    ):
+        # Full, or a long text (rarely repeated, and it would stay forever):
+        # build without storing.
+        return Attrs.__new__(Attrs, text)
+    result = Attrs.__new__(Attrs, stario_shared_str(text))
+    stario_immortalize(result)
+    return cache.setdefault(stario_shared_tuple(key), result)
+
+
+def remember_str(dict cache not None, tuple key not None, str text not None):
+    """``text``, stored in ``cache`` under ``key`` while it has room."""
+    if (
+        len(cache) >= _FRAGMENT_CACHE_MAX
+        or PyUnicode_GET_LENGTH(text) > _CLASSES_CACHE_MAX_LEN
+    ):
+        return text
+    return cache.setdefault(stario_shared_tuple(key), stario_shared_str(text))
 
 
 # ``prefix`` -> {key: "prefix-key"}: validated wire names for data() / aria().
@@ -1956,6 +2226,85 @@ cdef bint _css_breakout(object s, bint colon):
     return False
 
 
+# ``" ' ( ) / ; [ \\ ] { }`` and LF, FF, CR: the only characters
+# _css_value_problem acts on.
+cdef unsigned char _CSS_SPECIAL[128]
+memset(_CSS_SPECIAL, 0, 128)
+for _c in (10, 12, 13, 34, 39, 40, 41, 47, 59, 91, 92, 93, 123, 125):
+    _CSS_SPECIAL[_c] = 1
+
+
+cdef int _css_value_problem(object s):
+    """0 when ``s`` stays inside its declaration, else a code for
+    ``css_value_problem``.
+
+    ``; { } \\`` could end the declaration or open a block. An unclosed
+    quote, ``(``, ``[`` or ``/*`` is worse: the browser reads the
+    declarations that Stario writes after it as part of this value
+    (``url(https://x/a`` would take ``;display:none`` into the URL).
+    """
+    cdef int kind = PyUnicode_KIND(s)
+    cdef const void* data = PyUnicode_DATA(s)
+    cdef Py_ssize_t i, n = PyUnicode_GET_LENGTH(s)
+    cdef Py_UCS4 c, quote = 0
+    cdef Py_ssize_t parens = 0, brackets = 0
+    for i in range(n):
+        c = PyUnicode_READ(kind, data, i)
+        if c >= 128 or not _CSS_SPECIAL[c]:
+            continue  # most of every value: one table read per character
+        if c == 59 or c == 123 or c == 125 or c == 92:  # ; { } \
+            return 1
+        if quote:
+            if c == quote:
+                quote = 0
+            elif c == 10 or c == 12 or c == 13:
+                return 8  # CSS ends the string at a line break
+        elif c == 34 or c == 39:  # " '
+            quote = c
+        elif c == 40:  # (
+            parens += 1
+        elif c == 41:  # )
+            parens -= 1
+            if parens < 0:
+                return 4
+        elif c == 91:  # [
+            brackets += 1
+        elif c == 93:  # ]
+            brackets -= 1
+            if brackets < 0:
+                return 6
+        elif c == 47 and i + 1 < n and PyUnicode_READ(kind, data, i + 1) == 42:  # /*
+            return 7
+    if quote:
+        return 2
+    if parens:
+        return 3
+    if brackets:
+        return 5
+    return 0
+
+
+def css_value_problem(value):
+    """Why a ``styles()`` value could leave its declaration, or None.
+
+    Internal: the error messages in ``stario.markup.attributes``.
+    """
+    cdef int code = _css_value_problem(value)
+    if code == 0:
+        return None
+    return (
+        None,
+        "has ';', '{', '}' or '\\', which could start another declaration",
+        "has an unclosed quote",
+        "has an unclosed '('",
+        "has a ')' with no '('",
+        "has an unclosed '['",
+        "has a ']' with no '['",
+        "has '/*', which starts a comment",
+        "has a line break inside a quote, which ends the string there",
+    )[code]
+
+
 def styles(declarations):
     """Return a pre-rendered `style` attribute fragment."""
     cdef list parts = []
@@ -1977,9 +2326,11 @@ def styles(declarations):
         ):
             return _styles_checked(declarations)
         if value_type is str:
-            rendered_value = c_escape_attr(value)
-            if _css_breakout(rendered_value, False):
+            # Check the value itself: its escaped form has `;` in every
+            # entity (`&quot;`), which is not a breakout.
+            if _css_value_problem(value):
                 return _styles_checked(declarations)
+            rendered_value = c_escape_attr(value)
         elif value_type is int or value_type is float:
             rendered_value = str(value)
         else:

@@ -60,7 +60,7 @@ def test_datastar_attribute_name_parts_cannot_inject_attributes(build):
 
 
 def test_datastar_attribute_name_parts_still_accept_documented_values():
-    assert _attr_names(data.on("click", "go()", target="window")) == [
+    assert _attr_names(data.on("click", "go()", window=True)) == [
         "data-on:click__window"
     ]
     assert _attr_names(data.on("myEvent", "go()", case="snake")) == [
@@ -85,7 +85,7 @@ def test_datastar_attribute_name_parts_still_accept_documented_values():
 
 @pytest.mark.parametrize(
     "option",
-    ["retry_interval_ms", "retry_max_wait_ms", "retry_max_count", "retry_scaler"],
+    ["retry_interval", "retry_max_wait", "retry_max_count", "retry_scaler"],
 )
 def test_fetch_numeric_options_reject_non_numbers(option):
     with pytest.raises(StarioError):
@@ -104,9 +104,9 @@ def test_fetch_numeric_options_reject_non_finite_scaler():
 def test_fetch_numeric_options_keep_their_output():
     action = at.get(
         "/x",
-        retry_interval_ms=100,
+        retry_interval="100ms",
         retry_scaler=1.5,
-        retry_max_wait_ms=2000,
+        retry_max_wait="2s",
         retry_max_count=3,
         open_when_hidden=True,
     )

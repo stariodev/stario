@@ -1,29 +1,78 @@
 """Low-level helpers for JS literals, object expressions, and modifier strings.
 
-Used by attribute and action builders; you rarely import this module directly.
+Used by attribute and action builders. `literal()`, `Debounce` and
+`Throttle` are re-exported from `stario.datastar`; import them from there.
 """
 
 import math
 import re
-from collections.abc import Iterable, Mapping
+import warnings
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any, Literal, NoReturn, cast
 
 from stario.exceptions import StarioError
+from stario_cython.markup import fragment_cache
 
-_TIME_VALUE_RE = re.compile(r"^(?:0|[1-9][0-9]*)(?:ms|s)$")
 # Characters that cannot appear inside an attribute key (HTML or Datastar
 # parsing would break) — `__` starts a modifier, the rest break the tag.
 _SIGNAL_KEY_BAD_RE = re.compile(r"__|\s|[\"'>/=]")
 
-# Filter types for include/exclude parameters
+# Filter types for include/exclude parameters: a list of signal names, or a
+# `str` that is a Datastar (JavaScript) regex.
 FilterValue = str | Iterable[str]
 
+# Datastar's fetch default for `filterSignals.exclude`: local signals.
+LOCAL_SIGNALS = r"(^|\.)_"
+
+# Signal values going out (data.signals, SSE.patch_signals). Mapping and
+# Sequence, not dict and list: those are invariant, so a `list[str]` variable
+# would not pass as `list[SignalValue]`.
 type SignalValue = (
-    str | int | float | bool | dict[str, SignalValue] | list[SignalValue] | None
+    str | int | float | bool | Mapping[str, SignalValue] | Sequence[SignalValue] | None
 )
 
-# TimeValue: int -> Ns suffix, float -> seconds scaled to ms, str -> explicit `ms`/`s`.
-type TimeValue = int | float | str
+# A duration is a string with a unit: whole milliseconds or seconds, "300ms"
+# or "2s". Numbers raise: Datastar reads a bare number as milliseconds,
+# Python code as seconds, and a reader cannot tell which one was meant.
+type Duration = str
+type TimeValue = Duration
+
+# Validated durations (str -> int milliseconds), bounded by refusing new
+# entries past the cap, never by clearing (another thread may be reading).
+# Immortal on free-threaded builds, so loading it from every thread writes
+# no refcount (docs/free-threading.md).
+_DURATION_MS: dict[str, int] = fragment_cache()
+_DURATION_CACHE_MAX = 256
+
+
+def _plain_json(value: Any) -> Any:
+    """`value` with every non-dict Mapping as a dict and every other Sequence
+    (not str or bytes) as a list, recursively, for the JSON encoder."""
+    t = type(value)
+    if t is str or t is int or t is float or t is bool or value is None:
+        return value
+    if isinstance(value, Mapping):
+        return {k: _plain_json(v) for k, v in cast(Mapping[Any, Any], value).items()}
+    if isinstance(value, (str, bytes, bytearray)):
+        return value
+    if isinstance(value, Sequence):
+        return [_plain_json(v) for v in cast(Sequence[Any], value)]
+    return value
+
+
+def encode_signals[R](encode: Callable[[Any], R], payload: Mapping[str, Any]) -> R:
+    """Encode a signals payload; a Mapping or Sequence the codec refuses is
+    copied to dict / list and encoded again.
+
+    The copy only runs when the first try raises `TypeError`, so dict and
+    list payloads cost nothing extra.
+    """
+    try:
+        return encode(payload)
+    except TypeError:
+        # A value the codec cannot encode at all fails again here.
+        return encode(_plain_json(payload))
 
 
 def require_mapping(name: str, payload: object) -> Mapping[str, Any]:
@@ -33,122 +82,193 @@ def require_mapping(name: str, payload: object) -> Mapping[str, Any]:
     return cast(Mapping[str, Any], payload)
 
 
-def time_to_string(time: TimeValue | None) -> str:
-    """Convert a time value to a Datastar-compatible time string.
-
-    `int` values are whole seconds (`1` -> `"1s"`). `float` values are seconds
-    converted to milliseconds (`1.0` -> `"1000ms"`). Strings must already be
-    explicit whole millisecond or second values, such as `"150ms"` or `"2s"`.
-    """
-    if time is None:
-        raise StarioError(
-            f"Invalid Datastar time value: {time!r}",
-            context={"time_value": repr(time), "time_type": type(time).__name__},
-            help_text="Pass seconds as int/float, or a string like '150ms' or '2s'.",
-        )
-    if isinstance(time, bool):
-        raise StarioError(
-            f"Invalid Datastar time value: {time!r}",
-            context={"time_value": repr(time), "time_type": type(time).__name__},
-            help_text="Pass seconds as int/float, or a string like '150ms' or '2s'.",
-        )
-    if isinstance(time, float):
-        if not math.isfinite(time) or time < 0:
-            raise StarioError(
-                f"Invalid Datastar time value: {time!r}",
-                context={"time_value": repr(time), "time_type": type(time).__name__},
-                help_text="Pass a finite non-negative number of seconds.",
+def _duration_error(name: str, value: object) -> StarioError:
+    context = {"argument": name, "value": repr(value)[:100]}
+    if type(value) is int or type(value) is float:
+        number = cast(float, value)
+        if type(value) is float and math.isfinite(number) and number >= 0:
+            millis = number * 1000
+            hint = (
+                f"For {number:g} seconds write {name}='{millis:g}ms'."
+                if millis == int(millis)
+                else "Durations are whole milliseconds or seconds."
             )
-        return f"{int(time * 1000)}ms"
-    if isinstance(time, int):
-        if time < 0:
-            raise StarioError(
-                f"Invalid Datastar time value: {time!r}",
-                context={"time_value": repr(time), "time_type": type(time).__name__},
-                help_text="Pass a non-negative number of seconds.",
+        else:
+            hint = (
+                f"For {value} milliseconds write {name}='{value}ms'; "
+                f"for {value} seconds write {name}='{value}s'."
             )
-        return f"{int(time)}s"
-    if not _TIME_VALUE_RE.fullmatch(time):
-        raise StarioError(
-            f"Invalid Datastar time value: {time!r}",
-            context={"time_value": time, "time_type": type(time).__name__},
+        return StarioError(
+            f"{name}={value!r} has no unit",
+            context=context,
             help_text=(
-                "Use whole milliseconds or seconds, for example '150ms' or '2s'. "
-                "For fractional seconds, pass a float such as 0.5."
+                "A duration is a string with a unit, because a bare number is "
+                f"milliseconds to Datastar and seconds to Python. {hint}"
+            ),
+            example="data.on('input', at.get('/search'), debounce='300ms')",
+        )
+    if type(value) is str and "." in value:
+        return StarioError(
+            f"{name}={value!r} has a dot",
+            context=context,
+            help_text=(
+                "A dot splits Datastar modifiers, so a duration is whole "
+                "milliseconds or seconds: write '1500ms' for 1.5 seconds."
             ),
         )
-    return time
+    return StarioError(
+        f"Invalid duration {name}={value!r}",
+        context=context,
+        help_text="Write whole milliseconds or seconds as a string: '300ms' or '2s'.",
+    )
 
 
-type Debounce = (
-    TimeValue
-    | tuple[TimeValue, Literal["leading", "notrailing"]]
-    | tuple[
-        TimeValue, Literal["leading", "notrailing"], Literal["leading", "notrailing"]
-    ]
-)
+def duration_ms(value: object, name: str) -> int:
+    """`value` ("300ms", "2s") in milliseconds; anything else raises with the fix."""
+    if type(value) is str:
+        cached = _DURATION_MS.get(value)
+        if cached is not None:
+            return cached
+        digits = value[:-2] if value.endswith("ms") else value[:-1]
+        unit_ok = value.endswith("ms") or value.endswith("s")
+        # isdecimal() also accepts other scripts' digits: require ASCII.
+        if (
+            unit_ok
+            and digits.isascii()
+            and digits.isdecimal()
+            and (digits == "0" or digits[0] != "0")  # one spelling per value
+        ):
+            ms = int(digits) if value.endswith("ms") else int(digits) * 1000
+            if len(_DURATION_MS) < _DURATION_CACHE_MAX:
+                _DURATION_MS[value] = ms
+            return ms
+    raise _duration_error(name, value)
 
-type Throttle = (
-    TimeValue
-    | tuple[TimeValue, Literal["noleading", "trailing"]]
-    | tuple[
-        TimeValue, Literal["noleading", "trailing"], Literal["noleading", "trailing"]
-    ]
-)
+
+def duration(value: object, name: str) -> str:
+    """`value` checked as a Datastar duration ("300ms", "2s") and returned."""
+    duration_ms(value, name)
+    return cast(str, value)
 
 
-def debounce_to_string(debounce: Debounce) -> str:
-    """Convert a debounce configuration to a Datastar modifier string."""
-    if isinstance(debounce, (int, float, str)):
-        return "debounce." + time_to_string(debounce)
+def time_to_string(time: Duration) -> str:
+    """`time` checked as a Datastar duration; kept for callers of 5.8."""
+    return duration(time, "time")
 
-    if len(debounce) not in (2, 3):
+
+@dataclass(frozen=True, slots=True)
+class Debounce:
+    """`debounce=` with edge flags. Defaults are Datastar's: trailing edge only.
+
+    ```python
+    data.on("input", at.get(SEARCH.href()), debounce=Debounce("300ms", leading=True))
+    # data-on:input__debounce.300ms.leading
+    ```
+
+    Write the plain string (`debounce="300ms"`) when the defaults fit.
+    """
+
+    wait: Duration
+    leading: bool = False
+    trailing: bool = True
+    modifier: str = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        text = "debounce." + duration(self.wait, "Debounce.wait")
+        if self.leading:
+            text += ".leading"
+        if not self.trailing:
+            if not self.leading:
+                raise StarioError(
+                    "Debounce(leading=False, trailing=False) never runs",
+                    context={"wait": self.wait},
+                    help_text="Keep the default trailing=True, or set leading=True.",
+                )
+            text += ".notrailing"
+        object.__setattr__(self, "modifier", text)
+
+
+@dataclass(frozen=True, slots=True)
+class Throttle:
+    """`throttle=` with edge flags. Defaults are Datastar's: leading edge only.
+
+    ```python
+    data.on("scroll", "$y = window.scrollY", throttle=Throttle("100ms", trailing=True))
+    # data-on:scroll__throttle.100ms.trailing
+    ```
+
+    Write the plain string (`throttle="100ms"`) when the defaults fit.
+    """
+
+    wait: Duration
+    leading: bool = True
+    trailing: bool = False
+    modifier: str = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        text = "throttle." + duration(self.wait, "Throttle.wait")
+        if not self.leading:
+            if not self.trailing:
+                raise StarioError(
+                    "Throttle(leading=False, trailing=False) never runs",
+                    context={"wait": self.wait},
+                    help_text="Keep the default leading=True, or set trailing=True.",
+                )
+            text += ".noleading"
+        if self.trailing:
+            text += ".trailing"
+        object.__setattr__(self, "modifier", text)
+
+
+def _legacy_edges(kind: str, value: tuple[Any, ...], allowed: tuple[str, str]) -> str:
+    """5.8 tuple form `("300ms", "leading")`: deprecated, removed in 6.0."""
+    replacement = "Debounce" if kind == "debounce" else "Throttle"
+    warnings.warn(
+        f"{kind}=(time, flag, ...) tuples are deprecated: write "
+        f"{kind}={replacement}('300ms', ...) instead. Removed in 6.0.",
+        DeprecationWarning,
+        stacklevel=4,
+    )
+    if len(value) not in (2, 3):
         raise StarioError(
-            f"Invalid debounce configuration: {debounce}",
-            context={
-                "debounce_value": str(debounce),
-                "debounce_type": type(debounce).__name__,
-            },
-            help_text="Debounce must be a time value or a tuple with time and modifiers.",
+            f"Invalid {kind} configuration: {value!r}",
+            context={kind: repr(value)},
+            help_text=f"Write {kind}='300ms' or {kind}={replacement}('300ms', ...).",
         )
-
-    modifiers = debounce[1:]
-    for modifier in modifiers:
-        if modifier not in ("leading", "notrailing"):
+    for flag in value[1:]:
+        if flag not in allowed:
             raise StarioError(
-                f"Invalid debounce modifier: {modifier!r}",
-                context={"debounce_modifier": str(modifier)},
-                help_text="Debounce modifiers are 'leading' and 'notrailing'.",
+                f"Invalid {kind} modifier: {flag!r}",
+                context={f"{kind}_modifier": repr(flag)},
+                help_text=f"Write {kind}={replacement}('300ms', ...) with booleans.",
             )
+    return f"{kind}.{duration(value[0], kind)}." + ".".join(value[1:])
 
-    return "debounce." + time_to_string(debounce[0]) + "." + ".".join(modifiers)
 
-
-def throttle_to_string(throttle: Throttle) -> str:
-    """Convert a throttle configuration to a Datastar modifier string."""
-    if isinstance(throttle, (int, float, str)):
-        return "throttle." + time_to_string(throttle)
-
-    if len(throttle) not in (2, 3):
-        raise StarioError(
-            f"Invalid throttle configuration: {throttle}",
-            context={
-                "throttle_value": str(throttle),
-                "throttle_type": type(throttle).__name__,
-            },
-            help_text="Throttle must be a time value or a tuple with time and modifiers.",
+def debounce_to_string(debounce: Duration | Debounce) -> str:
+    """`debounce=` as its Datastar modifier (`debounce.300ms[.leading]`)."""
+    if type(debounce) is str:
+        return "debounce." + duration(debounce, "debounce")
+    if type(debounce) is Debounce:
+        return debounce.modifier
+    if type(debounce) is tuple:
+        return _legacy_edges(
+            "debounce", cast(tuple[Any, ...], debounce), ("leading", "notrailing")
         )
+    raise _duration_error("debounce", debounce)
 
-    modifiers = throttle[1:]
-    for modifier in modifiers:
-        if modifier not in ("noleading", "trailing"):
-            raise StarioError(
-                f"Invalid throttle modifier: {modifier!r}",
-                context={"throttle_modifier": str(modifier)},
-                help_text="Throttle modifiers are 'noleading' and 'trailing'.",
-            )
 
-    return "throttle." + time_to_string(throttle[0]) + "." + ".".join(modifiers)
+def throttle_to_string(throttle: Duration | Throttle) -> str:
+    """`throttle=` as its Datastar modifier (`throttle.100ms[.trailing]`)."""
+    if type(throttle) is str:
+        return "throttle." + duration(throttle, "throttle")
+    if type(throttle) is Throttle:
+        return throttle.modifier
+    if type(throttle) is tuple:
+        return _legacy_edges(
+            "throttle", cast(tuple[Any, ...], throttle), ("noleading", "trailing")
+        )
+    raise _duration_error("throttle", throttle)
 
 
 def string_literal(value: str) -> str:
@@ -176,6 +296,8 @@ def string_literal(value: str) -> str:
         .replace("\n", "\\n")
         .replace("\r", "\\r")
         .replace("\t", "\\t")
+        # A NUL inside an HTML attribute arrives as U+FFFD.
+        .replace("\x00", "\\x00")
         .replace("\u2028", "\\u2028")
         .replace("\u2029", "\\u2029")
     )
@@ -233,13 +355,16 @@ def js_object(__obj: dict[str, Any] | None = None, /, **kwargs: Any) -> str:
     with `string_literal()` or send it as a signal instead.
 
     ```python
-    from stario.datastar import at, format
+    from stario.datastar import format
 
-    at.get("/api", headers={"X-Client": format.string_literal("stario")})
-    # headers value becomes {'X-Client':'stario'} inside the @get options object
-    at.post("/save", include=["draft"], payload={"title": "el.value"})
+    format.js_object({"title": "el.value", "count": "$count + 1"})
+    # {'title':el.value,'count':$count + 1}
     format.js_object({"label": format.string_literal("Save")})
+    # {'label':'Save'}
     ```
+
+    `at.*` does not need this: `headers=` values and a `payload=` dict are
+    already data, and a `payload=` str is already an expression.
     """
     obj = __obj if __obj is not None else kwargs
     pairs = (f"{string_literal(str(k))}:{_js_expr(v)}" for k, v in obj.items())
@@ -249,38 +374,121 @@ def js_object(__obj: dict[str, Any] | None = None, /, **kwargs: Any) -> str:
 def parse_filter_value(value: FilterValue) -> str:
     """Parse a filter value for include/exclude parameters in Datastar actions.
 
-    A string is passed through as a Datastar regex. An iterable is treated as
-    literal signal names joined with `|`, with regex metacharacters escaped.
+    A string is passed through as a Datastar (JavaScript) regex. An iterable
+    is a list of signal paths: each matches itself and its children, and
+    nothing else (`["id"]` matches `id` and `id.x`, never `video`).
     """
     if isinstance(value, str):
         return value
-    return "|".join(re.escape(str(item)) for item in value)
+    return "^(?:" + "|".join(_path_regex(str(item)) for item in value) + ")(?:\\.|$)"
+
+
+def _path_regex(path: str) -> str:
+    """A signal path as a regex that matches only itself."""
+    if path.replace(".", "_").isidentifier():
+        return path.replace(".", "\\.")  # the only regex character in it
+    return re.escape(path)
 
 
 def filter_js(
     include: FilterValue | None,
     exclude: FilterValue | None,
+    *,
+    keep_local: bool = False,
 ) -> str | None:
     """Build the `{'include':…,'exclude':…}` JS object used by signal filters.
 
-    Returns `None` when neither filter is set, so callers can omit the option entirely.
+    Returns `None` when neither filter is set, so callers can omit the option
+    entirely. With `keep_local` (backend actions), an `exclude` adds to
+    Datastar's default exclusion of local `_` signals instead of replacing
+    it, so a local signal never leaves the browser.
 
     ```python
     filter_js(["draft", "attachments"], None)
-    # → "{'include':'draft|attachments'}"
+    # → "{'include':'^(?:draft|attachments)(?:\\\\.|$)'}"
     ```
     """
     if include is None and exclude is None:
         return None
-    if include is not None:
-        include_js = "'include':" + string_literal(parse_filter_value(include))
-        if exclude is None:
-            return "{" + include_js + "}"
-        exclude_js = "'exclude':" + string_literal(parse_filter_value(exclude))
-        return "{" + include_js + "," + exclude_js + "}"
+    exclude_js = ""
+    if exclude is not None:
+        pattern = parse_filter_value(exclude)
+        if keep_local:
+            # Datastar strips one leading and one trailing "/" from a filter
+            # ("/^secret/" works), but only at the ends of the whole string:
+            # strip them here, before the default goes in front.
+            if pattern.startswith("/"):
+                pattern = pattern[1:]
+            if pattern.endswith("/"):
+                pattern = pattern[:-1]
+            pattern = LOCAL_SIGNALS + "|(?:" + pattern + ")"
+        exclude_js = "'exclude':" + string_literal(pattern)
+    if include is None:
+        return "{" + exclude_js + "}"
+    include_js = "'include':" + string_literal(parse_filter_value(include))
+    if exclude is None:
+        return "{" + include_js + "}"
+    return "{" + include_js + "," + exclude_js + "}"
 
-    assert exclude is not None
-    return "{'exclude':" + string_literal(parse_filter_value(exclude)) + "}"
+
+def literal(value: SignalValue) -> str:
+    """A Python value as a JavaScript literal, safe inside an expression.
+
+    Every Python value that goes into a Datastar expression goes through
+    here: a `str` argument to a helper is JavaScript, so text has to be
+    quoted first. `<` is escaped, so the result is safe inside an HTML
+    attribute and a `<script>` element.
+
+    ```python
+    data.on("click", f"$tags = $tags.filter(t => t !== {literal(tag)})")
+    literal("O'Brien")          # → "'O\\'Brien'"
+    literal({"n": 1, "ok": True})  # → "{'n':1,'ok':true}"
+    ```
+    """
+    t = type(value)
+    if t is str:
+        return string_literal(cast(str, value))
+    if value is None:
+        return "null"
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if t is int:
+        return str(value)
+    if t is float:
+        if not math.isfinite(cast(float, value)):
+            raise StarioError(
+                f"literal() cannot write {value!r}: JavaScript JSON has no such number",
+                context={"value": repr(value)},
+                help_text="Pass a finite number, or None for null.",
+            )
+        return repr(value)
+    if isinstance(value, str):  # a subclass: StrEnum
+        # str.__str__ gives the characters; a subclass may override __str__
+        # (and iterating a StrEnum as a Sequence would split it into letters).
+        return string_literal(str.__str__(value))
+    if isinstance(value, int) and not isinstance(value, bool):  # IntEnum
+        return str(int(value))
+    if isinstance(value, Mapping):
+        parts: list[str] = []
+        for key, item in cast(Mapping[object, SignalValue], value).items():
+            if isinstance(key, str) and type(key) is not str:
+                key = str.__str__(key)
+            if type(key) is not str:
+                raise StarioError(
+                    f"literal() object keys must be str, not {type(key).__name__}",
+                    context={"key": repr(key)[:100]},
+                )
+            parts.append(string_literal(key) + ":" + literal(item))
+        return "{" + ",".join(parts) + "}"
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        return "[" + ",".join(literal(item) for item in value) + "]"
+    raise StarioError(
+        f"literal() cannot write a {type(value).__name__}",
+        context={"type": type(value).__name__, "value": repr(value)[:100]},
+        help_text="Pass str, int, float, bool, None, or a mapping or list of those.",
+    )
 
 
 type Case = Literal["kebab", "snake", "pascal", "camel"]
@@ -491,7 +699,8 @@ def key_case(name: str) -> tuple[str, Case | None]:
     # → ("d-o-m-content-loaded", "pascal")
     ```
     """
-    if not any(c.isupper() for c in name):
+    # Most names are lower case already: one C call before the slow scan.
+    if name == name.lower() or not any(c.isupper() for c in name):
         return name, None
     kebabed = re.sub(r"[A-Z]", lambda m: "-" + m[0].lower(), name)
     if name[0].isupper():

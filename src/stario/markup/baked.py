@@ -23,7 +23,6 @@ from stario_cython.markup import (
 )
 
 from .escape import escape_text
-from .render import render_nodes_to_string
 from .slots import AttrSlot, BakeSlot, RawSlot, slot_name
 from .tag import Tag
 from .types import Element, HtmlElement, SafeString
@@ -262,33 +261,73 @@ def _frozen_segment_plan(
     return tuple(segments)
 
 
-def _raw_text(value: Any) -> str:
-    """One raw-text piece: `str` verbatim, otherwise the `render` ladder."""
+def _raw_collect(tag: str, value: Any, run: list[str], pieces: list[str]) -> None:
+    """One value in a raw-text slot, as `Tag.__call__` treats a literal child.
+
+    Text joins the open run, which is checked as one piece. A `SafeString`
+    ends the run and goes out verbatim, unchecked. An element raises.
+    """
     value_type = type(value)
     if value_type is str:
-        return cast(str, value)
-    if value is None:
-        return ""
-    if value_type is SafeString:
-        return cast(SafeString, value).rendered
-    if value_type is int or value_type is float:
-        return str(value)
-    if value_type is list:
-        return "".join(_raw_text(item) for item in cast(list[Any], value))
-    return render_nodes_to_string((value,), root_count=1)
+        run.append(cast(str, value))
+    elif value is None:
+        return
+    elif value_type is SafeString:
+        rendered = cast(SafeString, value).rendered
+        # An empty SafeString puts nothing on the wire, so it must not split
+        # the run: "</scr" + SafeString("") + "ipt>" is "</script>" (as in
+        # Tag._raw_walk).
+        if rendered:
+            _flush_raw(tag, run, pieces)
+            pieces.append(rendered)
+    elif value_type is int or value_type is float:
+        run.append(str(value))
+    elif value_type is list:
+        for item in cast(list[Any], value):
+            _raw_collect(tag, item, run, pieces)
+    else:
+        raise StarioError(
+            f"<{tag}> holds raw text, not elements",
+            context={"tag": tag, "value": repr(value)[:100]},
+            help_text=(
+                f"The browser reads everything inside <{tag}> as text, so an "
+                "element would be shown as its source. Pass a str, or a "
+                "SafeString for bytes you control."
+            ),
+        )
+
+
+def _flush_raw(tag: str, run: list[str], pieces: list[str]) -> None:
+    if run:
+        text = "".join(run)
+        check_raw_text(text, tag)
+        pieces.append(text)
+        run.clear()
 
 
 def _splice_raw(tag: str, parts: tuple[Any, ...]) -> str:
-    """Splice one raw-text run (`h.Script(code)`): verbatim, checked once.
+    """Splice one raw-text run (`h.Script(code)`): verbatim, checked like a call.
 
-    `parts` is the run with the call's values in place of the slots. The
-    breakout check runs over the joined text, as `Tag.__call__` does for
-    literal children, so `"</scr"` in the template and `"ipt>"` in a value
-    fail together the way `"</script>"` alone does.
+    `parts` is the run with the call's values in place of the slots. Text
+    is joined and checked once, as `Tag.__call__` does for literal
+    children, so `"</scr"` in the template and `"ipt>"` in a value fail
+    together the way `"</script>"` alone does. A `SafeString` value goes
+    out unchecked and an element raises, as in a direct call.
     """
-    text = "".join([_raw_text(part) for part in parts])
-    check_raw_text(text, tag)
-    return text
+    for part in parts:
+        if type(part) is not str:
+            break
+    else:
+        # The common call: every part is text, so it is one run.
+        text = "".join(parts)
+        check_raw_text(text, tag)
+        return text
+    pieces: list[str] = []
+    run: list[str] = []
+    for part in parts:
+        _raw_collect(tag, part, run, pieces)
+    _flush_raw(tag, run, pieces)
+    return "".join(pieces)
 
 
 def _generate_splice_function(

@@ -6,22 +6,39 @@
 code. The client only builds requests and parses responses.
 
 Public surface: `TestClient`, `TestResponse`, `TestStreamResponse`,
-`TestTracer`, `aload_app` (bootstrap loading for integration tests), and
-`VirtualTimeLoop` (an event loop whose clock jumps over timer waits).
+`TestTracer`, `aload_app` (bootstrap loading for integration tests),
+`VirtualTimeLoop` (an event loop whose clock jumps over timer waits), and
+`check_pages` / `check_page` (every HTML page checked for 5xx answers and
+duplicate ids, plus the checks you pass in `checks=`:
+`assert not await check_pages(client)`).
 Tests need an async runner (for example pytest-asyncio).
 """
 
 from stario.testing.client import TestClient
 from stario.testing.load import aload_app
+from stario.testing.pages import (
+    OUTSIDE_SERVICE_ERRORS,
+    HtmlPage,
+    PageCheck,
+    PageProblems,
+    check_page,
+    check_pages,
+)
 from stario.testing.response import TestResponse, TestStreamResponse
 from stario.testing.tracer import TestTracer
 from stario.testing.vtime import VirtualTimeLoop
 
 __all__ = [
+    "OUTSIDE_SERVICE_ERRORS",
+    "HtmlPage",
+    "PageCheck",
+    "PageProblems",
     "TestClient",
     "TestResponse",
     "TestStreamResponse",
     "TestTracer",
     "VirtualTimeLoop",
     "aload_app",
+    "check_page",
+    "check_pages",
 ]

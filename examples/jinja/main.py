@@ -9,7 +9,7 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
-from stario import App, Context, Relay, Route, Span, Writer
+from stario import App, Context, Relay, Route, SafeString, Span, Writer
 from stario.datastar import DATASTAR_CDN_URL, SSE
 
 HOME = Route("GET", "/")
@@ -64,15 +64,15 @@ class CounterPage:
             increment_url=INCREMENT.href(),
             reset_url=RESET.href(),
         )
-        w.html(page)
+        w.html(SafeString(page))
 
     async def live(self, c: Context, w: Writer) -> None:
         # Subscribe before the first render so updates cannot fall into a gap.
         async with self.relay.subscribe(CHANGED, latest=True) as events:
             sse = SSE(w)
-            sse.patch_elements(counter_view(self.counter))
+            sse.patch_elements(SafeString(counter_view(self.counter)))
             async for _ in c.alive(events):
-                sse.patch_elements(counter_view(self.counter))
+                sse.patch_elements(SafeString(counter_view(self.counter)))
 
     async def increment(self, c: Context, w: Writer) -> None:
         w.empty()

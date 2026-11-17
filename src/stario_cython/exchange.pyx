@@ -89,6 +89,21 @@ include "router.pxi"
 # imports above, and text/json/redirect/empty do not need it.
 _markup_render = None
 
+
+def _html_str_error(where):
+    """The error for a plain `str` given to `w.html` or `patch_elements`."""
+    return StarioError(
+        f"{where}(str): is it text or finished HTML?",
+        context={"argument_type": "str"},
+        help_text=(
+            "A str is text everywhere in Stario, so it cannot mean HTML here. "
+            "Send h.* markup, or wrap finished HTML you built (a template "
+            "engine's output) in SafeString."
+        ),
+        example=f"{where}(SafeString(template.render(...)))",
+    )
+
+
 cdef class HttpConnection:
     """HttpConnection vtable. ``CHttpProtocol`` overrides every entry."""
 
@@ -3945,12 +3960,19 @@ cdef class RequestHandle:
         self.respond(payload, b"application/json; charset=utf-8", status)
 
     def html(self, content, status=200):
-        """Send `bytes`, `str`, or markup nodes as `text/html`."""
+        """Send markup nodes, a `SafeString`, or `bytes` as `text/html`.
+
+        A plain `str` raises: a `str` is text everywhere else in Stario, so
+        finished HTML (a template engine's output) says so with
+        `SafeString(page)`.
+        """
         global _markup_render
         if isinstance(content, bytes):
             body = content
         elif isinstance(content, str):
-            body = _utf8(content)
+            # A str is text everywhere else in Stario (h.Div(s) escapes it),
+            # so here it cannot silently mean HTML: SafeString says so.
+            raise _html_str_error("w.html")
         else:
             if _markup_render is None:
                 from stario.markup.render import render_bytes

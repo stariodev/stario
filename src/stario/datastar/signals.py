@@ -1,4 +1,4 @@
-"""Read Datastar request signals."""
+"""Read Datastar request signals, and tell a Datastar request from a page load."""
 
 from typing import Any, TypedDict, cast
 
@@ -65,3 +65,23 @@ async def read_signals(req: Request, *, max_size: int | None = None) -> dict[str
     if not isinstance(value, dict):
         raise RequestBodyError(400, "Invalid Datastar signals")
     return cast(dict[str, Any], value)
+
+
+def is_datastar(req: Request) -> bool:
+    """True when Datastar sent `req` (it carries the `Datastar-Request` header).
+
+    A Datastar request takes SSE events or a 204; a plain request takes a
+    page or a redirect. Branch on this where both reach one handler, for
+    example a sign-in guard:
+
+    ```python
+    if is_datastar(c.req):
+        SSE(w).navigate(LOGIN.href())
+    else:
+        w.redirect(LOGIN.href(), status=303)
+    ```
+
+    Datastar's fetch follows a redirect itself and does not move the address
+    bar, so a Datastar request takes `navigate`, not `w.redirect()`.
+    """
+    return req.headers.unsafe_get(b"datastar-request") is not None
