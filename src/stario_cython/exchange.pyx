@@ -3981,9 +3981,6 @@ cdef class RequestHandle:
 
     def redirect(self, url, status=307):
         """Send a redirect with an empty body and a `Location` header."""
-        cdef RequestExchange ex = self._ex
-        if ex is None:
-            _raise_finished()
         if not 300 <= status < 400:
             raise StarioError(
                 "Redirect status must be a 3xx status code",
