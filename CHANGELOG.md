@@ -89,7 +89,7 @@ expression compiler for the Datastar ones).
   `f"$tags = $tags.filter(t => t !== {literal(tag)})"`. Text, numbers,
   booleans, `None`, and mappings and lists of them (`StrEnum` and
   `IntEnum` members as their values). It is `string_literal`
-  for any JSON-shaped value; `string_literal` stays. From `stario` and
+  for any JSON-shaped value; `string_literal` stays. From
   `stario.datastar`.
 - **`is_datastar(req)`**: true when Datastar sent the request (the
   `Datastar-Request` header). Branch on it where page loads and Datastar
