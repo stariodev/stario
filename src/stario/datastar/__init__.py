@@ -15,7 +15,7 @@ from stario.datastar import (
 )
 ```
 
-`ModuleScript()` loads the Datastar client; `DebugInspector()` shows the
+`ModuleScript()` loads the Datastar client; `debug_inspector()` shows the
 page's live signals while you develop.
 
 `at` and `data` are the stock `DatastarActions` / `DatastarAttributes`
@@ -25,7 +25,7 @@ multiple configured builders).
 
 from .actions import DatastarActions, at
 from .attributes import DatastarAttributes, data
-from .debug import DebugInspector
+from .debug import debug_inspector
 from .format import Debounce, Duration, Throttle, literal
 from .signals import FileSignal, is_datastar, read_signals
 from .sse import SSE
@@ -37,13 +37,13 @@ __all__ = [
     "DatastarActions",
     "DatastarAttributes",
     "Debounce",
-    "DebugInspector",
     "Duration",
     "FileSignal",
     "ModuleScript",
     "Throttle",
     "at",
     "data",
+    "debug_inspector",
     "is_datastar",
     "literal",
     "read_signals",

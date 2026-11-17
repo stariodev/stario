@@ -6,7 +6,7 @@ from app.common.identity import VISITOR_SESSION_INIT
 from app.common.shell import page
 from app.features.lobby.urls import LOBBY
 from stario import h
-from stario.datastar import DebugInspector, at, data
+from stario.datastar import at, data, debug_inspector
 from stario.markup import HtmlElement, SafeString, classes, styles
 
 from .models import Message, Room, User
@@ -191,7 +191,7 @@ def room_view(
 ) -> HtmlElement:
     return page(
         [
-            DebugInspector(),
+            debug_inspector(),
             h.Div(
                 {"id": "room", "class": "chat-container"},
                 data.signals(
