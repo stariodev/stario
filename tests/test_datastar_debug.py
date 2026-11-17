@@ -15,3 +15,15 @@ def test_debug_inspector_renders_overlay():
 def test_debug_inspector_has_no_side_effects():
     # Baked: the compiled tree can render twice identically.
     assert render(debug_inspector()) == render(debug_inspector())
+
+
+def test_the_old_import_still_works_and_warns():
+    import importlib
+    import sys
+
+    import pytest
+
+    sys.modules.pop("stario.debug", None)
+    with pytest.warns(DeprecationWarning, match="stario.datastar"):
+        old = importlib.import_module("stario.debug")
+    assert old.debug_inspector is debug_inspector
