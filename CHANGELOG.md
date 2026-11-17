@@ -93,7 +93,7 @@ expression compiler for the Datastar ones).
   `stario.datastar`.
 - **`is_datastar(req)`**: true when Datastar sent the request (the
   `Datastar-Request` header). Branch on it where page loads and Datastar
-  requests reach one handler. From `stario` and `stario.datastar`.
+  requests reach one handler. From `stario.datastar`.
 - **`Debounce("300ms", leading=True)` and `Throttle("1s", trailing=True)`**
   set the edge flags with booleans. The defaults are Datastar's own
   (debounce: trailing edge only; throttle: leading edge only), and both
