@@ -273,8 +273,13 @@ def _raw_collect(tag: str, value: Any, run: list[str], pieces: list[str]) -> Non
     elif value is None:
         return
     elif value_type is SafeString:
-        _flush_raw(tag, run, pieces)
-        pieces.append(cast(SafeString, value).rendered)
+        rendered = cast(SafeString, value).rendered
+        # An empty SafeString puts nothing on the wire, so it must not split
+        # the run: "</scr" + SafeString("") + "ipt>" is "</script>" (as in
+        # Tag._raw_walk).
+        if rendered:
+            _flush_raw(tag, run, pieces)
+            pieces.append(rendered)
     elif value_type is int or value_type is float:
         run.append(str(value))
     elif value_type is list:

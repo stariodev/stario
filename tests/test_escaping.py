@@ -273,6 +273,20 @@ class TestFinishedHtmlStrings:
 class TestAuditFixes:
     """Cases from the audit of the unreleased changes (2026-11-16)."""
 
+    def test_an_empty_safestring_slot_does_not_split_a_baked_script(self) -> None:
+        # An empty SafeString writes nothing, so the text on both sides is
+        # one run and is checked as one, as in a direct h.Script call.
+        @baked
+        def page(a: str, b: SafeString, c: str):
+            return h.Script(a, b, c)
+
+        args = ("</scr", SafeString(""), "ipt><img src=x onerror=alert(1)>")
+        with pytest.raises(StarioError, match="</script"):
+            render(h.Script(*args))
+        with pytest.raises(StarioError, match="</script"):
+            render(page(*args))
+        assert render(page("a", SafeString(""), "b")) == "<script>ab</script>"
+
     @pytest.mark.parametrize("brk", ["\n", "\r", "\f"])
     def test_a_line_break_inside_a_css_quote_raises(self, brk: str) -> None:
         # CSS ends a string at a line break, so the next declarations would
