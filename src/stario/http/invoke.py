@@ -69,6 +69,8 @@ def _answer_framework_exception(w: Writer, exc: BaseException) -> BaseException 
             w.text(exc.detail, exc.status_code)
             return None
     except StarioError as error:
+        # Log the error that names the fix (a bad location), not the bare
+        # RedirectException that led to it.
         return error
     return exc
 

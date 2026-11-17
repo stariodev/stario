@@ -267,6 +267,9 @@ def dumps_script(value: object, /) -> str:
     `h.Script(dumps(value))` raises instead when the data holds `</script`.
     """
     text = dumps(value)
+    # Most JSON has none of these: five C scans instead of five copies.
+    # `<` covers "</script" and "<!--"; `>` and `&` close the HTML-comment
+    # and entity cases; U+2028/U+2029 end a string literal in older engines.
     if (
         "<" in text
         or ">" in text

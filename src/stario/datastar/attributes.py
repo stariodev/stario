@@ -84,7 +84,11 @@ _duration = duration  # on_interval has a parameter named `duration`
 
 
 def _code(helper: str, statements: tuple[str, ...]) -> str:
-    """Statements joined into one Datastar expression."""
+    """Statements joined into one Datastar expression.
+
+    Datastar runs an attribute value as one function body, so `; ` keeps the
+    statements apart and runs them in order.
+    """
     if not statements:
         raise StarioError(
             f"data.{helper}() needs at least one statement",
@@ -107,6 +111,8 @@ def _deprecated(old: str, new: str) -> None:
 def _reject_uppercase_key(helper: str, key: str, alternative: str) -> None:
     """Key-form attributes travel in the attribute name, which HTML lowercases."""
     if "__" in key:
+        # Datastar reads everything after `__` as modifiers, so a name with
+        # it would silently change how the attribute works.
         raise StarioError(
             f"data.{helper}() name {key!r} has '__'",
             context={"helper": helper, "name": key},
@@ -464,6 +470,7 @@ class DatastarAttributes:
         pick where the listener sits (one at most). `target=` is the
         deprecated spelling of the same three.
         """
+        # One statement is the common call: no join.
         expression = statements[0] if len(statements) == 1 else _code("on", statements)
         if (
             not once
@@ -483,6 +490,7 @@ class DatastarAttributes:
         ):
             # No modifiers: no cache. Building this costs about what a lookup
             # costs, and per-row expressions (a URL with an id) would fill it.
+            # A lower-case name without `_` needs no kebab-casing.
             if type(event) is str and event.islower() and "_" not in event:
                 validate_attribute_key(event)
                 return Attrs(f' {self.prefix}on:{event}="{escape_attr(expression)}"')
@@ -676,6 +684,7 @@ class DatastarAttributes:
         )
         key = self.prefix + "on-interval"
         if duration != "1s" or leading:
+            # "1s" is Datastar's default, so it stays out of the name.
             key += "__duration." + _duration(duration, "duration")
             if leading:
                 key += ".leading"

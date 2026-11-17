@@ -72,6 +72,9 @@ def _json_keys(value: str) -> set[str]:
 
 
 def _defined_signals(page: HtmlPage, known: Iterable[str]) -> set[str]:
+    # Every way Datastar defines a signal: data-bind, data-ref and
+    # data-indicator by value or key, data-signals and data-computed by key
+    # or JSON, and an assignment `$x = ...` in any expression.
     names = set(known)
     for _, attrs, _ in page.tags:
         for key, value in attrs:
@@ -122,6 +125,8 @@ def _attribute_problems(
 
 def _sent_signals(page: HtmlPage) -> str:
     """The signals a Datastar request from `page` sends (no leading `_`)."""
+    # Send what the browser would: a stream that reads its signals answers
+    # the same way in the check as in the page.
     values: dict[str, object] = {}
     for _, attrs, _ in page.tags:
         for key, value in attrs:

@@ -136,7 +136,7 @@ def duration_ms(value: object, name: str) -> int:
             unit_ok
             and digits.isascii()
             and digits.isdecimal()
-            and (digits == "0" or digits[0] != "0")
+            and (digits == "0" or digits[0] != "0")  # one spelling per value
         ):
             ms = int(digits) if value.endswith("ms") else int(digits) * 1000
             if len(_DURATION_MS) < _DURATION_CACHE_MAX:
@@ -465,6 +465,8 @@ def literal(value: SignalValue) -> str:
             )
         return repr(value)
     if isinstance(value, str):  # a subclass: StrEnum
+        # str.__str__ gives the characters; a subclass may override __str__
+        # (and iterating a StrEnum as a Sequence would split it into letters).
         return string_literal(str.__str__(value))
     if isinstance(value, int) and not isinstance(value, bool):  # IntEnum
         return str(int(value))
@@ -697,6 +699,7 @@ def key_case(name: str) -> tuple[str, Case | None]:
     # → ("d-o-m-content-loaded", "pascal")
     ```
     """
+    # Most names are lower case already: one C call before the slow scan.
     if name == name.lower() or not any(c.isupper() for c in name):
         return name, None
     kebabed = re.sub(r"[A-Z]", lambda m: "-" + m[0].lower(), name)

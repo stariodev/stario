@@ -1047,9 +1047,10 @@ cdef object _attr_fragment(object key, object value):
     """`` key="value"`` for one scalar value, or None to omit (matches ``wire``)."""
     cdef object value_type = type(value)
     if value_type is str:
-        _check_url_attr(key, value)
+        _check_url_attr(key, value)  # a javascript: URL runs code on click
         return _pair_string(key, c_escape_attr(value))
     if value_type is SafeString:
+        # Finished text, but it still cannot end the quotes (see _safe_attr_text).
         return _pair_string(key, _safe_attr_text((<SafeString>value).rendered))
     if value is True:
         return f" {key}"
@@ -1800,6 +1801,10 @@ cdef class Tag:
         return tuple(out)
 
     cdef object _call_reordered(self, tuple args):
+        # Attributes after children are allowed: `h.I("x", {"class": "icon"})`
+        # is a natural way to write it, and raising here used to surface
+        # only in a server log (often inside a live stream). This slow path
+        # runs only for that order; attributes first stays the fast path.
         cdef list attrs = []
         cdef list children = []
         for arg in args:
@@ -2096,6 +2101,8 @@ def remember_attrs(dict cache not None, tuple key not None, str text not None):
         len(cache) >= _FRAGMENT_CACHE_MAX
         or PyUnicode_GET_LENGTH(text) > _CLASSES_CACHE_MAX_LEN
     ):
+        # Full, or a long text (rarely repeated, and it would stay forever):
+        # build without storing.
         return Attrs.__new__(Attrs, text)
     result = Attrs.__new__(Attrs, stario_shared_str(text))
     stario_immortalize(result)

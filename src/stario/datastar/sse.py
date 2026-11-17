@@ -88,6 +88,7 @@ def _html_bytes(content: Any) -> bytes:
     if isinstance(content, bytes):
         return content
     if isinstance(content, str):
+        # As w.html: a str is text everywhere else, so finished HTML says so.
         raise _html_str_error("patch_elements")
     return render_bytes(content)
 
@@ -104,7 +105,7 @@ def _sse_event_meta(event_id: str | None, retry: Duration | None) -> list[bytes]
         lines.append(b"id: " + _sse_field_value("event_id", event_id))
     if retry is not None:
         ms = duration_ms(retry, "retry")
-        if ms <= 0:
+        if ms <= 0:  # the client would reconnect in a tight loop
             raise StarioError(
                 "Datastar SSE retry must be longer than 0",
                 context={"retry": repr(retry)},
@@ -292,6 +293,9 @@ class SSE:
 
         `url` is escaped like `navigate`. The page does not reload.
         """
+        # normalized_location refuses line breaks and odd schemes, as for a
+        # redirect; json_dumps makes the URL one JavaScript string. Passing
+        # history.state keeps the entry's state, so Back still works.
         safe_url = json_dumps(normalized_location(url))
         self.execute_script(
             f"history.replaceState(history.state, '', {safe_url});",

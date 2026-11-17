@@ -115,6 +115,8 @@ def _parse(html: str) -> HtmlPage:
 
 
 def _duplicate_ids(url: str, page: HtmlPage) -> list[str]:
+    # getElementById, labels and morphing find the first element with an id;
+    # the second one silently never updates.
     found: list[str] = []
     ids: set[str] = set()
     for _, attrs, _ in page.tags:
@@ -195,7 +197,7 @@ async def _html_routes(client: TestClient) -> list[str]:
     found: list[str] = []
     for route in routes:
         if "{" in route.target:
-            continue
+            continue  # a path parameter needs a value the checker cannot guess
         href = route.href()
         try:
             async with client.stream("GET", href, timeout=2) as r:

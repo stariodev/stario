@@ -241,6 +241,7 @@ class DatastarActions:
         options: FetchOptions,
     ) -> str:
         if not options and queries is None:
+            # The common bare `@get('/x')`: no option to parse.
             return f"@{method}({string_literal(url)})"
         if queries is not None:
             _deprecated(  # user -> at.get -> _fetch -> _build
@@ -257,6 +258,7 @@ class DatastarActions:
         open_when_hidden = options.get("open_when_hidden")
         payload = options.get("payload")
         retry = options.get("retry")
+        # Look the retry options up only when given: most calls have none.
         retry_interval_ms = (
             _retry_ms(options, "retry_interval", "retry_interval_ms")
             if "retry_interval" in options or "retry_interval_ms" in options
@@ -285,6 +287,8 @@ class DatastarActions:
         if content_type is not None:
             parts.append(f"contentType: {string_literal(str(content_type))}")
 
+        # Datastar drops its own "keep _local signals out" default as soon as
+        # `exclude` is given, so add it back: a local signal never leaves.
         filters = filter_js(include, exclude, keep_local=True)
         if filters is not None:
             parts.append(f"filterSignals: {filters}")
@@ -301,6 +305,8 @@ class DatastarActions:
 
         if payload is not None:
             if include is not None or exclude is not None:
+                # Datastar sends the payload instead of the signals, so the
+                # filter would silently do nothing.
                 raise StarioError(
                     "include= and exclude= have no effect with payload=",
                     context={"include": repr(include), "exclude": repr(exclude)},

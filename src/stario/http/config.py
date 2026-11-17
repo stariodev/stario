@@ -308,6 +308,8 @@ class ServerConfig:
 
 def _port_from_env() -> int:
     """`STARIO_PORT`, then `PORT`, then `DEFAULT_PORT`."""
+    # Hosting platforms (Heroku, Cloud Run, Fly, Railway) set PORT and
+    # route traffic to it.
     if env_optional_str("STARIO_PORT") is not None:
         return env_int("STARIO_PORT", DEFAULT_PORT)
     return env_int("PORT", DEFAULT_PORT)
@@ -319,6 +321,8 @@ def _host_from_env() -> str:
     A plain `HOST` is not read: shells and tools export it (tcsh and SuSE
     with the machine name, conda with a target triple).
     """
+    # A port never implies 0.0.0.0: opening the app to the network is a
+    # choice the developer makes with STARIO_HOST.
     return env_str("STARIO_HOST", DEFAULT_HOST)
 
 

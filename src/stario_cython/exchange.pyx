@@ -3970,6 +3970,8 @@ cdef class RequestHandle:
         if isinstance(content, bytes):
             body = content
         elif isinstance(content, str):
+            # A str is text everywhere else in Stario (h.Div(s) escapes it),
+            # so here it cannot silently mean HTML: SafeString says so.
             raise _html_str_error("w.html")
         else:
             if _markup_render is None:
