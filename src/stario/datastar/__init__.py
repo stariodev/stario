@@ -15,6 +15,9 @@ from stario.datastar import (
 )
 ```
 
+`ModuleScript()` loads the Datastar client; `DebugInspector()` shows the
+page's live signals while you develop.
+
 `at` and `data` are the stock `DatastarActions` / `DatastarAttributes`
 instances. Import the classes when you need a separate namespace (tests or
 multiple configured builders).
@@ -22,6 +25,7 @@ multiple configured builders).
 
 from .actions import DatastarActions, at
 from .attributes import DatastarAttributes, data
+from .debug import DebugInspector
 from .format import Debounce, Duration, Throttle, literal
 from .signals import FileSignal, is_datastar, read_signals
 from .sse import SSE
@@ -33,6 +37,7 @@ __all__ = [
     "DatastarActions",
     "DatastarAttributes",
     "Debounce",
+    "DebugInspector",
     "Duration",
     "FileSignal",
     "ModuleScript",

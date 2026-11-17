@@ -1,6 +1,7 @@
-"""Debug UI helpers for local development."""
+"""`DebugInspector()`: the page's live Datastar signals, for local development."""
 
-from stario.datastar import data
+# Import from the module, not the package: stario.datastar imports this file.
+from stario.datastar.attributes import data
 from stario.markup import HtmlElement, SafeString, baked
 from stario.markup import html as h
 
@@ -123,10 +124,16 @@ window.addEventListener('resize', () => el._clamp());
 
 
 @baked
-def debug_inspector() -> HtmlElement:
+def DebugInspector() -> HtmlElement:
     """Draggable overlay showing live Datastar signal JSON.
 
     Opt-in: place the element inside the page body when you want it.
+
+    ```python
+    from stario.datastar import DebugInspector
+
+    h.Body(..., DebugInspector())
+    ```
     """
     return h.Div(
         {"id": "__stario_debug_inspector"},

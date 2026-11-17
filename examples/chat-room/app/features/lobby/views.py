@@ -7,8 +7,7 @@ from app.common.shell import page
 from app.features.room.models import Room
 from app.features.room.urls import CREATE, DELETE, ROOM
 from stario import h
-from stario.datastar import at, data
-from stario.debug import debug_inspector
+from stario.datastar import DebugInspector, at, data
 from stario.markup import HtmlElement
 
 from .urls import LIVE
@@ -58,7 +57,7 @@ def lobby_view(
 ) -> HtmlElement:
     return page(
         [
-            debug_inspector(),
+            DebugInspector(),
             h.Div(
                 {"id": "lobby", "class": "lobby-container"},
                 data.signals(

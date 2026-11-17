@@ -152,6 +152,10 @@ expression compiler for the Datastar ones).
   working: Stario strips the slashes, as Datastar does.
 - **Datastar 1.0.5:** `ModuleScript()` loads `@v1.0.5` (bug fixes: `retry:
   'never'` stops, `data-bind` on number and date inputs).
+- **`stario.debug.debug_inspector()` is now
+  `stario.datastar.DebugInspector()`.** It shows Datastar signals, so it
+  lives with the other Datastar helpers, and it is spelled like the other
+  element (`ModuleScript()`). `stario.debug` is gone.
 
 - **`styles()` accepts `"`, `&`, `<` and `>` in a value:**
   `styles({"font-family": '"Inter", sans-serif'})` used to raise, because
