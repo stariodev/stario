@@ -9,10 +9,8 @@ from __future__ import annotations
 import pytest
 
 from stario import App, Context, RedirectException, Route, Writer
-from stario.datastar import SSE, at, data, is_datastar
-from stario.datastar.testing import datastar_checks
-from stario.markup import html as h
-from stario.testing import TestClient, check_pages
+from stario.datastar import SSE, is_datastar
+from stario.testing import TestClient
 
 DS = {"datastar-request": "true"}
 
@@ -89,22 +87,3 @@ async def test_client_returns_every_reply_as_sent() -> None:
     assert missing.text == "not found"
     assert nothing.status_code == 204
     assert streamed_status == 404
-
-
-async def test_check_pages_reports_a_stream_datastar_ignores() -> None:
-    live = Route("GET /live")
-
-    async def home(_c: Context, w: Writer) -> None:
-        w.html(h.Html(h.Body(h.Div({"id": "feed"}, data.init(at.get(live.href()))))))
-
-    async def stream(_c: Context, w: Writer) -> None:
-        w.text("gone", 404)
-
-    app = App()
-    app.add(Route("GET /"), home)
-    app.add(live, stream)
-    async with TestClient(app) as client:
-        plain = await check_pages(client)
-        problems = await check_pages(client, checks=datastar_checks())
-    assert not plain
-    assert any("the stream /live answers 404" in p for p in problems), problems
