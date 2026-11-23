@@ -612,9 +612,8 @@ cdef int _check_raw_text(object text, object tag) except -1:
                 f"Raw text in <{tag}> is sent verbatim, so it must "
                 f"not contain '</{tag}'"
                 + (" or '<!--'" if script else "")
-                + ". For JSON data use stario.json.dumps_script(value); for "
-                "a JS value use literal(value). Pass a SafeString if you "
-                "control the bytes."
+                + ". For JSON data use stario.json.dumps_script(value). "
+                "Pass a SafeString if you control the bytes."
             ),
             example='h.Script("const tag = \'<\\\\/script>\';")',
         )
@@ -925,9 +924,9 @@ cdef object _attrs_value_fragment(object key, Attrs value):
         help_text=(
             "An Attrs value inside a mapping must render that one attribute, "
             "as classes() does for 'class' and styles() for 'style'. Pass any "
-            "other Attrs fragment (data.*, aria(), ...) to the tag itself."
+            "other Attrs fragment to the tag as its own argument."
         ),
-        example='h.Div({"id": "card"}, data.on("click", "$open = true"), "text")',
+        example='h.Div({"id": "card"}, fragment, "text")',
     )
 
 
