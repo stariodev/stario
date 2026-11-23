@@ -429,7 +429,6 @@ class TestSseEventMeta:
     @pytest.mark.parametrize(
         ("retry", "message"),
         [
-            (1000, "has no unit"),
             (2.5, "has no unit"),
             (True, "Invalid duration"),
             ("500", "Invalid duration"),
@@ -442,6 +441,16 @@ class TestSseEventMeta:
         try:
             with pytest.raises(StarioError, match=message):
                 SSE(w).patch_elements(b"<p>x</p>", retry=cast(Any, retry))
+        finally:
+            loop.close()
+
+    def test_retry_int_is_milliseconds_and_warns(self):
+        # 5.8 took retry= as an int of milliseconds; it still works until 6.0.
+        w, _sink, loop = _make_writer()
+        try:
+            with pytest.warns(DeprecationWarning, match="retry='3000ms'"):
+                SSE(w).patch_elements(b"<p>x</p>", retry=cast(Any, 3000))
+            assert b"retry: 3000" in _sse_body(w)
         finally:
             loop.close()
 
@@ -940,21 +949,35 @@ class TestDatastarActions:
             action == "@post('/api/submit', {payload: {'extra':123}, retry: 'error'})"
         )
 
-    def test_payload_dict_is_data(self):
-        # The same as headers= and data.signals: "Milk" is text, "$t" too.
-        action = at.post("/todo", payload={"title": "Milk", "t": "$t", "n": [1, None]})
+    def test_payload_literal_is_data(self):
+        # The form that means the same in 5.9 and 6.0: "Milk" is text, "$t" too.
+        action = at.post(
+            "/todo", payload=literal({"title": "Milk", "t": "$t", "n": [1, None]})
+        )
         assert (
             action
             == "@post('/todo', {payload: {'title':'Milk','t':'$t','n':[1,null]}})"
         )
+
+    def test_payload_dict_without_str_is_data(self):
+        action = at.post("/todo", payload={"n": [1, None], "ok": True})
+        assert action == "@post('/todo', {payload: {'n':[1,null],'ok':true}})"
+
+    def test_payload_dict_str_keeps_the_5_8_meaning_and_warns(self):
+        # 5.8: a str value is a JavaScript expression. It stays one until 6.0.
+        for _ in range(2):  # not cached: each call warns
+            with pytest.warns(DeprecationWarning, match=r"payload=literal\("):
+                action = at.post("/todo", payload={"status": "'saved'", "id": "$id"})
+            assert action == "@post('/todo', {payload: {'status':'saved','id':$id}})"
 
     def test_payload_str_is_one_expression(self):
         action = at.post("/todo", payload="{id: $id, title: el.value}")
         assert action == "@post('/todo', {payload: {id: $id, title: el.value}})"
 
     @pytest.mark.parametrize("option", ["include", "exclude"])
-    def test_payload_refuses_signal_filters(self, option: str):
-        with pytest.raises(StarioError, match="no effect with payload"):
+    def test_payload_with_signal_filters_warns(self, option: str):
+        # The payload replaces the signals, so the filter does nothing.
+        with pytest.warns(DeprecationWarning, match="filter does nothing"):
             at.post("/x", payload={"a": 1}, **{option: ["a"]})  # type: ignore[arg-type]
 
     def test_payload_refuses_other_types(self):
@@ -1068,7 +1091,8 @@ class TestBackslashNeverPrecedesAClosingQuote:
 
 
 class TestDurations:
-    """A duration is a string with a unit everywhere; a number raises with the fix."""
+    """A duration is a string with a unit. A number in a 5.8 argument keeps
+    its 5.8 meaning (seconds) and warns; a 5.9 argument raises."""
 
     @pytest.mark.parametrize(
         "make",
@@ -1082,6 +1106,21 @@ class TestDurations:
             lambda t: data.on_signal_patch("go()", throttle=t),
             lambda t: data.on_raf("go()", throttle=t),
             lambda t: data.on_resize("go()", debounce=t),
+        ],
+    )
+    @pytest.mark.parametrize("number", [300, 2, 0])
+    def test_a_5_8_number_is_seconds_and_warns(self, make, number):
+        for _ in range(2):  # not cached: each call warns
+            with pytest.warns(DeprecationWarning, match="string with a unit") as caught:
+                out = make(number)
+            message = str(caught[0].message)
+            assert f"='{number}s'" in message
+            assert f"='{number}ms' if you meant milliseconds" in message
+            assert f".{number}s" in out.rendered
+
+    @pytest.mark.parametrize(
+        "make",
+        [
             lambda t: Debounce(t),
             lambda t: Throttle(t),
             lambda t: at.get("/x", retry_interval=t),
@@ -1089,21 +1128,37 @@ class TestDurations:
         ],
     )
     @pytest.mark.parametrize("number", [300, 2, 0])
-    def test_every_number_raises_with_both_units(self, make, number):
+    def test_a_5_9_argument_raises_with_both_units(self, make, number):
         with pytest.raises(StarioError, match="has no unit") as info:
             make(number)
         help_text = info.value.help_text or ""
         assert f"'{number}ms'" in help_text
         assert f"'{number}s'" in help_text
 
-    def test_float_seconds_suggest_milliseconds(self):
-        with pytest.raises(StarioError, match=r"debounce=0\.3 has no unit") as info:
-            data.on("input", "go()", debounce=cast(Any, 0.3))
-        assert "debounce='300ms'" in (info.value.help_text or "")
+    def test_float_seconds_go_out_in_milliseconds(self):
+        with pytest.warns(DeprecationWarning, match="debounce='300ms'"):
+            out = data.on("input", "go()", debounce=cast(Any, 0.3))
+        assert out == Attrs(' data-on:input__debounce.300ms="go()"')
 
-    def test_on_interval_500_no_longer_waits_500_seconds(self):
-        with pytest.raises(StarioError, match="duration=500 has no unit"):
+    def test_on_interval_500_warns_that_it_waits_500_seconds(self):
+        with pytest.warns(DeprecationWarning, match="waits 500s"):
             data.on_interval("poll()", duration=cast(Any, 500))
+
+    @pytest.mark.parametrize("value", [True, -1, float("nan"), "300"])
+    def test_other_values_raise(self, value):
+        with pytest.raises(StarioError):
+            data.on("input", "go()", debounce=cast(Any, value))
+
+    def test_the_warning_points_at_the_caller(self):
+        with pytest.warns(DeprecationWarning, match="waits 250s") as caught:
+            data.on("input", "go()", debounce=cast(Any, 250))
+        assert caught[0].filename == __file__
+
+    def test_1_and_true_do_not_share_a_cache_entry(self):
+        with pytest.warns(DeprecationWarning, match="waits 1s"):
+            data.on("input", "go()", debounce=cast(Any, 1))
+        with pytest.raises(StarioError):
+            data.on("input", "go()", debounce=cast(Any, True))
 
     def test_fractional_seconds_name_the_dot_rule(self):
         with pytest.raises(StarioError, match="has a dot") as info:
@@ -1133,6 +1188,40 @@ class TestDurations:
         from stario.datastar import format as fmt
 
         assert not hasattr(fmt, "BARE_SECONDS_LIMIT")
+
+
+class TestExpressionKeyword:
+    """`expression=` is the 5.8 keyword for one statement: it works and warns."""
+
+    @pytest.mark.parametrize(
+        ("make", "rendered"),
+        [
+            (lambda: data.on("click", expression="go()"), ' data-on:click="go()"'),
+            (lambda: data.init(expression="go()"), ' data-init="go()"'),
+            (lambda: data.effect(expression="go()"), ' data-effect="go()"'),
+            (
+                lambda: data.on_interval(expression="go()"),
+                ' data-on-interval="go()"',
+            ),
+            (
+                lambda: data.on_intersect(expression="go()"),
+                ' data-on-intersect="go()"',
+            ),
+            (
+                lambda: data.on_signal_patch(expression="go()"),
+                ' data-on-signal-patch="go()"',
+            ),
+        ],
+    )
+    def test_expression_keyword_warns_and_works(self, make, rendered):
+        with pytest.warns(DeprecationWarning, match="without the keyword"):
+            assert make() == Attrs(rendered)
+
+    def test_statements_and_expression_raise(self):
+        with pytest.raises(StarioError, match="not both"):
+            data.on("click", "a()", expression="b()")
+        with pytest.raises(StarioError, match="not both"):
+            data.init("a()", "c()", expression="b()")
 
 
 class TestDebounceThrottle:
@@ -1392,13 +1481,13 @@ class TestHelperCache:
         assert data.on("click", "go()") == Attrs(' data-on:click="go()"')
 
     def test_a_bad_call_still_raises_after_a_good_one(self):
-        data.on("click", "go()")
+        data.on("click", "go()", debounce="300ms")
         with pytest.raises(StarioError):
-            data.on("click", "go()", debounce=cast(Any, 300))
+            data.on("click", "go()", debounce="300")
 
     def test_unhashable_options_are_built_not_cached(self):
-        action = at.post("/h", headers={"X-A": "b"}, payload={"t": "$t"})
-        assert action == at.post("/h", headers={"X-A": "b"}, payload={"t": "$t"})
+        action = at.post("/h", headers={"X-A": "b"}, payload={"t": [1, 2]})
+        assert action == at.post("/h", headers={"X-A": "b"}, payload={"t": [1, 2]})
 
 
 class TestSignalsTakeMappingsAndSequences:

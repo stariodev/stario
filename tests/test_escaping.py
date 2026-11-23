@@ -242,20 +242,22 @@ class TestDatastarKeyModifiers:
 
 
 class TestFinishedHtmlStrings:
-    def test_patch_elements_str_raises(self) -> None:
+    def test_patch_elements_str_is_html_and_warns(self) -> None:
+        # 5.8 sent a str as HTML; it still does until 6.0, and warns.
         from tests.test_datastar import _make_writer, _sse_body
 
         w, _sink, loop = _make_writer()
         try:
-            with pytest.raises(StarioError, match="SafeString"):
+            with pytest.warns(DeprecationWarning, match="SafeString"):
                 SSE(w).patch_elements("<p id='a'>x</p>")
             SSE(w).patch_elements(SafeString("<p id='c'>z</p>"))
             body = _sse_body(w)
-            assert body.count(b"datastar-patch-elements") == 1
+            assert body.count(b"datastar-patch-elements") == 2
+            assert b"<p id='a'>x</p>" in body
         finally:
             loop.close()
 
-    async def test_w_html_str_raises(self) -> None:
+    async def test_w_html_str_is_html_and_warns(self) -> None:
         async def plain(_c: Context, w: Writer) -> None:
             w.html("<p>a</p>")
 
@@ -266,7 +268,9 @@ class TestFinishedHtmlStrings:
         app.add(Route("GET /plain"), plain)
         app.add(Route("GET /safe"), safe)
         async with TestClient(app) as client:
-            assert (await client.get("/plain")).status_code == 500
+            with pytest.warns(DeprecationWarning, match=r"w\.html\(str\)"):
+                plain_text = (await client.get("/plain")).text
+            assert plain_text == "<p>a</p>"
             assert (await client.get("/safe")).text == "<p>c</p>"
 
 

@@ -1,7 +1,6 @@
 from collections.abc import AsyncIterator, Iterator, Mapping
 from typing import overload
 
-from stario.exceptions import StarioError
 from stario.http.context import Handler, Match
 from stario.http.route import Route
 from stario.json import JsonValue
@@ -43,7 +42,7 @@ class Headers:
     def __len__(self) -> int: ...
 
 def encode_header_value(value: str) -> bytes: ...
-def _html_str_error(where: str) -> StarioError: ...
+def _warn_html_str(where: str) -> None: ...
 
 class RequestHeaders:
     """Read-only request headers (``c.req.headers``)."""

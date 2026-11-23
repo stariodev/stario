@@ -32,19 +32,21 @@ HTML escaping alone does not make user text safe inside JavaScript.
 
 ## Datastar
 
-In `data.*` and `at.*`, a `str` argument is a Datastar expression, which is code. The values that Datastar stores or sends are data, and Stario quotes them. That covers URLs, selectors, `headers=`, `data.signals` and a `payload=` dict. To put a Python value into code, use `literal(v)`.
+In `data.*` and `at.*`, a `str` argument is a Datastar expression, which is code. The values that Datastar stores or sends are data, and Stario quotes them. That covers URLs, selectors, `headers=` and `data.signals`. To put a Python value into code, use `literal(v)`.
 
 ```python
 data.on("click", f"$tags = $tags.filter(t => t !== {literal(tag)})")
-at.post(SAVE.href(), payload={"title": title})  # data: the text
+at.post(SAVE.href(), payload=literal({"title": title}))  # data: the text
 at.post(SAVE.href(), payload="{id: $id, title: el.value}")  # one expression
 ```
+
+`payload=` is always one expression. A dict with a `str` value is the 5.8 form: each `str` is a JavaScript expression, it warns, and in 6.0 it becomes text.
 
 Datastar runs every attribute with one of its names, also one that you write in a mapping or with `markup.data()`. For example, `data({"text": label})` writes `data-text`, and Datastar runs the label as code. Use other names for plain data, such as `data-label` and `data-testid`.
 
 ## Responses
 
-- `w.html(view)` and `sse.patch_elements(view)` take `h.*` markup, a `SafeString` or `bytes`. A plain `str` raises, because a `str` is text everywhere in Stario. Finished HTML from a template engine is `w.html(SafeString(page))`.
+- `w.html(view)` and `sse.patch_elements(view)` take `h.*` markup, a `SafeString` or `bytes`. A plain `str` is the 5.8 form: it is sent as HTML and warns, because a `str` is text everywhere else in Stario. Finished HTML from a template engine is `w.html(SafeString(page))`.
 - `w.text(s)` and `w.json(v)` send `text/plain` and `application/json`. The browser does not read them as HTML.
 - `w.redirect(url)` and `sse.navigate(url)` refuse line breaks, `\` and schemes other than `http(s)`. A line break would add a header.
 

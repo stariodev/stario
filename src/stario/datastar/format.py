@@ -9,6 +9,7 @@ import re
 import warnings
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal, NoReturn, cast
 
 from stario.exceptions import StarioError
@@ -33,8 +34,10 @@ type SignalValue = (
 )
 
 # A duration is a string with a unit: whole milliseconds or seconds, "300ms"
-# or "2s". Numbers raise: Datastar reads a bare number as milliseconds,
-# Python code as seconds, and a reader cannot tell which one was meant.
+# or "2s". Datastar reads a bare number as milliseconds, Python code as
+# seconds, and a reader cannot tell which one was meant. The 5.8 arguments
+# still take a number with its 5.8 meaning and warn (`legacy_duration`);
+# arguments added in 5.9 raise.
 type Duration = str
 type TimeValue = Duration
 
@@ -151,9 +154,81 @@ def duration(value: object, name: str) -> str:
     return cast(str, value)
 
 
+# Warnings point at the first frame outside the stario package.
+_STARIO_DIR = str(Path(__file__).resolve().parent.parent)
+
+
+def _legacy_number_text(value: object) -> str | None:
+    """A 5.8 number duration as 5.8 wrote it (int: seconds, float: seconds
+    in whole milliseconds); None when `value` is not such a number."""
+    if type(value) is int and value >= 0:
+        return f"{value}s"
+    if type(value) is float and math.isfinite(value) and value >= 0:
+        return f"{int(value * 1000)}ms"
+    return None
+
+
+def warn_deprecated(old: str, new: str) -> None:
+    """DeprecationWarning `old is deprecated: new. Removed in 6.0.`, shown at
+    the first frame outside the stario package."""
+    warnings.warn(
+        f"{old} is deprecated: {new}. Removed in 6.0.",
+        DeprecationWarning,
+        skip_file_prefixes=(_STARIO_DIR,),
+    )
+
+
+def has_str(value: object) -> bool:
+    """True when `value` is a `str` or a mapping or list holding one."""
+    if isinstance(value, str):
+        return True
+    if isinstance(value, Mapping):
+        return any(has_str(v) for v in cast(Mapping[object, object], value).values())
+    if isinstance(value, (list, tuple)):
+        return any(has_str(v) for v in cast(Sequence[object], value))
+    return False
+
+
+def legacy_duration(value: object, name: str) -> str:
+    """`duration()` for the 5.8 arguments: a number keeps its 5.8 meaning
+    (seconds) and warns with the string to write. Removed in 6.0."""
+    if type(value) is str:
+        return duration(value, name)
+    text = _legacy_number_text(value)
+    if text is None:
+        raise _duration_error(name, value)
+    other = (
+        f", or {name}='{value}ms' if you meant milliseconds"
+        if type(value) is int
+        else ""
+    )
+    warnings.warn(
+        f"{name}={value!r} is deprecated: a duration is a string with a unit. "
+        f"A number is seconds here (as in 5.8), so {name}={value!r} waits "
+        f"{text}: write {name}='{text}'{other}. Removed in 6.0.",
+        DeprecationWarning,
+        skip_file_prefixes=(_STARIO_DIR,),
+    )
+    return text
+
+
+def legacy_duration_ms(value: object, name: str) -> int:
+    """SSE `retry=`: 5.8 took an int of milliseconds; it still works and
+    warns. Removed in 6.0."""
+    if type(value) is int:
+        warnings.warn(
+            f"{name}={value!r} is deprecated: a duration is a string with a "
+            f"unit. Write {name}='{value}ms'. Removed in 6.0.",
+            DeprecationWarning,
+            skip_file_prefixes=(_STARIO_DIR,),
+        )
+        return value
+    return duration_ms(value, name)
+
+
 def time_to_string(time: Duration) -> str:
     """`time` checked as a Datastar duration; kept for callers of 5.8."""
-    return duration(time, "time")
+    return legacy_duration(time, "time")
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,7 +317,7 @@ def _legacy_edges(kind: str, value: tuple[Any, ...], allowed: tuple[str, str]) -
                 context={f"{kind}_modifier": repr(flag)},
                 help_text=f"Write {kind}={replacement}('300ms', ...) with booleans.",
             )
-    return f"{kind}.{duration(value[0], kind)}." + ".".join(value[1:])
+    return f"{kind}.{legacy_duration(value[0], kind)}." + ".".join(value[1:])
 
 
 def debounce_to_string(debounce: Duration | Debounce) -> str:
@@ -255,7 +330,7 @@ def debounce_to_string(debounce: Duration | Debounce) -> str:
         return _legacy_edges(
             "debounce", cast(tuple[Any, ...], debounce), ("leading", "notrailing")
         )
-    raise _duration_error("debounce", debounce)
+    return "debounce." + legacy_duration(debounce, "debounce")
 
 
 def throttle_to_string(throttle: Duration | Throttle) -> str:
@@ -268,7 +343,7 @@ def throttle_to_string(throttle: Duration | Throttle) -> str:
         return _legacy_edges(
             "throttle", cast(tuple[Any, ...], throttle), ("noleading", "trailing")
         )
-    raise _duration_error("throttle", throttle)
+    return "throttle." + legacy_duration(throttle, "throttle")
 
 
 def string_literal(value: str) -> str:
@@ -363,8 +438,8 @@ def js_object(__obj: dict[str, Any] | None = None, /, **kwargs: Any) -> str:
     # {'label':'Save'}
     ```
 
-    `at.*` does not need this: `headers=` values and a `payload=` dict are
-    already data, and a `payload=` str is already an expression.
+    `at.*` does not need this: `headers=` values are already data, and for
+    `payload=` write `literal({...})` (data) or one expression string.
     """
     obj = __obj if __obj is not None else kwargs
     pairs = (f"{string_literal(str(k))}:{_js_expr(v)}" for k, v in obj.items())

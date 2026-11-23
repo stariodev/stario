@@ -29,7 +29,8 @@ Rules:
 - `on`, `init` and `effect` take several statements: `data.on("submit",
   at.post(SAVE.href()), "$_edit.close()")` runs them in order.
 - A duration (`delay=`, `debounce=`, `throttle=`, `duration=`) is a string
-  with a unit: `"300ms"` or `"2s"`. A number raises with the fix.
+  with a unit: `"300ms"` or `"2s"`. A number is the 5.8 form (seconds):
+  it still works and warns.
   `Debounce("300ms", leading=True)` and `Throttle("1s", trailing=True)` set
   the edge flags.
 - Datastar Pro attributes (`persist`, `query_string`, `replace_url`, …)
@@ -59,17 +60,18 @@ from .format import (
     Throttle,
     check_signal_name,
     debounce_to_string,
-    duration,
     encode_signals,
     expand_signal_paths,
     filter_js,
     js_object,
     key_case,
+    legacy_duration,
     require_mapping,
     signal_attr_key,
     signal_object,
     throttle_to_string,
     to_kebab_key,
+    warn_deprecated,
 )
 
 # Fragment caches, one per helper (see stario_cython.markup.remember_attrs).
@@ -80,15 +82,27 @@ _BIND = fragment_cache()
 _ATTR = fragment_cache()
 _CAP = FRAGMENT_CACHE_MAX
 
-_duration = duration  # on_interval has a parameter named `duration`
 
-
-def _code(helper: str, statements: tuple[str, ...]) -> str:
+def _code(
+    helper: str, statements: tuple[str, ...], expression: str | None = None
+) -> str:
     """Statements joined into one Datastar expression.
 
     Datastar runs an attribute value as one function body, so `; ` keeps the
-    statements apart and runs them in order.
+    statements apart and runs them in order. `expression=` is the 5.8
+    keyword for one statement: it still works and warns.
     """
+    if expression is not None:
+        if statements:
+            raise StarioError(
+                f"data.{helper}() takes statements or expression=, not both",
+                help_text="Pass every statement as an argument and drop expression=.",
+            )
+        warn_deprecated(
+            f"data.{helper}(expression=...)",
+            "pass the statement as an argument, without the keyword",
+        )
+        return expression
     if not statements:
         raise StarioError(
             f"data.{helper}() needs at least one statement",
@@ -153,7 +167,7 @@ def _timing(
 ) -> list[str]:
     modifiers: list[str] = []
     if delay is not None:
-        modifiers.append("delay." + duration(delay, "delay"))
+        modifiers.append("delay." + legacy_duration(delay, "delay"))
     if debounce is not None:
         modifiers.append(debounce_to_string(debounce))
     if throttle is not None:
@@ -327,7 +341,7 @@ class DatastarAttributes:
         )
         return Attrs(f' {self.prefix}computed="{escape_attr(js_object(tree))}"')
 
-    def effect(self, *statements: str) -> Attrs:
+    def effect(self, *statements: str, expression: str | None = None) -> Attrs:
         """Run statements when the element initializes and when a signal they read changes.
 
         ```python
@@ -336,7 +350,9 @@ class DatastarAttributes:
         ```
         """
         expression = (
-            statements[0] if len(statements) == 1 else _code("effect", statements)
+            statements[0]
+            if len(statements) == 1 and expression is None
+            else _code("effect", statements, expression)
         )
         return Attrs(f' {self.prefix}effect="{escape_attr(expression)}"')
 
@@ -379,6 +395,7 @@ class DatastarAttributes:
     def init(
         self,
         *statements: str,
+        expression: str | None = None,  # 5.8 keyword, deprecated
         delay: Duration | None = None,
         view_transition: bool = False,
     ) -> Attrs:
@@ -393,14 +410,16 @@ class DatastarAttributes:
         ```
         """
         expression = (
-            statements[0] if len(statements) == 1 else _code("init", statements)
+            statements[0]
+            if len(statements) == 1 and expression is None
+            else _code("init", statements, expression)
         )
         # No cache: building this costs no more than a lookup would.
         if delay is None and not view_transition:
             return Attrs(f' {self.prefix}init="{escape_attr(expression)}"')
         key = self.prefix + "init"
         if delay is not None:
-            key += "__delay." + duration(delay, "delay")
+            key += "__delay." + legacy_duration(delay, "delay")
         if view_transition:
             key += "__viewtransition"
         return Attrs(f' {key}="{escape_attr(expression)}"')
@@ -435,6 +454,7 @@ class DatastarAttributes:
         self,
         event: JSEvent | str,
         *statements: str,
+        expression: str | None = None,  # 5.8 keyword, deprecated
         once: bool = False,
         passive: bool = False,
         capture: bool = False,
@@ -471,7 +491,11 @@ class DatastarAttributes:
         deprecated spelling of the same three.
         """
         # One statement is the common call: no join.
-        expression = statements[0] if len(statements) == 1 else _code("on", statements)
+        expression = (
+            statements[0]
+            if len(statements) == 1 and expression is None
+            else _code("on", statements, expression)
+        )
         if (
             not once
             and not passive
@@ -495,7 +519,23 @@ class DatastarAttributes:
                 validate_attribute_key(event)
                 return Attrs(f' {self.prefix}on:{event}="{escape_attr(expression)}"')
             cache_key: tuple[object, ...] = ()
-        elif len(_ON) >= _CAP:
+        elif (
+            len(_ON) >= _CAP
+            or target is not None
+            or (delay is not None and type(delay) is not str)
+            or (
+                debounce is not None
+                and type(debounce) is not str
+                and type(debounce) is not Debounce
+            )
+            or (
+                throttle is not None
+                and type(throttle) is not str
+                and type(throttle) is not Throttle
+            )
+        ):
+            # Full, or a deprecated form: a number or tuple duration (250
+            # and 250.0 hash alike) or target=. Built each call, so it warns.
             cache_key = ()
         else:
             cache_key = (
@@ -607,6 +647,7 @@ class DatastarAttributes:
     def on_intersect(
         self,
         *statements: str,
+        expression: str | None = None,  # 5.8 keyword, deprecated
         threshold: float | Literal["half", "full"] | str | None = None,
         once: bool = False,
         exit: bool = False,
@@ -623,7 +664,9 @@ class DatastarAttributes:
         ```
         """
         expression = (
-            statements[0] if len(statements) == 1 else _code("on_intersect", statements)
+            statements[0]
+            if len(statements) == 1 and expression is None
+            else _code("on_intersect", statements, expression)
         )
         modifiers: list[str] = []
         if threshold is not None:
@@ -665,6 +708,7 @@ class DatastarAttributes:
     def on_interval(
         self,
         *statements: str,
+        expression: str | None = None,  # 5.8 keyword, deprecated
         duration: Duration = "1s",
         leading: bool = False,
         view_transition: bool = False,
@@ -680,12 +724,14 @@ class DatastarAttributes:
         ```
         """
         expression = (
-            statements[0] if len(statements) == 1 else _code("on_interval", statements)
+            statements[0]
+            if len(statements) == 1 and expression is None
+            else _code("on_interval", statements, expression)
         )
         key = self.prefix + "on-interval"
         if duration != "1s" or leading:
             # "1s" is Datastar's default, so it stays out of the name.
-            key += "__duration." + _duration(duration, "duration")
+            key += "__duration." + legacy_duration(duration, "duration")
             if leading:
                 key += ".leading"
         if view_transition:
@@ -695,6 +741,7 @@ class DatastarAttributes:
     def on_signal_patch(
         self,
         *statements: str,
+        expression: str | None = None,  # 5.8 keyword, deprecated
         delay: Duration | None = None,
         debounce: Duration | Debounce | None = None,
         throttle: Duration | Throttle | None = None,
@@ -711,8 +758,8 @@ class DatastarAttributes:
         """
         expression = (
             statements[0]
-            if len(statements) == 1
-            else _code("on_signal_patch", statements)
+            if len(statements) == 1 and expression is None
+            else _code("on_signal_patch", statements, expression)
         )
         modifiers = _timing(delay, debounce, throttle)
         if modifiers:

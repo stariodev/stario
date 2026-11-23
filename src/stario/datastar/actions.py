@@ -37,9 +37,11 @@ from .format import (
     SignalValue,
     duration_ms,
     filter_js,
+    has_str,
     js_object,
     literal,
     string_literal,
+    warn_deprecated,
 )
 
 # Action strings by (method, url, queries, options); see remember_str.
@@ -116,6 +118,18 @@ def _deprecated(old: str, new: str, stacklevel: int) -> None:
         DeprecationWarning,
         stacklevel=stacklevel + 1,
     )
+
+
+def _warns(options: FetchOptions) -> bool:
+    """True when building these options gives a DeprecationWarning."""
+    if "retry_interval_ms" in options or "retry_max_wait_ms" in options:
+        return True
+    payload = options.get("payload")
+    if payload is None:
+        return False
+    if options.get("include") is not None or options.get("exclude") is not None:
+        return True
+    return type(payload) is not str and has_str(payload)
 
 
 def _frozen(value: object) -> object:
@@ -214,6 +228,9 @@ class DatastarActions:
             hit = _FETCH.get(cache_key)
             if hit is not None:
                 return hit
+        elif queries is not None or _warns(options):
+            # A deprecated form: build it each time, so each call warns.
+            return self._build(method, url, queries, options)
         else:
             # Each option carries its type (see _frozen). A value that cannot
             # be a key (a set, a generator) builds without the cache.
@@ -306,21 +323,29 @@ class DatastarActions:
         if payload is not None:
             if include is not None or exclude is not None:
                 # Datastar sends the payload instead of the signals, so the
-                # filter would silently do nothing.
-                raise StarioError(
-                    "include= and exclude= have no effect with payload=",
-                    context={"include": repr(include), "exclude": repr(exclude)},
-                    help_text=(
-                        "payload replaces the signals in the request body, and "
-                        "include/exclude only filter the signals. Drop one."
-                    ),
+                # filter does nothing. 5.8 accepted it; 6.0 raises.
+                warn_deprecated(
+                    "include= or exclude= with payload=",
+                    "the payload replaces the signals in the request body, so "
+                    "the filter does nothing; drop one",
                 )
             if type(payload) is str:
                 # One JavaScript expression, like any str argument in at.*.
                 parts.append(f"payload: {payload}")
-            elif isinstance(payload, Mapping):
-                # Data, like data.signals: {"title": "Milk"} is the text Milk.
+            elif isinstance(payload, Mapping) and not has_str(payload):
+                # Numbers, booleans and None mean the same as data or as code.
                 parts.append(f"payload: {literal(cast(SignalValue, payload))}")
+            elif isinstance(payload, Mapping):
+                # 5.8: a str value is a JavaScript expression. It stays one in
+                # 5.x and warns; payload=literal({...}) is data in 5.x and 6.0.
+                warn_deprecated(
+                    "a str value in a payload= dict",
+                    "it is a JavaScript expression in 5.x and becomes text in "
+                    "6.0. To send data write payload=literal({'title': title}); "
+                    "to read the browser write one expression: "
+                    'payload="{id: $id, title: el.value}"',
+                )
+                parts.append(f"payload: {js_object(dict(payload))}")
             else:
                 raise StarioError(
                     f"payload must be a dict or a str, not {type(payload).__name__}",
@@ -374,10 +399,12 @@ class DatastarActions:
     ) -> str:
         """Build `@get(...)`. Datastar sends the signals in the `datastar` query parameter.
 
-        Data and code: `headers=` values and a `payload=` dict are data
-        (`{"title": title}` sends the text). A `payload=` str is one
-        JavaScript expression (`"{id: $id, title: el.value}"`). A payload
-        replaces the signals, so it does not go with `include=` / `exclude=`.
+        Data and code: `headers=` values are data. `payload=` is one
+        JavaScript expression: `payload=literal({"title": title})` sends the
+        text, `payload="{id: $id, title: el.value}"` reads the browser. A
+        payload replaces the signals, so it does not go with `include=` /
+        `exclude=`. A `payload=` dict with a `str` value is the 5.8 form (the
+        `str` is an expression); it warns, and in 6.0 it becomes text.
 
 
         ```python

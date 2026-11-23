@@ -20,15 +20,15 @@ from stario.json import JsonValue
 from stario.json import dumps as json_dumps
 from stario.json import dumps_bytes as json_dumps_bytes
 from stario.markup.render import render_bytes
-from stario_cython.exchange import _html_str_error
+from stario_cython.exchange import _warn_html_str
 from stario_cython.markup import check_raw_text
 
 from .format import (
     Duration,
     SignalValue,
-    duration_ms,
     encode_signals,
     expand_signal_paths,
+    legacy_duration_ms,
     require_mapping,
 )
 
@@ -88,8 +88,10 @@ def _html_bytes(content: Any) -> bytes:
     if isinstance(content, bytes):
         return content
     if isinstance(content, str):
-        # As w.html: a str is text everywhere else, so finished HTML says so.
-        raise _html_str_error("patch_elements")
+        # As w.html: a str is text everywhere else, so finished HTML says so
+        # with SafeString. 5.8 sent it; 6.0 raises.
+        _warn_html_str("patch_elements")
+        return content.encode("utf-8")
     return render_bytes(content)
 
 
@@ -104,7 +106,7 @@ def _sse_event_meta(event_id: str | None, retry: Duration | None) -> list[bytes]
             )
         lines.append(b"id: " + _sse_field_value("event_id", event_id))
     if retry is not None:
-        ms = duration_ms(retry, "retry")
+        ms = legacy_duration_ms(retry, "retry")
         if ms <= 0:  # the client would reconnect in a tight loop
             raise StarioError(
                 "Datastar SSE retry must be longer than 0",
@@ -154,8 +156,9 @@ class SSE:
         """Patch DOM elements with Stario markup, a `SafeString`, or `bytes`.
 
         Markup built with `h.*` is rendered with escaping. A `SafeString` and
-        `bytes` are finished HTML and go out as they are. A plain `str`
-        raises: wrap finished HTML you built in `SafeString`.
+        `bytes` are finished HTML and go out as they are. A plain `str` is
+        the 5.8 form: it goes out as HTML and warns; wrap finished HTML you
+        built in `SafeString`.
         """
         if mode is not None and mode not in _PATCH_MODES:
             raise StarioError(

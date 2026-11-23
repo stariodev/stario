@@ -13,6 +13,8 @@ cimport cython
 
 import asyncio
 import http
+import os.path as _os_path
+import warnings as _warnings
 from urllib.parse import quote as _url_quote
 
 from libc.stddef cimport size_t
@@ -58,6 +60,7 @@ from stario.http.compression import (
 )
 from stario.http.context import EMPTY_MATCH, _Alive
 from stario.http.invoke import on_handler_done
+import stario.exceptions as _stario_exceptions
 from stario.http.redirect import normalized_location
 from stario.json import dumps_bytes as _json_dumps_bytes
 
@@ -90,17 +93,20 @@ include "router.pxi"
 _markup_render = None
 
 
-def _html_str_error(where):
-    """The error for a plain `str` given to `w.html` or `patch_elements`."""
-    return StarioError(
-        f"{where}(str): is it text or finished HTML?",
-        context={"argument_type": "str"},
-        help_text=(
-            "A str is text everywhere in Stario, so it cannot mean HTML here. "
-            "Send h.* markup, or wrap finished HTML you built (a template "
-            "engine's output) in SafeString."
-        ),
-        example=f"{where}(SafeString(template.render(...)))",
+# Warnings point at the first frame outside the stario package.
+_STARIO_DIR = _os_path.dirname(_os_path.abspath(_stario_exceptions.__file__))
+
+
+def _warn_html_str(where):
+    """5.8 sent a plain `str` given to `w.html` or `patch_elements` as HTML.
+    It still does, and warns: a `str` is text everywhere else in Stario."""
+    _warnings.warn(
+        f"{where}(str) is deprecated: a str is text everywhere else in "
+        "Stario (h.Div(s) escapes it). Send h.* markup, or wrap finished HTML "
+        f"(a template engine's output) in SafeString: {where}(SafeString(html)). "
+        "Removed in 6.0.",
+        DeprecationWarning,
+        skip_file_prefixes=(_STARIO_DIR,),
     )
 
 
@@ -3962,17 +3968,18 @@ cdef class RequestHandle:
     def html(self, content, status=200):
         """Send markup nodes, a `SafeString`, or `bytes` as `text/html`.
 
-        A plain `str` raises: a `str` is text everywhere else in Stario, so
-        finished HTML (a template engine's output) says so with
-        `SafeString(page)`.
+        Finished HTML (a template engine's output) goes in `SafeString(page)`.
+        A plain `str` is the 5.8 form: it is sent as HTML and warns, because a
+        `str` is text everywhere else in Stario.
         """
         global _markup_render
         if isinstance(content, bytes):
             body = content
         elif isinstance(content, str):
             # A str is text everywhere else in Stario (h.Div(s) escapes it),
-            # so here it cannot silently mean HTML: SafeString says so.
-            raise _html_str_error("w.html")
+            # so finished HTML says so with SafeString. 5.8 sent it; 6.0 raises.
+            _warn_html_str("w.html")
+            body = _utf8(content)
         else:
             if _markup_render is None:
                 from stario.markup.render import render_bytes
