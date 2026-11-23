@@ -294,47 +294,16 @@ class ServerConfig:
 
     @classmethod
     def from_env(cls) -> "ServerConfig":
-        """Read `STARIO_*` listen, limit, compression, and shutdown settings.
-
-        The port is `STARIO_PORT`, else `PORT`, else 8000. The host is
-        `STARIO_HOST`, else `127.0.0.1`. Setting a port never changes the
-        host, so a platform that sets only `PORT` also needs
-        `STARIO_HOST=0.0.0.0`. A plain `HOST` is not read: tcsh, SuSE and
-        conda export it with values that are not bind addresses. A blank
-        value counts as unset.
-        """
+        """Read `STARIO_*` listen, limit, compression, and shutdown settings."""
         return server_config_from_env()
 
 
-def _port_from_env() -> int:
-    """`STARIO_PORT`, then `PORT`, then `DEFAULT_PORT`."""
-    # Hosting platforms (Heroku, Cloud Run, Fly, Railway) set PORT and
-    # route traffic to it.
-    if env_optional_str("STARIO_PORT") is not None:
-        return env_int("STARIO_PORT", DEFAULT_PORT)
-    return env_int("PORT", DEFAULT_PORT)
-
-
-def _host_from_env() -> str:
-    """`STARIO_HOST`, then `DEFAULT_HOST`. Never derived from the port.
-
-    A plain `HOST` is not read: shells and tools export it (tcsh and SuSE
-    with the machine name, conda with a target triple).
-    """
-    # A port never implies 0.0.0.0: opening the app to the network is a
-    # choice the developer makes with STARIO_HOST.
-    return env_str("STARIO_HOST", DEFAULT_HOST)
-
-
 def server_config_from_env() -> ServerConfig:
-    """Read `STARIO_*` listen, limit, compression, and shutdown settings.
-
-    The port falls back to `PORT`; see `ServerConfig.from_env`.
-    """
+    """Read `STARIO_*` listen, limit, compression, and shutdown settings."""
     return _config_from_env(
         lambda: ServerConfig(
-            host=_host_from_env(),
-            port=_port_from_env(),
+            host=env_str("STARIO_HOST", DEFAULT_HOST),
+            port=env_int("STARIO_PORT", DEFAULT_PORT),
             unix_socket=env_optional_str("STARIO_UNIX_SOCKET"),
             unix_socket_mode=env_octal_mode(
                 "STARIO_UNIX_SOCKET_MODE", DEFAULT_UNIX_SOCKET_MODE
