@@ -4,11 +4,16 @@ All notable changes to Stario are documented in this file.
 
 The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 5.9.0 - Unreleased
 
-Changes that remove rules an app guide had to state, because coding agents
-read the rule and still got it wrong. Everything under Added is new
-surface; the behaviour under Changed says what an existing app sees.
+Safer escaping, Datastar helpers that say when a call cannot mean what it
+looks like, and faster Datastar pages. A changed behaviour that an app
+could depend on keeps its 5.8 meaning and warns with the 6.0 spelling (see
+Deprecated). New errors are only for the security fixes and for `__` in a
+`data.class_` / `data.attr` / `data.style` name, which Datastar already
+misread. Two signal-filter fixes change what is sent without a warning:
+`include=` names are exact, and `exclude=` keeps `_` signals out (see
+Changed).
 
 ### Security
 
@@ -26,17 +31,20 @@ expression compiler for the Datastar ones).
   href="data:...">`, since browsers block `data:` pages). The check reads the
   scheme as a browser does (case, leading spaces and controls, tabs and
   newlines inside it). `SafeString("javascript:void(0)")` opts out. Cost:
-  about 13 ns for a relative URL and 21 ns for an absolute one, on these
+  about 5 ns for a relative URL and 16 ns for an absolute one, on these
   attributes only; other keys are matched in C and pay nothing.
 - **A `styles()` value cannot swallow the next declaration.** An
-  unclosed quote, `(`, `[` or `/*`, or a line break inside a quote, now
-  raises, as `; { } \` did:
+  unclosed quote, `(` or `[`, a line break inside a quote, and any `/*`
+  now raise, as `; { } \` did:
   `styles({"background": "url(https://x/a", "display": "none"})` wrote
   `background:url(https://x/a;display:none;`, and the browser read
-  `display:none` as part of the URL.
+  `display:none` as part of the URL. Cost: about 16 ns per call.
 - **`sse.execute_script(code)` raises on `</script` and `<!--`,** as
   `h.Script` does. Before, such code ended the script element and the rest
   became page markup.
+- **A `@baked` raw-text slot follows a direct `h.Script(...)` call:** an
+  element in the slot raises (it used to render its HTML into the script),
+  and a `SafeString` goes out unchecked.
 
 ### Added
 
@@ -44,12 +52,6 @@ expression compiler for the Datastar ones).
   same objects as in `stario.markup`, which still works. Datastar names stay
   in `stario.datastar`. `from stario.http import ServerConfig` works as
   well.
-- **`serve()` falls back to `PORT`.** The port is `STARIO_PORT`, else
-  `PORT`, else 8000. The host stays `STARIO_HOST`, else `127.0.0.1`: setting
-  a port never changes the host, so a platform that sets only `PORT` also
-  needs `STARIO_HOST=0.0.0.0`. A plain `HOST` or `HOSTNAME` is not read.
-  tcsh and SuSE export `HOST` as the machine name, conda as a target triple,
-  and Docker sets `HOSTNAME` to the container ID.
 - **Attributes may come after children:** `h.I("🗑", {"class": "icon"},
   data.on("click", ...))` renders `<i class="icon" data-on:click=...>🗑</i>`.
   Before, it raised `StarioError` when the call ran, often inside a live
@@ -64,18 +66,6 @@ expression compiler for the Datastar ones).
 - **`HtmlElement` includes `list[Element]` and `list[str]`**, so
   `items = [h.Li(t) for t in tags]` passes as a child and as a
   `-> HtmlElement` return without an annotation.
-- **`stario.testing.check_pages(client)`** checks every HTML page reachable
-  from `/` and the GET routes for 5xx answers and duplicate ids.
-  `assert not await check_pages(client)`; `check_page(client, url)` checks
-  one page after a test made rows. A page that fails because an outside
-  service is down is skipped (`skip_errors=`). `checks=` adds your own
-  checks: async functions `check(client, url, page) -> list[str]` that get
-  the parsed `HtmlPage`.
-- **`stario.datastar.testing.datastar_checks()`** for `check_pages(client,
-  checks=datastar_checks())`: Datastar actions without a route, undefined
-  `$signals`, a `<dialog>` a patch would close, and `data-init` streams
-  (`signals=`, `streams=`).
-
 - **`sse.replace_url(url)`** sets the address bar without a reload or a
   history entry, escaped like `navigate`. Before, apps wrote
   `execute_script("history.replaceState(...)")` with their own escaping
@@ -88,9 +78,12 @@ expression compiler for the Datastar ones).
 - **`literal(value)`** writes a Python value as a JavaScript literal:
   `f"$tags = $tags.filter(t => t !== {literal(tag)})"`. Text, numbers,
   booleans, `None`, and mappings and lists of them (`StrEnum` and
-  `IntEnum` members as their values). It is `string_literal`
-  for any JSON-shaped value; `string_literal` stays. From
-  `stario.datastar`.
+  `IntEnum` members as their values). It is `string_literal` for any
+  JSON-shaped value; `string_literal` stays. NUL is written as `\x00`.
+  `payload=literal({"title": title})` sends data. From `stario.datastar`.
+- **`at.*(payload=str)`: one JavaScript expression,**
+  `payload="{id: $id, title: el.value}"`. In 5.8 a `str` failed with
+  `AttributeError`.
 - **`is_datastar(req)`**: true when Datastar sent the request (the
   `Datastar-Request` header). Branch on it where page loads and Datastar
   requests reach one handler. From `stario.datastar`.
@@ -101,20 +94,7 @@ expression compiler for the Datastar ones).
 - **`data.on(..., window=True | document=True | outside=True)`**, Datastar's
   own modifier names. One at most; two raise.
 - **`at.get(..., retry_interval="2s", retry_max_wait="30s")`**: durations,
-  sent to Datastar in milliseconds.
-- **The same helper call returns the same fragment.** `data.on` with
-  modifiers, `data.bind`, `data.attr` and the `at.*` fetch actions keep
-  what they built in a bounded cache (4096 entries each), like
-  `classes()`; on free-threaded builds the cached fragments are immortal.
-  A full cache is no longer read, so a call then costs what it costs to
-  build. `data.on` without modifiers and `data.init` are not cached:
-  building them costs no more than a lookup. A 100-row table with three
-  Datastar attributes per row: 240 µs instead of 335 µs (5.8.3) while the
-  caches have room, 332 µs instead of 344 µs once they are full (best of
-  seven interleaved runs). `data.on("input", at.get(url),
-  debounce="300ms")` takes 0.56 µs instead of 1.82 µs. `data.on` and
-  `data.init` without modifiers cost about 40–80 ns more than in 5.8.3:
-  a function that takes `*statements` is slower to call.
+  sent to Datastar in milliseconds. A number raises here: these are new.
 - **`stario.json.dumps_script(value)`**: JSON that is safe inside a
   `<script>`, with `<`, `>`, `&`, U+2028 and U+2029 escaped. Still valid
   JSON and JavaScript. `h.Script(dumps(data))` raises when the data holds
@@ -122,26 +102,26 @@ expression compiler for the Datastar ones).
 
 ### Changed
 
-- **`w.html(str)` and `sse.patch_elements(str)` raise.** A `str` is text
-  everywhere else in Stario (`h.Div(s)`), so here it cannot mean HTML.
-  Send `h.*` markup, or wrap finished HTML (a template engine's output)
-  in `SafeString`: `w.html(SafeString(template.render(...)))`. `bytes`
-  still go out as they are.
-- **`at.*(payload=)`: a dict is data, a `str` is one expression.**
-  `payload={"title": "Milk"}` sends the text Milk, as `headers=` and
-  `data.signals` already did; before, `Milk` was read as a JavaScript
-  variable. For values from the browser, pass one expression:
-  `payload="{id: $id, title: el.value}"` (a `str` used to fail with
-  `AttributeError`). `include=` or `exclude=` with `payload=` raises: the
-  payload replaces the signals, so the filter did nothing.
-- **A duration is a string with a unit, everywhere, and a number raises.**
-  `delay=`, `debounce=`, `throttle=`, `on_interval(duration=)`, the fetch
-  retry times and SSE `retry=` take `"300ms"` or `"2s"`. A bare number is
-  milliseconds to Datastar and seconds to Python, so `debounce=300` waited
-  five minutes and `on_interval(duration=500)` more than eight. The error
-  names both spellings (`'300ms'`, `'300s'`); `"1.5s"` raises with
-  `'1500ms'` (a dot splits Datastar modifiers). SSE `retry=3000` (ms) is
-  now `retry="3s"`.
+- **The same Datastar helper call returns the same fragment.** `data.on`
+  with modifiers, `data.bind`, `data.attr` and the `at.*` fetch actions
+  keep what they built in a bounded cache (4096 entries each), like
+  `classes()`; on free-threaded builds the cached fragments are immortal.
+  A full cache is no longer read, so a call then costs what it costs to
+  build. Calls that warn (see Deprecated) are not cached, so each one
+  warns. Best of seven runs against 5.8.3:
+
+  | | 5.8.3 | 5.9.0 |
+  |---|---|---|
+  | 100-row table, plain markup | 64 µs | 64 µs |
+  | 100-row table, a Datastar URL per row | 215 µs | 157 µs (208 µs with full caches) |
+  | 100-row table, the same attributes on each row | 183 µs | 97 µs (127 µs with full caches) |
+  | `at.post("/save")` | 684 ns | 225 ns |
+  | `data.on("input", ..., debounce="300ms")` | 1.0 µs | 0.35 µs |
+  | `data.on("click", "$a = 1")` | 344 ns | 430 ns |
+  | `data.init("$a = 1")` | 149 ns | 189 ns |
+
+  `data.on` and `data.init` without modifiers cost 40–90 ns more: a
+  function that takes `*statements` is slower to call.
 - **`include=` / `exclude=` names are exact signal paths.** `["id"]`
   matches `id` and `id.x`, not `video` or `form.idx`. A `str` is still a
   regex.
@@ -150,31 +130,45 @@ expression compiler for the Datastar ones).
   `exclude=` used to send `_` signals to the server. Stario now adds the
   default to your pattern. A slash-delimited pattern (`"/^secret/"`) keeps
   working: Stario strips the slashes, as Datastar does.
+- **A duration error names the fix:** `"1.5s"` (raised in 5.8 too) says
+  to write `'1500ms'`, because a dot splits Datastar modifiers.
+- **`data.class_`, `data.attr` and `data.style` refuse `__` in the name.**
+  It starts a Datastar modifier, so the rest changed how the attribute
+  worked.
 - **Datastar 1.0.5:** `ModuleScript()` loads `@v1.0.5` (bug fixes: `retry:
   'never'` stops, `data-bind` on number and date inputs).
 - **`debug_inspector()` lives in `stario.datastar`.** It shows Datastar
   signals, so it belongs with the other Datastar helpers. The name is the
   same; `from stario.debug import debug_inspector` still works and warns.
-
 - **`styles()` accepts `"`, `&`, `<` and `>` in a value:**
   `styles({"font-family": '"Inter", sans-serif'})` used to raise, because
   the `;` check ran on the escaped text (`&quot;`). `; { } \` still raise.
-- **A leading newline in `<textarea>`, `<pre>` and `<listing>` is kept.**
-  The HTML parser drops one newline after these start tags, so Stario
-  writes one more when the text starts with a newline.
-- **`literal()` writes NUL as `\x00`.** Inside an attribute the browser
-  turned it into U+FFFD.
-- **`@baked` raw-text slots follow a direct `h.Script(...)` call:** a
-  `SafeString` goes out unchecked, and an element raises (it used to render
-  its HTML into the script).
-- **`data.class_`, `data.attr` and `data.style` refuse `__` in the name.**
-  It starts a Datastar modifier, so the rest changed how the attribute
-  worked.
+- **A leading newline in `<textarea>`, `<pre>` and `<listing>` is kept**
+  when it is in a direct `str` child. The HTML parser drops one newline
+  after these start tags, so Stario writes one more.
 
 ### Deprecated
 
-Each warns with its replacement and goes in 6.0.
+Each one keeps its 5.8 behaviour, warns with the replacement (the warning
+points at your line), and goes in 6.0.
 
+- **A number as a duration** in `delay=`, `debounce=`, `throttle=`,
+  `on_interval(duration=)` and SSE `retry=`. It keeps its 5.8 meaning
+  (seconds; SSE `retry=` milliseconds): `debounce=250` still waits 250
+  seconds, and the warning says so. Write `"250ms"` or `"250s"`.
+- **A `str` value in a `payload=` dict.** It is still a JavaScript
+  expression; in 6.0 it becomes text. Write `payload=literal({"title":
+  title})` for data, or one expression, `payload="{id: $id}"`. A dict
+  without `str` values means the same in both and does not warn.
+- **`include=` / `exclude=` together with `payload=`**: the payload
+  replaces the signals, so the filter does nothing.
+- **`w.html(str)` and `sse.patch_elements(str)`**: a `str` is text
+  everywhere else in Stario (`h.Div(s)`). Send `h.*` markup, or wrap
+  finished HTML in `SafeString`: `w.html(SafeString(template.render(...)))`.
+  `bytes` go out as they are and do not warn.
+- **`expression=`** on `data.on`, `data.init`, `data.effect`,
+  `data.on_interval`, `data.on_intersect` and `data.on_signal_patch`: pass
+  the statement as an argument.
 - `at.get(url, queries)`: build the URL with `ROUTE.href(query={...})`. A
   `$signal` in `queries` was sent as the literal text.
 - `retry_interval_ms=` / `retry_max_wait_ms=`: `retry_interval="1s"`.
