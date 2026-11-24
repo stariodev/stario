@@ -99,6 +99,20 @@ expression compiler for the Datastar ones).
   `<script>`, with `<`, `>`, `&`, U+2028 and U+2029 escaped. Still valid
   JSON and JavaScript. `h.Script(dumps(data))` raises when the data holds
   `</script`; its error now names `dumps_script`.
+- **`stario.testing.check_pages(client)` and `check_page(client, url)`**:
+  `assert not await check_pages(client)` starts at `/` and at each GET route
+  without a path parameter, follows app links and redirects, and fails with
+  one line per problem: a 5xx (with the exception), a 4xx of a start page
+  or a link, two elements with one `id`, or more URLs than `limit=` (500).
+  A 4xx of a route that no page links to is no problem (a sign-in page).
+  `skip_errors=(httpx.ConnectError,)` skips pages that need a service the
+  test does not run; nothing is skipped by default. A URL that sends
+  nothing in `timeout=` (2 s) is a stream and is listed in `.skipped`.
+  `checks=` adds your own checks. No Datastar checks.
+- **A `PORT` warning at startup:** Stario still reads only `STARIO_PORT`.
+  When `PORT` is set to another port and `STARIO_PORT` is not, a
+  `RuntimeWarning` says that Stario listens on 8000 and names
+  `STARIO_PORT=$PORT`. `PORT=8000` does not warn.
 
 ### Changed
 
