@@ -50,22 +50,29 @@ def _finish_incomplete(w: Writer) -> None:
     w.respond(_INTERNAL_ERROR, _PLAIN, 500)
 
 
-def _answer_framework_exception(w: Writer, exc: BaseException) -> bool:
-    """Map Stario's own exceptions to a response; ``False`` = log + 500 path."""
+def _answer_framework_exception(w: Writer, exc: BaseException) -> BaseException | None:
+    """Map Stario's own exceptions to a response.
+
+    Returns ``None`` when answered, else the exception to log on the 500
+    path: ``exc`` itself, or the ``StarioError`` that answering raised (a
+    ``RedirectException`` with a bad location or status).
+    """
     try:
         if isinstance(exc, RedirectException):
             w.redirect(exc.location, exc.status_code)
-            return True
+            return None
         if isinstance(exc, RequestBodyError):
             if exc.status_code == 408:
                 # The upload stalled; the connection is not worth keeping
                 # (RFC 9110 15.5.9: a 408 carries the close option).
                 w.headers.set("connection", "close")
             w.text(exc.detail, exc.status_code)
-            return True
-    except StarioError:
-        return False
-    return False
+            return None
+    except StarioError as error:
+        # Log the error that names the fix (a bad location), not the bare
+        # RedirectException that led to it.
+        return error
+    return exc
 
 
 def finish_request_span(
@@ -107,7 +114,9 @@ def on_handler_done(c: Context, w: Writer, task: asyncio.Task[Any]) -> None:
     else:
         exc = task.exception()
         if exc is not None:
-            if w.started or not _answer_framework_exception(w, exc):
+            if not w.started:
+                exc = _answer_framework_exception(w, exc)
+            if exc is not None:
                 if record:
                     # The span carries status, message, and traceback.
                     span.fail(str(exc) or type(exc).__name__)

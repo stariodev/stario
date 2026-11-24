@@ -151,6 +151,11 @@ Use `uvloop.run(serve(bootstrap))` when you want uvloop. When no
 otherwise pass `config=ServerConfig(host="0.0.0.0", port=9000)`.
 `Server` takes a `ServerConfig` object.
 
+Stario reads only `STARIO_*` variables. The port is `STARIO_PORT`, else 8000;
+the host is `STARIO_HOST`, else `127.0.0.1`. A platform that sets `PORT` needs
+`STARIO_PORT=$PORT` and `STARIO_HOST=0.0.0.0`. When `PORT` is set to another
+port and `STARIO_PORT` is not, startup warns with this fix.
+
 Install with `pip install stario` if you are not using uv. During startup, `bootstrap` runs until its single `yield`: register routes and attach attributes to `span` before `yield`; put teardown after `yield` when needed. Server runtime policy (`STARIO_HOST`, `STARIO_PORT`, `STARIO_TRACER`, and related vars) is configured through environment variables — see `ServerConfig.from_env` (Stario does not load `.env` files; export vars in your shell or use your own dotenv tooling). See [Getting started](https://stario.dev/docs) for project layout. For containers, TLS, and production-oriented setup, see [Deployment, containers, and TLS](https://stario.dev/docs/how-tos/deployment-containers-and-tls).
 
 ### Filesystem URLs

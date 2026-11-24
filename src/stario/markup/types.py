@@ -25,6 +25,7 @@ __all__ = [
     "SafeString",
     "StyleDeclarations",
     "StyleValue",
+    "TagAttributeValue",
     "TagAttributes",
 ]
 
@@ -42,12 +43,28 @@ type StyleDeclarations = Mapping[str, StyleValue | Omitted]
 # Class tokens are wire names (escaped); conditionals use truthy mapping values.
 type ClassInput = str | Omitted | Mapping[str, Any]
 
-# Tag call arguments
-type TagAttributes = Mapping[str, AttributeValue] | Attrs
+# Tag call arguments. A mapping value may also be an `Attrs` fragment for that
+# one attribute: `{"class": classes("card", {"on": active})}`.
+type TagAttributeValue = AttributeValue | Attrs
+type TagAttributes = Mapping[str, TagAttributeValue] | Attrs
 
 # Render tree node built by a Tag call (kept under its older alias too).
 type HtmlElementTuple = Element
-type HtmlElement = str | int | float | SafeString | list[HtmlElement] | Element | None
+# `list[Element]` and `list[str]` are spelled out: `list` is invariant, so a
+# variable `items = [h.Li(t) for t in tags]` (a `list[Element]`) would not
+# pass as `list[HtmlElement]`. With them it passes wherever `HtmlElement` is
+# expected: a child, or a function annotated `-> HtmlElement`.
+type HtmlElement = (
+    str
+    | int
+    | float
+    | SafeString
+    | Element
+    | list[HtmlElement]
+    | list[Element]
+    | list[str]
+    | None
+)
 
 
 def Comment(

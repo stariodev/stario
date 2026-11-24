@@ -150,3 +150,39 @@ def test_removed_verb_helpers() -> None:
 def test_removed_shim_modules(removed_module: str) -> None:
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module(removed_module)
+
+
+def test_root_reexports_markup_not_datastar() -> None:
+    """The root carries Stario's own markup names; Datastar stays in its package."""
+    import stario
+    import stario.markup
+
+    for name in ("HtmlElement", "SafeString", "baked", "render", "classes"):
+        assert getattr(stario, name) is getattr(stario.markup, name)
+    datastar_names = {"at", "data", "SSE", "read_signals", "is_datastar", "literal"}
+    assert not datastar_names & set(stario.__all__)
+    assert not any(hasattr(stario, name) for name in datastar_names)
+
+
+def test_server_config_from_stario_http() -> None:
+    import stario
+    import stario.http
+
+    assert stario.http.ServerConfig is stario.ServerConfig
+
+
+def test_root_import_in_a_fresh_interpreter() -> None:
+    import subprocess
+    import sys
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from stario import App, h\n"
+            "from stario.datastar import SSE, at, data, read_signals\n"
+            "from stario.http import ServerConfig\n"
+            "assert 'data-on:click' in data.on('click', at.post('/x')).rendered\n",
+        ],
+        check=True,
+    )

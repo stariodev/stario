@@ -4,6 +4,8 @@ Body and header size defaults for `RequestPolicy` are defined in `request.py`;
 this module re-exports them for env wiring.
 """
 
+import os
+import warnings
 from collections.abc import Callable
 from pathlib import Path
 from ssl import SSLContext
@@ -298,8 +300,29 @@ class ServerConfig:
         return server_config_from_env()
 
 
+def _warn_unread_port() -> None:
+    # Stario never reads PORT. A platform that sets it (Heroku, Render,
+    # Railway, Cloud Run) waits on that port, so say so instead of failing a
+    # health check without a word. PORT=8000 is the port Stario takes anyway.
+    port = os.environ.get("PORT", "").strip()
+    if port and port != str(DEFAULT_PORT) and not os.environ.get("STARIO_PORT"):
+        warnings.warn(
+            f"PORT={port} is set, but Stario reads only STARIO_PORT and "
+            f"listens on {DEFAULT_PORT}. To use the platform's port, set "
+            "STARIO_PORT=$PORT (and STARIO_HOST=0.0.0.0 to accept outside "
+            "connections).",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+
 def server_config_from_env() -> ServerConfig:
-    """Read `STARIO_*` listen, limit, compression, and shutdown settings."""
+    """Read `STARIO_*` listen, limit, compression, and shutdown settings.
+
+    `PORT` is not read. When it is set to another port and `STARIO_PORT` is
+    not set, a `RuntimeWarning` names the fix.
+    """
+    _warn_unread_port()
     return _config_from_env(
         lambda: ServerConfig(
             host=env_str("STARIO_HOST", DEFAULT_HOST),

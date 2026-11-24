@@ -86,8 +86,16 @@ class Writer(Protocol):
         """Serialize `value` to compact UTF-8 JSON and finish the response."""
         ...
 
-    def html(self, content: bytes | str | HtmlElement, status: int = 200) -> None:
-        """Send `bytes`, `str`, or markup nodes as ``text/html``."""
+    def html(
+        self,
+        content: bytes | HtmlElement,
+        status: int = 200,
+    ) -> None:
+        """Send markup nodes, a ``SafeString``, or ``bytes`` as ``text/html``.
+
+        A plain ``str`` raises: it is text everywhere else, so finished HTML
+        says so with ``SafeString(page)``.
+        """
         ...
 
     def redirect(self, url: str, status: int = 307) -> None:
