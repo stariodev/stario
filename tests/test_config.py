@@ -1,5 +1,7 @@
 """Tests for HTTP server configuration validation."""
 
+import warnings
+
 import pytest
 
 from stario.exceptions import StarioError
@@ -83,7 +85,24 @@ def test_plain_port_is_not_read(monkeypatch) -> None:
     # Stario reads STARIO_* only: a platform's PORT goes in as STARIO_PORT=$PORT.
     monkeypatch.delenv("STARIO_PORT", raising=False)
     monkeypatch.setenv("PORT", "9555")
-    assert ServerConfig.from_env().port == 8000
+    with pytest.warns(RuntimeWarning, match=r"PORT=9555 is set.*STARIO_PORT=\$PORT"):
+        assert ServerConfig.from_env().port == 8000
+
+
+@pytest.mark.parametrize(
+    ("port", "stario_port"), [("8000", None), ("", None), ("9555", "9555")]
+)
+def test_port_that_changes_nothing_does_not_warn(
+    monkeypatch, port: str, stario_port: str | None
+) -> None:
+    monkeypatch.setenv("PORT", port)
+    if stario_port is None:
+        monkeypatch.delenv("STARIO_PORT", raising=False)
+    else:
+        monkeypatch.setenv("STARIO_PORT", stario_port)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        ServerConfig.from_env()
 
 
 def test_bad_port_names_the_variable(monkeypatch) -> None:
