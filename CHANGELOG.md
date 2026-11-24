@@ -4,7 +4,7 @@ All notable changes to Stario are documented in this file.
 
 The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## 5.9.0 - Unreleased
+## 5.9.0 - 2026-11-24
 
 Safer escaping, Datastar helpers that say when a call cannot mean what it
 looks like, and faster Datastar pages. A changed behaviour that an app
